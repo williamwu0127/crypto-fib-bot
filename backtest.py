@@ -34,7 +34,6 @@ STOCK_SYMBOLS = {
 
 def get_crypto_data(cfg):
     try:
-        # 透過幣安 API 抓取最大支援的 15m 歷史數據（約 1 年期）
         url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=35000"
         res = requests.get(url, timeout=12).json()
         if isinstance(res, list) and len(res) >= 100:
@@ -50,7 +49,6 @@ def get_crypto_data(cfg):
 
 def get_stock_data(cfg):
     try:
-        # 美股與商品使用 yfinance 支援的最久 15m 高頻數據（59天）
         df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
         if df is not None and not df.empty and len(df) >= 50:
             if isinstance(df.columns, pd.MultiIndex):
@@ -188,6 +186,10 @@ def run_backtest():
     crypto_range, c_init, c_bal, c_pl, c_trades, c_win_rate, crypto_reports = run_group_backtest(CRYPTO_SYMBOLS, get_crypto_data)
     stock_range, s_init, s_bal, s_pl, s_trades, s_win_rate, stock_reports = run_group_backtest(STOCK_SYMBOLS, get_stock_data)
 
+    s_trades_str = str(c_trades)
+    s_win_rate_str = str(round(c_win_rate, 1))
+    line1 = "總交易次數: " + s_trades_str + " 次 | 綜合勝率: " + s_win_rate_str + "%"
+
     msg1 = "\n".join([
         "📊 **[加密貨幣專區 - 1年期 15m 複利回測]**",
         "```text",
@@ -195,4 +197,6 @@ def run_backtest():
         "回測區間: " + crypto_range,
         "初始資金: $" + str(round(c_init, 2)) + " USDT",
         "最終結餘: $" + str(round(c_bal, 2)) + " USDT (" + str(round(c_pl, 2)) + "%)",
-        "總交易次數: " + str(c_trades) + " 次 | 綜合勝率: " + str(round(c
+        line1,
+        "----------------------------------------------------",
+        
