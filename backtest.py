@@ -42,7 +42,6 @@ def get_historical_data(cfg):
                 df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         else:
-            # 針對 yfinance 15m 數據，安全天數設為 59 天以內避免 Yahoo API 拒絕回應
             df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
             if df is not None and not df.empty and len(df) >= 50:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -93,10 +92,18 @@ def run_backtest():
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
         df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
+        is_stock = (cfg['t'] == 'stock' and sym != 'XAU')
+
         for i in range(50, len(df) - 15):
             bar = df.iloc[i]
             prev_bar = df.iloc[i-1]
             
+            # 美股時段過濾：限定台灣時間 22:30 到 03:00 之間（小時數 22, 23, 0, 1, 2, 3）
+            if is_stock:
+                hour = bar['timestamp'].hour
+                if not (22 <= hour or hour <= 3):
+                    continue
+
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
@@ -111,7 +118,9 @@ def run_backtest():
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
             
             if cond_long:
-                sl = min(l, entry_price - (bar['atr'] * 1.5))
+                # 美股使用較精準的 1.2 倍 ATR 防守，加密貨幣維持 1.5 倍
+                atr_mult = 1.2 if is_stock else 1.5
+                sl = min(l, entry_price - (bar['atr'] * atr_mult))
                 tp1 = entry_price + abs(entry_price - sl)
                 
                 outcome = None
@@ -166,7 +175,7 @@ def run_backtest():
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[伺服器原版策略 60天高頻回測報告]**",
+        "📊 **[美股開盤時段過濾 + 複利滾動回測報告]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
