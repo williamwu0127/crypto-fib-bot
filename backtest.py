@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "你的Discord網址")
 
 CRYPTO_SYMBOLS = {
     'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
@@ -128,4 +128,72 @@ def run_group_backtest(symbols_dict, data_fetch_func):
                         outcome = 'LOSS'
                         exit_idx = i + j
                         break
-                    elif future
+                    elif future_bar['h'] >= tp1:
+                        outcome = 'WIN'
+                        exit_idx = i + j
+                        break
+                if outcome:
+                    all_trades.append({
+                        'sym': sym,
+                        'time': bar['timestamp'],
+                        'outcome': outcome
+                    })
+
+    all_trades = sorted(all_trades, key=lambda x: x['time'])
+    initial_balance = 100.0
+    balance = initial_balance
+    total_trades = 0
+    total_wins = 0
+
+    for trade in all_trades:
+        current_risk = balance * 0.01
+        total_trades += 1
+        symbol_stats[trade['sym']]['trades'] += 1
+        if trade['outcome'] == 'WIN':
+            balance += current_risk * 1.5
+            total_wins += 1
+            symbol_stats[trade['sym']]['wins'] += 1
+        else:
+            balance -= current_risk
+
+    reports = []
+    for sym, stats in symbol_stats.items():
+        t_cnt = stats['trades']
+        w_cnt = stats['wins']
+        w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
+        if t_cnt > 0:
+            reports.append(f"{sym} | 交易: {t_cnt}次 | 勝率: {round(w_rate, 1)}%")
+
+    overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+    profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
+    time_range_str = f"{str(min_time).split()[0]} ~ {str(max_time).split()[0]}" if min_time and max_time else "N/A"
+
+    return time_range_str, initial_balance, balance, profit_loss_pct, total_trades, overall_win_rate, reports
+
+def run_backtest():
+    crypto_range, c_init, c_bal, c_pl, c_trades, c_win_rate, crypto_reports = run_group_backtest(CRYPTO_SYMBOLS, get_crypto_data)
+    stock_range, s_init, s_bal, s_pl, s_trades, s_win_rate, stock_reports = run_group_backtest(STOCK_SYMBOLS, get_stock_data)
+
+    crypto_text = "\n".join(crypto_reports)
+    stock_text = "\n".join(stock_reports)
+
+    msg1 = (
+        "📊 **[加密貨幣專區 - 15m 複利回測]**\n"
+        "```text\n"
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
+        "回測區間: " + crypto_range + "\n"
+        "初始資金: $" + str(round(c_init, 2)) + " USDT\n"
+        "最終結餘: $" + str(round(c_bal, 2)) + " USDT (" + str(round(c_pl, 2)) + "%)\n"
+        "總交易次數: " + str(c_trades) + " 次 | 綜合勝率: " + str(round(c_win_rate, 1)) + "%\n"
+        "----------------------------------------------------\n"
+        + crypto_text + "\n"
+        "```"
+    )
+
+    msg2 = (
+        "📊 **[美股與商品專區 - 15m 複利回測]**\n"
+        "```text\n"
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
+        "回測區間: " + stock_range + "\n"
+        "初始資金: $" + str(round(s_init, 2)) + " USDT\n"
+        "最終結餘: $" + str(round(s_bal, 2)) + " USDT (" +
