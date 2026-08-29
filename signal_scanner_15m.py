@@ -4,39 +4,128 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import ccxt
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+
 ACCOUNT_BALANCE = 100.0   # 帳戶本金 100 USDT
 RISK_PER_TRADE = 1.0      # 單筆固定 1% 風控 ($1.0 USDT)
 
-# 20 檔標的與幣安合約專用槓桿配置 (加密/商品 100x，美股 20x)
+# 20 檔標的與幣安合約專用配置 (加密貨幣 trade=True 支援實盤自動下單)
 SYMBOLS = {
     # 1. 主流加密貨幣 (Binance 100x)
-    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
-    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
-    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
-    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
-    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0, 'cat': '加密貨幣 (100x)'},
+    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'ccxt_s': 'BTC/USDT:USDT',  'lev': 100.0, 'cat': '加密貨幣', 'trade': True},
+    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'ccxt_s': 'ETH/USDT:USDT',  'lev': 100.0, 'cat': '加密貨幣', 'trade': True},
+    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'ccxt_s': 'SOL/USDT:USDT',  'lev': 100.0, 'cat': '加密貨幣', 'trade': True},
+    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'ccxt_s': 'BNB/USDT:USDT',  'lev': 100.0, 'cat': '加密貨幣', 'trade': True},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'ccxt_s': 'DOGE/USDT:USDT', 'lev': 100.0, 'cat': '加密貨幣', 'trade': True},
     
     # 2. 大宗商品 & 貴金屬 (Binance 100x)
-    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0, 'cat': '貴金屬 (100x)'},
-    'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0, 'cat': '原油商品 (100x)'},
+    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'ccxt_s': 'PAXG/USDT:USDT', 'lev': 100.0, 'cat': '貴金屬', 'trade': False},
+    'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0, 'cat': '原油商品', 'trade': False},
     
-    # 3. 美股龍頭 (Binance 20x)
-    'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'MSFT': {'t': 'stock',   's': 'MSFT',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'AAPL': {'t': 'stock',   's': 'AAPL',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'GOOGL':{'t': 'stock',   's': 'GOOGL',    'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'AMZN': {'t': 'stock',   's': 'AMZN',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'META': {'t': 'stock',   's': 'META',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'TSLA': {'t': 'stock',   's': 'TSLA',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'MU':   {'t': 'stock',   's': 'MU',       'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'GLW':  {'t': 'stock',   's': 'GLW',      'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'SPCX': {'t': 'stock',   's': 'SPCX',     'lev': 20.0,  'cat': '美股合約 (20x)'},
-    'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0,  'cat': '美股合約 (20x)'}
+    # 3. 美股龍頭 (Binance 20x / 僅推播)
+    'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'MSFT': {'t': 'stock',   's': 'MSFT',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'AAPL': {'t': 'stock',   's': 'AAPL',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'GOOGL':{'t': 'stock',   's': 'GOOGL',    'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'AMZN': {'t': 'stock',   's': 'AMZN',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'META': {'t': 'stock',   's': 'META',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'TSLA': {'t': 'stock',   's': 'TSLA',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'MU':   {'t': 'stock',   's': 'MU',       'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'GLW':  {'t': 'stock',   's': 'GLW',      'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'SPCX': {'t': 'stock',   's': 'SPCX',     'lev': 20.0,  'cat': '美股代幣', 'trade': False},
+    'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0,  'cat': '美股代幣', 'trade': False}
 }
+
+def get_binance_client():
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return None
+    return ccxt.binance({
+        'apiKey': BINANCE_API_KEY,
+        'secret': BINANCE_API_SECRET,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'}
+    })
+
+def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, tp2_price):
+    """市價開倉，並自動掛上 SL (100%)、TP1 (50%)、TP2 (50%)"""
+    if not cfg.get('trade', False):
+        return "僅推播 (未開啟實盤)"
+    
+    exchange = get_binance_client()
+    if exchange is None:
+        return "未配置 API Key"
+
+    market_sym = cfg.get('ccxt_s', sym_key + '/USDT:USDT')
+    try:
+        exchange.load_markets()
+        market = exchange.market(market_sym)
+
+        # 1. 設定槓桿倍數
+        exchange.set_leverage(int(cfg['lev']), market_sym)
+
+        # 2. 計算開倉數量 (鎖定 $1.0 USDT 風控)
+        sl_pct = abs(entry_price - sl_price) / entry_price
+        sl_pct = max(sl_pct, 0.002)
+        pos_notional = RISK_PER_TRADE / sl_pct
+        raw_qty = pos_notional / entry_price
+        
+        # 數量精度對齊
+        qty = float(exchange.amount_to_precision(market_sym, raw_qty))
+        
+        # 幣安最小名義金額防護 (至少 5 USDT)
+        if qty * entry_price < 5.0:
+            return "開倉價值低於 5U 限制"
+
+        # 3. 市價開倉
+        order_side = 'buy' if side == 'LONG' else 'sell'
+        close_side = 'sell' if side == 'LONG' else 'buy'
+        
+        entry_res = exchange.create_order(symbol=market_sym, type='market', side=order_side, amount=qty)
+        order_id = entry_res.get('id', 'N/A')
+
+        # 4. 掛全倉 SL 條件止損單 (Stop-Market / 100% 倉位)
+        sl_p_str = float(exchange.price_to_precision(market_sym, sl_price))
+        exchange.create_order(
+            symbol=market_sym,
+            type='STOP_MARKET',
+            side=close_side,
+            amount=qty,
+            params={'stopPrice': sl_p_str, 'reduceOnly': True}
+        )
+
+        # 5. 掛 TP1 條件止盈單 (Take-Profit-Market / 50% 倉位)
+        tp1_qty = float(exchange.amount_to_precision(market_sym, qty * 0.5))
+        if tp1_qty > 0:
+            tp1_p_str = float(exchange.price_to_precision(market_sym, tp1_price))
+            exchange.create_order(
+                symbol=market_sym,
+                type='TAKE_PROFIT_MARKET',
+                side=close_side,
+                amount=tp1_qty,
+                params={'stopPrice': tp1_p_str, 'reduceOnly': True}
+            )
+
+        # 6. 掛 TP2 條件止盈單 (Take-Profit-Market / 剩餘 50% 倉位)
+        tp2_qty = float(exchange.amount_to_precision(market_sym, qty - tp1_qty))
+        if tp2_qty > 0:
+            tp2_p_str = float(exchange.price_to_precision(market_sym, tp2_price))
+            exchange.create_order(
+                symbol=market_sym,
+                type='TAKE_PROFIT_MARKET',
+                side=close_side,
+                amount=tp2_qty,
+                params={'stopPrice': tp2_p_str, 'reduceOnly': True}
+            )
+
+        return "下單成功 (ID: %s | SL/TP1/TP2 已掛)" % str(order_id)
+    except Exception as e:
+        return "下單失敗: " + str(e)
 
 def send_discord(content):
     if not DISCORD_WEBHOOK_URL:
@@ -59,7 +148,6 @@ def get_latest_data(cfg):
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                
                 dt_tw = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 df['time'] = dt_tw.dt.strftime('%H:%M')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']]
@@ -69,17 +157,12 @@ def get_latest_data(cfg):
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
-                
                 req_cols = ['open', 'high', 'low', 'close', 'volume']
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    
                     idx = df.index
-                    if idx.tz is None:
-                        dt_tw = idx.tz_localize('UTC').tz_convert('Asia/Taipei')
-                    else:
-                        dt_tw = idx.tz_convert('Asia/Taipei')
+                    dt_tw = idx.tz_localize('UTC').tz_convert('Asia/Taipei') if idx.tz is None else idx.tz_convert('Asia/Taipei')
                     res_df['time'] = dt_tw.strftime('%H:%M')
                     return res_df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
     except Exception as e:
@@ -114,7 +197,7 @@ def scan_symbol(sym, cfg):
 
     trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
     market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
-    status_summary = "%-5s | 現價: %8.2f USDT| EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
+    status_summary = "%-5s | 價: %8.2f | EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
 
     if wave <= 0 or (wave / l) < 0.005:
         return None, status_summary
@@ -156,6 +239,8 @@ def scan_symbol(sym, cfg):
         lev = cfg['lev']
         margin_req = pos_val / lev
 
+        order_status = execute_binance_order(sym, cfg, side, entry_price, sl, tp1, tp2)
+
         return {
             'sym': sym,
             'cat': cfg['cat'],
@@ -169,6 +254,7 @@ def scan_symbol(sym, cfg):
             'sl_pct': sl_pct * 100,
             'pos_val': pos_val,
             'margin': margin_req,
+            'order_status': order_status,
             'rsi': bar['rsi']
         }, status_summary
 
@@ -189,29 +275,42 @@ def main():
     if detected_signals:
         for s in detected_signals:
             side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
+            pos_v = s['pos_val']
+            sl_p = s['sl_pct']
+
+            # 計算各槓桿保證金與本金損耗
+            m10, loss10 = pos_v / 10.0, sl_p * 10.0
+            m20, loss20 = pos_v / 20.0, sl_p * 20.0
+            m50, loss50 = pos_v / 50.0, min(sl_p * 50.0, 100.0)
+            m100, loss100 = pos_v / 100.0, min(sl_p * 100.0, 100.0)
+
             price_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
             
+            # 經典推播格式 (含多槓桿保證金對比 + 實盤狀態)
             msg = (
-                "%s **%s** (%s)\n"
+                "%s **%s** (15m 趨勢觸發)\n"
                 "```text\n"
                 "進場時間 : %s (台灣時間)\n"
                 "進場價格 : $%s\n"
-                "停損價格 : $%s (-%.2f%% | ATR 緩衝防插針)\n"
-                "第一目標 : $%s (Fib 0.382 | 平倉50%% + 設保本損)\n"
-                "終極目標 : $%s (前波極值 | 全平)\n"
+                "停損價格 : $%s (-%.2f%% | 100%% 止損)\n"
+                "第一目標 : $%s (Fib 0.382 | 50%% 止盈)\n"
+                "終極目標 : $%s (前波極值 | 50%% 止盈)\n"
                 "----------------------------------------------------\n"
-                "幣安合約參數設定 (固定風控 $1.0 USDT):\n"
-                "• 槓桿倍數 : %dx 槓桿\n"
-                "• 名義開倉 : $%5.1f USDT\n"
-                "• 應押保證金: $%5.2f USDT (佔帳戶 %.2f%%)\n"
+                "各槓桿所需保證金與損耗比 (固定風控 $1.0 USDT):\n"
+                "• 10x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
+                "• 20x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
+                "• 50x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
+                "• 100x : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
                 "----------------------------------------------------\n"
+                "實盤執行 : %s\n"
                 "指標數據 : RSI(14) = %.1f\n"
                 "```" % (
-                    side_tag, s['sym'], s['cat'],
+                    side_tag, s['sym'],
                     s['time'],
                     price_fmt % s['entry'], price_fmt % s['sl'], s['sl_pct'],
                     price_fmt % s['tp1'], price_fmt % s['tp2'],
-                    s['lev'], s['pos_val'], s['margin'], (s['margin'] / ACCOUNT_BALANCE) * 100,
+                    m10, loss10, m20, loss20, m50, loss50, m100, loss100,
+                    s['order_status'],
                     s['rsi']
                 )
             )
