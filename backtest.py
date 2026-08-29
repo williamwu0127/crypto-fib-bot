@@ -66,29 +66,23 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     records = []
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=FETCH_LIMIT)
-        if not ohlcv or len(ohlcv) < 100:
+        if not ohlcv or len(ohlcv) < 60:
             return records
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
         df['rsi'] = calculate_rsi(df['close'], period=14)
-        df['vol_sma'] = df['volume'].rolling(window=20).mean()
-        df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
         df['atr'] = calculate_atr(df, period=14)
+        
+        # 布林通道 (20, 2.0)
+        df['bb_mid'] = df['close'].rolling(20).mean()
+        df['bb_std'] = df['close'].rolling(20).std()
+        df['bb_upper'] = df['bb_mid'] + (df['bb_std'] * 2.0)
+        df['bb_lower'] = df['bb_mid'] - (df['bb_std'] * 2.0)
 
-        i = 50
+        i = 30
         while i < len(df) - 1:
-            sub_df = df.iloc[:i+1]
-            swing_high = sub_df['high'][-40:].max()
-            swing_low = sub_df['low'][-40:].min()
-            wave_range = swing_high - swing_low
-
-            if wave_range <= 0:
-                i += 1
-                continue
-
-            candle = sub_df.iloc[-1]
+            candle = df.iloc[i]
             entry_price = candle['close']
             atr_val = candle['atr'] if not np.isnan(candle['atr']) else entry_price * 0.005
 
@@ -96,38 +90,23 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
             upper_wick = candle['high'] - max(candle['open'], candle['close'])
             body_size = abs(candle['close'] - candle['open'])
 
-            # ================= 順勢多單 (EMA 50 > EMA 200 且 價格 > EMA 200) =================
-            is_uptrend = candle['close'] > candle['ema_50'] or candle['ema_50'] > candle['ema_200']
-            fib_0618_long = swing_high - (wave_range * 0.618)
-            fib_0382_long = swing_high - (wave_range * 0.382)
+            # 多單訊號：觸及/跌破布林下軌 + RSI 超賣 (<= 38) + 下影線承接或陽線收復
+            long_signal = (candle['low'] <= candle['bb_lower']) and (candle['rsi'] <= 38) and ((lower_wick >= body_size * 0.7) or (candle['close'] > candle['open']))
             
-            long_zone = (candle['low'] <= fib_0618_long * 1.002) and (candle['close'] >= fib_0618_long * 0.996)
-            long_rsi = candle['rsi'] <= 48
-            long_vol = candle['volume'] >= (candle['vol_sma'] * 1.2)
-            long_rejection = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
-
-            # ================= 順勢空單 (EMA 50 < EMA 200 且 價格 < EMA 200) =================
-            is_downtrend = candle['close'] < candle['ema_50'] or candle['ema_50'] < candle['ema_200']
-            fib_0618_short = swing_low + (wave_range * 0.618)
-            fib_0382_short = swing_low + (wave_range * 0.382)
-            
-            short_zone = (candle['high'] >= fib_0618_short * 0.998) and (candle['close'] <= fib_0618_short * 1.004)
-            short_rsi = candle['rsi'] >= 52
-            short_vol = candle['volume'] >= (candle['vol_sma'] * 1.2)
-            short_rejection = (upper_wick >= body_size * 0.8) or (candle['close'] < candle['open'])
+            # 空單訊號：觸及/突破布林上軌 + RSI 超買 (>= 62) + 上影線承壓或陰線回落
+            short_signal = (candle['high'] >= candle['bb_upper']) and (candle['rsi'] >= 62) and ((upper_wick >= body_size * 0.7) or (candle['close'] < candle['open']))
 
             trade_side = None
-            if is_uptrend and long_zone and long_rsi and long_vol and long_rejection:
+            if long_signal:
                 trade_side = "LONG"
-                stop_loss = candle['low'] - (atr_val * 1.2)
-                tp_1 = fib_0382_long if fib_0382_long > entry_price else swing_high
-                tp_2 = swing_high
-
-            elif is_downtrend and short_zone and short_rsi and short_vol and short_rejection:
+                stop_loss = candle['low'] - (atr_val * 1.5)
+                tp_1 = candle['bb_mid']
+                tp_2 = candle['bb_upper']
+            elif short_signal:
                 trade_side = "SHORT"
-                stop_loss = candle['high'] + (atr_val * 1.2)
-                tp_1 = fib_0382_short if fib_0382_short < entry_price else swing_low
-                tp_2 = swing_low
+                stop_loss = candle['high'] + (atr_val * 1.5)
+                tp_1 = candle['bb_mid']
+                tp_2 = candle['bb_lower']
 
             if trade_side:
                 outcome = "HOLDING"
@@ -165,7 +144,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                     'Result': outcome
                 })
 
-                i += max(bars_held, 3)
+                i += max(bars_held, 2)
             else:
                 i += 1
 
@@ -175,7 +154,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 執行「順勢量能 + ATR 動態止損」回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 執行「布林通道 + RSI 極值 + ATR 防守」7 天回測...**")
     
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
@@ -190,7 +169,7 @@ def main():
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪回測未觸發符合高質量順勢條件之訊號。")
+        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪未產生訊號。")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -209,7 +188,7 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 順勢 EMA + ATR 動態防守回測 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 布林極值反轉 7 天回測報告 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
@@ -217,12 +196,12 @@ def main():
         f"SL 停損離場 : {sl_count} 次\n"
         f"持倉/未觸發 : {holding_count} 次\n"
         f"----------------------------------------\n"
-        f"近期高質量交易明細:\n"
+        f"近期交易明細:\n"
         f"{trade_details}"
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== 高質量順勢回測完成 ===")
+    print("=== 回測完成 ===")
 
 if __name__ == '__main__':
     main()
