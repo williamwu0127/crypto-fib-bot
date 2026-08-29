@@ -39,7 +39,9 @@ def get_historical_data(cfg):
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                return df[['o', 'h', 'l', 'c', 'v']]
+                # 統一時間格式為 datetime
+                df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
+                return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         else:
             df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
             if df is not None and not df.empty and len(df) >= 100:
@@ -50,18 +52,17 @@ def get_historical_data(cfg):
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    res_df['timestamp'] = df.index
                     return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
 
 def run_backtest():
-    initial_balance = 100.0
-    balance = initial_balance
-    total_trades = 0
-    total_wins = 0
-    symbol_reports = []
+    all_trades = []
+    symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in SYMBOLS.keys()}
 
+    # 1. 收集所有標的的符合條件交易訊號
     for sym, cfg in SYMBOLS.items():
         df = get_historical_data(cfg)
         if df is None or len(df) < 100:
@@ -77,14 +78,8 @@ def run_backtest():
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
 
-        sym_trades = 0
-        sym_wins = 0
-
-        # 保留足夠空間檢查未來 K 線
         for i in range(50, len(df) - 15):
-            current_risk = balance * 0.01
             bar = df.iloc[i]
-            
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
@@ -101,38 +96,63 @@ def run_backtest():
                 sl = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1 = entry_price + abs(entry_price - sl)
                 
-                # 檢查未來 10 根 K 線內是先打到 TP 還是 SL
-                trade_won = False
-                hit_target = False
+                # 尋找未來 10 根 K 線內的結果
+                outcome = None
+                exit_idx = i
                 for j in range(1, 11):
                     future_bar = df.iloc[i + j]
-                    # 優先檢查是否觸發止損
                     if future_bar['l'] <= sl:
-                        balance -= current_risk
-                        hit_target = True
+                        outcome = 'LOSS'
+                        exit_idx = i + j
                         break
-                    # 檢查是否觸發止盈
                     elif future_bar['h'] >= tp1:
-                        balance += current_risk * 1.5
-                        trade_won = True
-                        hit_target = True
+                        outcome = 'WIN'
+                        exit_idx = i + j
                         break
                 
-                if hit_target:
-                    total_trades += 1
-                    sym_trades += 1
-                    if trade_won:
-                        total_wins += 1
-                        sym_wins += 1
+                if outcome:
+                    all_trades.append({
+                        'sym': sym,
+                        'time': bar['timestamp'],
+                        'exit_time': df.iloc[exit_idx]['timestamp'],
+                        'outcome': outcome
+                    })
 
-        win_rate = (sym_wins / sym_trades * 100) if sym_trades > 0 else 0
-        symbol_reports.append(sym + " | 交易: " + str(sym_trades) + "次 | 勝率: " + str(round(win_rate, 1)) + "%")
+    # 2. 嚴格依照時間順序（Timeline）排列所有交易
+    all_trades = sorted(all_trades, key=lambda x: x['time'])
+
+    # 3. 依序跑複利滾動模擬
+    initial_balance = 100.0
+    balance = initial_balance
+    total_trades = 0
+    total_wins = 0
+
+    for trade in all_trades:
+        current_risk = balance * 0.01  # 當下最新結餘的 1% 風控
+        total_trades += 1
+        symbol_stats[trade['sym']]['trades'] += 1
+
+        if trade['outcome'] == 'WIN':
+            balance += current_risk * 1.5
+            total_wins += 1
+            symbol_stats[trade['sym']]['wins'] += 1
+        else:
+            balance -= current_risk
+
+    # 4. 組合報告
+    symbol_reports = []
+    for sym, stats in symbol_stats.items():
+        t_cnt = stats['trades']
+        w_cnt = stats['wins']
+        w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
+        if t_cnt > 0:
+            symbol_reports.append(sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%")
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[優化後 20檔標的 15m 回測報告]**",
+        "📊 **[時間軸排序 + 複利滾動 15m 回測報告]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
