@@ -32,7 +32,7 @@ SYMBOLS = {
 def get_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=1000"
+            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 100:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -111,7 +111,7 @@ def run_backtest():
                     sym_wins += 1
 
         win_rate = (sym_wins / sym_trades * 100) if sym_trades > 0 else 0
-        symbol_reports.append(f"{sym:5s} | 交易: {sym_trades:2d}次 | 勝率: {win_rate:5.1f}%")
+        symbol_reports.append(sym + " | 交易: " + str(sym_trades) + "次 | 勝率: " + "%.1f" % win_rate + "%")
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
@@ -119,8 +119,8 @@ def run_backtest():
     report = [
         "📊 **[20檔標的 15m 綜合回測報告]**",
         "```text",
-        f"初始資金: ${initial_balance:.2f} USDT \vert{} 最終結餘: ${balance:.2f} USDT ({profit_loss_pct:+.2f}%)",
-        f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.1f}%",
+        "初始資金: $" + ("\%.2f" \% initial_balance) + " USDT \vert{} 最終結餘: $" + ("%.2f" % balance) + " USDT (" + ("%+.2f" % profit_loss_pct) + "%)",
+        "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + ("%.1f" % overall_win_rate) + "%",
         "----------------------------------------------------",
         "\n".join(symbol_reports),
         "```"
