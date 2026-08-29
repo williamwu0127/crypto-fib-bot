@@ -277,18 +277,12 @@ def scan_symbol(sym, cfg, exchange, current_risk):
     if cond_long and (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and rsi_bull:
         side = "LONG"
         sl = min(l, entry_price - (atr_val * 1.5))
-        tp1 = fib_0382_l
-        # 🛡️ 防護：確保多頭第一止盈大於進場價 (至少給予 1:1 風險報酬或 1 倍 ATR 空間)
-        if tp1 <= entry_price:
-            tp1 = entry_price + max(abs(entry_price - sl), atr_val * 1.0)
+        tp1 = max(fib_0382_l, entry_price + abs(entry_price - sl), entry_price + atr_val)
         tp2 = h
     elif cond_short and (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and rsi_bear:
         side = "SHORT"
         sl = max(h, entry_price + (atr_val * 1.5))
-        tp1 = fib_0382_s
-        # 🛡️ 防護：確保空頭第一止盈小於進場價
-        if tp1 >= entry_price:
-            tp1 = entry_price - max(abs(entry_price - sl), atr_val * 1.0)
+        tp1 = min(fib_0382_s, entry_price - abs(entry_price - sl), entry_price - atr_val)
         tp2 = l
 
     if side:
