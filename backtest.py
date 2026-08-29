@@ -1,17 +1,15 @@
 import os
 import time
 import requests
-import ccxt
 import pandas as pd
 import numpy as np
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 監控標的清單
 TARGET_SYMBOLS = [
-    'BTC', 'ETH', 'PAXG', 'TSM', 'MU', 'SPCX', 'CLU', 
+    'BTC', 'ETH', 'XAU', 'TSM', 'MU', 'SPCX', 'CLU', 
     'GOOGL', 'SAMSUNG', 'NVDA', 'GLW', 'TSLA', 'AAPL', 
-    'LAB', 'PLAY', 'AMZN'
+    'LAB', 'PLAY', 'AMZN', '币安人生'
 ]
 
 TIMEFRAME = '15m'
@@ -40,97 +38,139 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def fetch_kline_safe(symbol_name):
-    """直接調用公開 REST API，完全避開 451 封鎖"""
-    pair = f"{symbol_name.upper()}USDT"
-    url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
-    
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) >= 50:
-                df = pd.DataFrame(data, columns=[
-                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                    'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
-                ])
-                df['open'] = df['open'].astype(float)
-                df['high'] = df['high'].astype(float)
-                df['low'] = df['low'].astype(float)
-                df['close'] = df['close'].astype(float)
-                df['volume'] = df['volume'].astype(float)
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
-                return df
-    except Exception:
-        pass
-    return None
+def fetch_futures_kline(symbol_name):
+    """
+    透過合約公共端點抓取 15m K 線
+    """
+    # 嘗試不同的合約代號組合
+    candidates = [
+        f"{symbol_name.upper()}USDT",
+        f"1000{symbol_name.upper()}USDT",
+        f"{symbol_name.upper()}_USDT"
+    ]
+    if symbol_name.upper() == 'XAU':
+        candidates = ['XAUUSDT', 'PAXGUSDT']
+    elif symbol_name.upper() == 'CLU':
+        candidates = ['CLUUSDT', 'OILUSDT', 'CLUSDT', 'USO_USDT']
+
+    # 期貨端點輪詢
+    endpoints = [
+        "https://fapi.binance.com/fapi/v1/klines",
+        "https://dapi.binance.com/dapi/v1/klines"
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+
+    for sym in candidates:
+        for ep in endpoints:
+            try:
+                url = f"{ep}?symbol={sym}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
+                res = requests.get(url, headers=headers, timeout=8)
+                if res.status_code == 200:
+                    data = res.json()
+                    if isinstance(data, list) and len(data) >= 50:
+                        df = pd.DataFrame(data, columns=[
+                            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                            'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
+                        ])
+                        df['open'] = df['open'].astype(float)
+                        df['high'] = df['high'].astype(float)
+                        df['low'] = df['low'].astype(float)
+                        df['close'] = df['close'].astype(float)
+                        df['volume'] = df['volume'].astype(float)
+                        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
+                        return sym, df
+            except Exception:
+                continue
+    return None, None
 
 def run_backtest():
-    send_discord_alert("🧪 **[BACKTEST] 啟動無地域限制回測引擎...**")
+    send_discord_alert("🧪 **[BACKTEST] 啟動 17 檔永續合約多空斐波那契回測...**")
     
     status_log = []
     all_trades = []
 
     for name in TARGET_SYMBOLS:
-        # 特別代號轉換 (例如黃金對應 PAXG)
-        query_sym = 'PAXG' if name == 'XAU' else name
-        df = fetch_kline_safe(query_sym)
+        matched_sym, df = fetch_futures_kline(name)
         
-        if df is None or len(df) < 50:
-            status_log.append(f"❌ {name:<8} : 公開現貨無 {query_sym}USDT")
+        if df is None:
+            status_log.append(f"❌ {name:<8} : 永續合約無可用數據")
             continue
 
-        status_log.append(f"✅ {name:<8} : 成功載入 {len(df)} 根 15m K 線")
+        status_log.append(f"✅ {name:<8} : 成功 ({matched_sym}, {len(df)} 根 K 線)")
         df['rsi'] = calculate_rsi(df['close'], period=14)
 
-        i = 35
+        i = 25
         while i < len(df) - 1:
-            sub_df = df.iloc[:i+1]
-            swing_high = sub_df['high'][-30:].max()
-            swing_low = sub_df['low'][-30:].min()
-            wave_range = swing_high - swing_low
+            sub = df.iloc[i-20:i+1]
+            sw_high = sub['high'].max()
+            sw_low = sub['low'].min()
+            wave = sw_high - sw_low
 
-            if wave_range <= 0:
+            if wave <= 0 or (wave / sw_low) < 0.003:
                 i += 1
                 continue
 
-            fib_0618 = swing_high - (wave_range * 0.618)
-            fib_0382 = swing_high - (wave_range * 0.382)
-
-            candle = sub_df.iloc[-1]
+            candle = df.iloc[i]
             entry_price = candle['close']
 
-            # 動態 Fib 多單條件
-            in_fib_zone = (candle['low'] <= fib_0618 * 1.003) and (candle['close'] >= fib_0618 * 0.995)
-            rsi_condition = candle['rsi'] <= 45
-            lower_wick = min(candle['open'], candle['close']) - candle['low']
-            body_size = abs(candle['close'] - candle['open'])
-            rejection = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
+            # Fib 0.618 與 0.382 目標位
+            fib_long_0618 = sw_high - (wave * 0.618)
+            fib_short_0618 = sw_low + (wave * 0.618)
+            fib_long_0382 = sw_high - (wave * 0.382)
+            fib_short_0382 = sw_low + (wave * 0.382)
 
-            if in_fib_zone and rsi_condition and rejection:
-                stop_loss = min(candle['low'] * 0.998, swing_low * 0.999)
-                tp_1 = fib_0382 if fib_0382 > entry_price else swing_high
-                tp_2 = swing_high
+            trade_side = None
+            stop_loss = 0
+            tp_1 = 0
+            tp_2 = 0
 
+            # 多單：觸及 0.618 支撐且收陽線/下影線
+            if candle['low'] <= fib_long_0618 * 1.002 and candle['close'] >= sw_low:
+                trade_side = "LONG"
+                stop_loss = sw_low * 0.997
+                tp_1 = fib_long_0382
+                tp_2 = sw_high
+
+            # 空單：觸及 0.618 阻力且收陰線/上影線
+            elif candle['high'] >= fib_short_0618 * 0.998 and candle['close'] <= sw_high:
+                trade_side = "SHORT"
+                stop_loss = sw_high * 1.003
+                tp_1 = fib_short_0382
+                tp_2 = sw_low
+
+            if trade_side:
                 outcome = "HOLDING"
                 bars_held = 0
 
-                for j in range(i + 1, min(i + 49, len(df))):
-                    future_bar = df.iloc[j]
+                for j in range(i + 1, min(i + 33, len(df))):
+                    fbar = df.iloc[j]
                     bars_held += 1
 
-                    if future_bar['low'] <= stop_loss:
-                        outcome = "SL"
-                        break
-                    elif future_bar['high'] >= tp_2:
-                        outcome = "TP2_FULL"
-                        break
-                    elif future_bar['high'] >= tp_1 and outcome != "TP1_HIT":
-                        outcome = "TP1_HIT"
+                    if trade_side == "LONG":
+                        if fbar['low'] <= stop_loss:
+                            outcome = "SL"
+                            break
+                        elif fbar['high'] >= tp_2:
+                            outcome = "TP2_FULL"
+                            break
+                        elif fbar['high'] >= tp_1 and outcome != "TP1_HIT":
+                            outcome = "TP1_HIT"
+                    else:
+                        if fbar['high'] >= stop_loss:
+                            outcome = "SL"
+                            break
+                        elif fbar['low'] <= tp_2:
+                            outcome = "TP2_FULL"
+                            break
+                        elif fbar['low'] <= tp_1 and outcome != "TP1_HIT":
+                            outcome = "TP1_HIT"
 
                 all_trades.append({
-                    'Symbol': name,
-                    'Side': 'LONG',
+                    'Symbol': matched_sym,
+                    'Side': trade_side,
                     'Time': candle['datetime'],
                     'Entry': entry_price,
                     'Result': outcome
@@ -141,17 +181,20 @@ def run_backtest():
                 i += 1
         time.sleep(0.1)
 
-    # 1. 診斷推播
-    status_msg = "🔍 **[標的數據載入狀態]**\n```text\n" + "\n".join(status_log) + "\n```"
+    # 1. 推播標的連線狀態
+    status_msg = "🔍 **[永續合約連線診斷報告]**\n```text\n" + "\n".join(status_log) + "\n```"
     send_discord_alert(status_msg)
 
-    # 2. 結果統計
+    # 2. 推播回測結果
     if not all_trades:
-        send_discord_alert("📋 **[策略統計]** 本輪未產生交易訊號。")
+        send_discord_alert("📋 **[策略統計]** 本輪成功載入之永續合約未產生交易訊號。")
         return
 
     res_df = pd.DataFrame(all_trades)
     total_trades = len(res_df)
+    long_trades = len(res_df[res_df['Side'] == 'LONG'])
+    short_trades = len(res_df[res_df['Side'] == 'SHORT'])
+
     tp1_count = len(res_df[res_df['Result'].isin(['TP1_HIT', 'TP2_FULL'])])
     tp2_count = len(res_df[res_df['Result'] == 'TP2_FULL'])
     sl_count = len(res_df[res_df['Result'] == 'SL'])
@@ -160,18 +203,18 @@ def run_backtest():
 
     trade_details = ""
     for _, r in res_df.head(10).iterrows():
-        trade_details += f"[{r['Time']}] {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
+        trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 斐波那契回測結果 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 永續合約斐波那契回測報告 (15m)**\n"
         f"```text\n"
-        f"總進場次數  : {total_trades} 次\n"
+        f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
         f"TP2 終極達標: {tp2_count} 次\n"
         f"SL 停損離場 : {sl_count} 次\n"
         f"持倉/未觸發 : {holding_count} 次\n"
         f"----------------------------------------\n"
-        f"近期交易明細 (前10筆):\n"
+        f"近期交易明細:\n"
         f"{trade_details}"
         f"```"
     )
