@@ -114,7 +114,7 @@ def scan_symbol(sym, cfg):
 
     trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
     market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
-    status_summary = "%-5s | 價: %8.2f | EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
+    status_summary = "%-5s | 現價: %8.2f USDT| EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
 
     if wave <= 0 or (wave / l) < 0.005:
         return None, status_summary
