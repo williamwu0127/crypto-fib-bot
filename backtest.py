@@ -8,7 +8,7 @@ import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 18 檔標的配置
+# 18 檔標的精準配置
 SYMBOL_CONFIG = {
     # 1. 幣安主流與中文幣 (USDT)
     'BTC': {'type': 'binance', 'pair': 'BTCUSDT', 'curr': 'USDT'},
@@ -17,7 +17,7 @@ SYMBOL_CONFIG = {
     '币安人生': {'type': 'binance', 'pair': '币安人生USDT', 'curr': 'USDT'},
 
     # 2. 鏈上迷因幣 (GeckoTerminal 15m DEX, USD)
-    'PLAY': {'type': 'dex', 'network': 'base', 'pool': '0xf1cacdfb3260c67539097e366df047ef1fcf0b08', 'curr': 'USD'},
+    'PLAY': {'type': 'dex', 'network': 'base', 'pool': '0x853a7c99227499dba9db8c3a02aa691afdebf841', 'curr': 'USD'},
     'LAB': {'type': 'dex', 'network': 'bsc', 'pool': '0xd9434e63fe78a6e77dafe2abc504121bf8500822f6d3a59eccba577cf0a070f2', 'curr': 'USD'},
 
     # 3. 美股與商品期貨 (Yahoo Finance 15m, USD)
@@ -83,25 +83,27 @@ def get_kline_df(cfg):
                 return df
 
     elif t == 'dex':
-        url = f"https://api.geckoterminal.com/api/v2/networks/{cfg['network']}/pools/{cfg['pool']}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
         headers = {"Accept": "application/json;version=20230302"}
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            ohlcv = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-            if ohlcv and len(ohlcv) >= 50:
-                # DEX OHLCV 預設由新到舊，需倒序排列
-                ohlcv.reverse()
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%m/%d %H:%M')
-                return df
+        # 1. 嘗試直接調用 pool
+        url = f"https://api.geckoterminal.com/api/v2/networks/{cfg['network']}/pools/{cfg['pool']}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
+        try:
+            res = requests.get(url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                ohlcv = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
+                if ohlcv and len(ohlcv) >= 50:
+                    ohlcv.reverse()
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = df[col].astype(float)
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%m/%d %H:%M')
+                    return df
+        except Exception:
+            pass
 
     elif t == 'stock':
         df = yf.download(cfg['ticker'], period="5d", interval="15m", progress=False)
         if not df.empty and len(df) >= 50:
             df = df.reset_index()
-            # 處理 multi-index 欄位
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = [c[0].lower() for c in df.columns]
             else:
@@ -118,12 +120,15 @@ def backtest_strategy(name, cfg):
     if df is None or len(df) < 50:
         return f"❌ {name:<8} : 數據抓取失敗", []
 
+    # 計算指標：RSI, EMA50, EMA200
     df['rsi'] = calculate_rsi(df['close'], period=14)
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+
     trades = []
-    
-    i = 25
+    i = 35
     while i < len(df) - 1:
-        sub = df.iloc[i-20:i+1]
+        sub = df.iloc[i-25:i+1]
         sw_high = sub['high'].max()
         sw_low = sub['low'].min()
         wave = sw_high - sw_low
@@ -140,20 +145,31 @@ def backtest_strategy(name, cfg):
         fib_0618_short = sw_low + (wave * 0.618)
         fib_0382_short = sw_low + (wave * 0.382)
 
+        # K 棒型態計算（實體與影線）
+        body_size = abs(candle['close'] - candle['open'])
+        lower_wick = min(candle['open'], candle['close']) - candle['low']
+        upper_wick = candle['high'] - max(candle['open'], candle['close'])
+
         trade_side = None
         stop_loss = 0
         tp1 = 0
         tp2 = 0
 
-        # 多單條件：回踩 0.618 支撐帶且 RSI 處於合理低位
-        if candle['low'] <= fib_0618_long * 1.002 and candle['close'] >= sw_low:
+        # 趨勢狀態
+        trend_bullish = candle['close'] >= candle['ema50']
+        trend_bearish = candle['close'] <= candle['ema50']
+
+        # 🟢 多單條件：大趨勢偏多 + 回踩 0.618 + 右側下影線反彈或收陽
+        rejection_long = (lower_wick >= body_size * 0.6) or (candle['close'] > candle['open'])
+        if trend_bullish and (candle['low'] <= fib_0618_long * 1.002) and (candle['close'] >= sw_low) and rejection_long and (candle['rsi'] <= 50):
             trade_side = "LONG"
             stop_loss = sw_low * 0.997
             tp1 = fib_0382_long
             tp2 = sw_high
 
-        # 空單條件：反彈至 0.618 阻力帶
-        elif candle['high'] >= fib_0618_short * 0.998 and candle['close'] <= sw_high:
+        # 🔴 空單條件：大趨勢偏空 + 反彈 0.618 + 右側上影線受阻或收陰
+        rejection_short = (upper_wick >= body_size * 0.6) or (candle['close'] < candle['open'])
+        if trend_bearish and (candle['high'] >= fib_0618_short * 0.998) and (candle['close'] <= sw_high) and rejection_short and (candle['rsi'] >= 50):
             trade_side = "SHORT"
             stop_loss = sw_high * 1.003
             tp1 = fib_0382_short
@@ -195,7 +211,7 @@ def backtest_strategy(name, cfg):
                 'Curr': cfg['curr']
             })
 
-            i += max(bars_held, 2)
+            i += max(bars_held, 3)
         else:
             i += 1
 
@@ -203,7 +219,7 @@ def backtest_strategy(name, cfg):
     return status_msg, trades
 
 def main():
-    send_discord_alert("🧪 **[全資產多空斐波那契回測] 啟動雙引擎計算...**")
+    send_discord_alert("🧪 **[進階趨勢回測] 啟動 EMA 趨勢 ＋ 右側確認斐波那契回測...**")
     
     status_log = []
     all_trades = []
@@ -214,13 +230,11 @@ def main():
         all_trades.extend(trades)
         time.sleep(0.1)
 
-    # 1. 推播標的載入與觸發狀態
-    status_summary = "📋 **[標的數據與訊號掃描總覽]**\n```text\n" + "\n".join(status_log) + "\n```"
+    status_summary = "📋 **[標的數據與進階訊號總覽]**\n```text\n" + "\n".join(status_log) + "\n```"
     send_discord_alert(status_summary)
 
-    # 2. 統計總體回測勝率
     if not all_trades:
-        send_discord_alert("📊 **[回測結果]** 本週期內未有符合策略條件之進場點。")
+        send_discord_alert("📊 **[回測結果]** 本週期內無符合趨勢過濾條件之進場點。")
         return
 
     res_df = pd.DataFrame(all_trades)
@@ -240,7 +254,7 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']:<5} {r['Symbol']:<8} @ {p_str} {r['Curr']} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 斐波那契多空回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 斐波那契進階趨勢回測報告 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次 (多單: {long_trades} / 空單: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
