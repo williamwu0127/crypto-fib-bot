@@ -7,31 +7,25 @@ import numpy as np
 import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+ACCOUNT_BALANCE = 10000.0  # 模擬本金 10,000 USD
+RISK_PER_TRADE = 150.0     # 單筆固定風險 1.5% = 150 USD
 
-# 18 檔標的完整配置（全面 USD / USDT 計價）
+# 14 檔主流與美股資產配置 (已移除迷因幣)
 SYMBOL_CONFIG = {
-    # 1. 幣安主流與中文幣 (USDT)
-    'BTC': {'type': 'binance', 'pair': 'BTCUSDT', 'curr': 'USDT'},
-    'ETH': {'type': 'binance', 'pair': 'ETHUSDT', 'curr': 'USDT'},
-    'XAU': {'type': 'binance', 'pair': 'PAXGUSDT', 'curr': 'USDT'},
-    '币安人生': {'type': 'binance', 'pair': '币安人生USDT', 'curr': 'USDT'},
-
-    # 2. 鏈上迷因幣 (GeckoTerminal 15m DEX, USD)
-    'PLAY': {'type': 'dex', 'network': 'base', 'pool': '0x853a7c99227499dba9db8c3a02aa691afdebf841', 'curr': 'USD'},
-    'LAB': {'type': 'dex', 'network': 'bsc', 'pool': '0xd9434e63fe78a6e77dafe2abc504121bf8500822f6d3a59eccba577cf0a070f2', 'curr': 'USD'},
-
-    # 3. 美股與商品期貨 (Yahoo Finance 15m, USD)
-    'TSM': {'type': 'stock', 'ticker': 'TSM', 'curr': 'USD'},
-    'NVDA': {'type': 'stock', 'ticker': 'NVDA', 'curr': 'USD'},
-    'TSLA': {'type': 'stock', 'ticker': 'TSLA', 'curr': 'USD'},
-    'AAPL': {'type': 'stock', 'ticker': 'AAPL', 'curr': 'USD'},
-    'GOOGL': {'type': 'stock', 'ticker': 'GOOGL', 'curr': 'USD'},
-    'MU': {'type': 'stock', 'ticker': 'MU', 'curr': 'USD'},
-    'AMZN': {'type': 'stock', 'ticker': 'AMZN', 'curr': 'USD'},
-    'GLW': {'type': 'stock', 'ticker': 'GLW', 'curr': 'USD'},
-    'SPCX': {'type': 'stock', 'ticker': 'SPCX', 'curr': 'USD'},
-    'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD'},
-    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'}
+    'BTC': {'type': 'binance', 'pair': 'BTCUSDT', 'curr': 'USDT', 'margin': 1500},
+    'ETH': {'type': 'binance', 'pair': 'ETHUSDT', 'curr': 'USDT', 'margin': 1200},
+    'XAU': {'type': 'binance', 'pair': 'PAXGUSDT', 'curr': 'USDT', 'margin': 1800},
+    'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD', 'margin': 1000},
+    'TSM': {'type': 'stock', 'ticker': 'TSM', 'curr': 'USD', 'margin': 1500},
+    'NVDA': {'type': 'stock', 'ticker': 'NVDA', 'curr': 'USD', 'margin': 2000},
+    'TSLA': {'type': 'stock', 'ticker': 'TSLA', 'curr': 'USD', 'margin': 1800},
+    'AAPL': {'type': 'stock', 'ticker': 'AAPL', 'curr': 'USD', 'margin': 1500},
+    'GOOGL': {'type': 'stock', 'ticker': 'GOOGL', 'curr': 'USD', 'margin': 1500},
+    'MU': {'type': 'stock', 'ticker': 'MU', 'curr': 'USD', 'margin': 1200},
+    'AMZN': {'type': 'stock', 'ticker': 'AMZN', 'curr': 'USD', 'margin': 1600},
+    'GLW': {'type': 'stock', 'ticker': 'GLW', 'curr': 'USD', 'margin': 1000},
+    'SPCX': {'type': 'stock', 'ticker': 'SPCX', 'curr': 'USD', 'margin': 800},
+    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD', 'margin': 1500}
 }
 
 TIMEFRAME = '15m'
@@ -63,9 +57,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def get_kline_df(cfg):
-    """依照配置抓取 15m K 線並統一輸出 DataFrame"""
     t = cfg['type']
-    
     if t == 'binance':
         encoded_pair = urllib.parse.quote(cfg['pair'])
         url = f"{BINANCE_MIRROR}?symbol={encoded_pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
@@ -82,49 +74,6 @@ def get_kline_df(cfg):
                         df[col] = df[col].astype(float)
                     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
                     return df
-        except Exception:
-            pass
-
-    elif t == 'dex':
-        headers = {"Accept": "application/json;version=20230302"}
-        target_addr = cfg['pool']
-        network = cfg['network']
-        
-        # 1. 嘗試直接調用 pool
-        url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{target_addr}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
-        try:
-            res = requests.get(url, headers=headers, timeout=8)
-            if res.status_code == 200:
-                ohlcv = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-                if ohlcv and len(ohlcv) >= 30:
-                    ohlcv.reverse()
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df[col] = df[col].astype(float)
-                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%m/%d %H:%M')
-                    return df
-        except Exception:
-            pass
-
-        # 2. 備援：透過 Token 地址自動搜尋 Top 1 活躍池
-        search_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{target_addr}/pools"
-        try:
-            s_res = requests.get(search_url, headers=headers, timeout=8)
-            if s_res.status_code == 200:
-                pools = s_res.json().get('data', [])
-                if pools:
-                    best_pool = pools[0]['attributes']['address']
-                    sub_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{best_pool}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
-                    sub_res = requests.get(sub_url, headers=headers, timeout=8)
-                    if sub_res.status_code == 200:
-                        ohlcv = sub_res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-                        if ohlcv and len(ohlcv) >= 30:
-                            ohlcv.reverse()
-                            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                            for col in ['open', 'high', 'low', 'close', 'volume']:
-                                df[col] = df[col].astype(float)
-                            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%m/%d %H:%M')
-                            return df
         except Exception:
             pass
 
@@ -151,7 +100,6 @@ def backtest_strategy(name, cfg):
     if df is None or len(df) < 50:
         return f"❌ {name:<8} : 數據抓取失敗", []
 
-    # 技術指標：RSI, EMA 50, EMA 200
     df['rsi'] = calculate_rsi(df['close'], period=14)
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
@@ -185,11 +133,9 @@ def backtest_strategy(name, cfg):
         tp1 = 0
         tp2 = 0
 
-        # 大趨勢判定 (EMA 50)
         trend_bullish = candle['close'] >= candle['ema50']
         trend_bearish = candle['close'] <= candle['ema50']
 
-        # 🟢 多單進場：順勢多頭 + 回踩 0.618 支撐 + 右側下影線反彈或收陽 + RSI 適中
         rejection_long = (lower_wick >= body_size * 0.6) or (candle['close'] > candle['open'])
         if trend_bullish and (candle['low'] <= fib_0618_long * 1.002) and (candle['close'] >= sw_low) and rejection_long and (candle['rsi'] <= 50):
             trade_side = "LONG"
@@ -197,7 +143,6 @@ def backtest_strategy(name, cfg):
             tp1 = fib_0382_long
             tp2 = sw_high
 
-        # 🔴 空單進場：順勢空頭 + 反彈 0.618 阻力 + 右側上影線受阻或收陰 + RSI 適中
         rejection_short = (upper_wick >= body_size * 0.6) or (candle['close'] < candle['open'])
         if trend_bearish and (candle['high'] >= fib_0618_short * 0.998) and (candle['close'] <= sw_high) and rejection_short and (candle['rsi'] >= 50):
             trade_side = "SHORT"
@@ -207,6 +152,7 @@ def backtest_strategy(name, cfg):
 
         if trade_side:
             outcome = "HOLDING"
+            r_profit = 0.0
             bars_held = 0
 
             for j in range(i + 1, min(i + 33, len(df))):
@@ -216,21 +162,27 @@ def backtest_strategy(name, cfg):
                 if trade_side == "LONG":
                     if fbar['low'] <= stop_loss:
                         outcome = "SL"
+                        r_profit = -1.0
                         break
                     elif fbar['high'] >= tp2:
                         outcome = "TP2_FULL"
+                        r_profit = 2.8
                         break
                     elif fbar['high'] >= tp1 and outcome != "TP1_HIT":
                         outcome = "TP1_HIT"
+                        r_profit = 1.0
                 else:
                     if fbar['high'] >= stop_loss:
                         outcome = "SL"
+                        r_profit = -1.0
                         break
                     elif fbar['low'] <= tp2:
                         outcome = "TP2_FULL"
+                        r_profit = 2.8
                         break
                     elif fbar['low'] <= tp1 and outcome != "TP1_HIT":
                         outcome = "TP1_HIT"
+                        r_profit = 1.0
 
             trades.append({
                 'Symbol': name,
@@ -238,6 +190,9 @@ def backtest_strategy(name, cfg):
                 'Time': candle['datetime'],
                 'Entry': entry_price,
                 'Result': outcome,
+                'R_Profit': r_profit,
+                'USD_Profit': r_profit * RISK_PER_TRADE,
+                'Margin': cfg['margin'],
                 'Curr': cfg['curr']
             })
 
@@ -249,7 +204,7 @@ def backtest_strategy(name, cfg):
     return status_msg, trades
 
 def main():
-    send_discord_alert("🧪 **[進階趨勢回測] 啟動 EMA 趨勢 ＋ 右側確認斐波那契回測...**")
+    send_discord_alert("🧪 **[主流/美股資產趨勢回測] 啟動成本與收益預期計算...**")
     
     status_log = []
     all_trades = []
@@ -260,42 +215,48 @@ def main():
         all_trades.extend(trades)
         time.sleep(0.1)
 
-    # 1. 輸出各標的狀態總覽
-    status_summary = "📋 **[標的數據與進階訊號總覽]**\n```text\n" + "\n".join(status_log) + "\n```"
+    status_summary = "📋 **[標的數據與訊號掃描總覽]**\n```text\n" + "\n".join(status_log) + "\n```"
     send_discord_alert(status_summary)
 
-    # 2. 統計回測數據
     if not all_trades:
-        send_discord_alert("📊 **[回測結果]** 本週期內無符合趨勢過濾條件之進場點。")
+        send_discord_alert("📊 **[回測結果]** 本週期內無符合條件之進場點。")
         return
 
     res_df = pd.DataFrame(all_trades)
     total_trades = len(res_df)
-    long_trades = len(res_df[res_df['Side'] == 'LONG'])
-    short_trades = len(res_df[res_df['Side'] == 'SHORT'])
-
     tp1_count = len(res_df[res_df['Result'].isin(['TP1_HIT', 'TP2_FULL'])])
     tp2_count = len(res_df[res_df['Result'] == 'TP2_FULL'])
     sl_count = len(res_df[res_df['Result'] == 'SL'])
     holding_count = len(res_df[res_df['Result'] == 'HOLDING'])
     win_rate = (tp1_count / total_trades) * 100 if total_trades > 0 else 0
 
-    trade_details = ""
-    for _, r in res_df.head(10).iterrows():
-        p_str = f"${r['Entry']:.4f}" if r['Entry'] < 1 else f"${r['Entry']:.2f}"
-        trade_details += f"[{r['Time']}] {r['Side']:<5} {r['Symbol']:<8} @ {p_str} {r['Curr']} -> {r['Result']}\n"
+    total_net_usd = res_df['USD_Profit'].sum()
+    total_r = res_df['R_Profit'].sum()
+
+    # 彙總各幣種投入與收益
+    sym_group = res_df.groupby('Symbol').agg({
+        'Result': 'count',
+        'Margin': 'first',
+        'R_Profit': 'sum',
+        'USD_Profit': 'sum'
+    }).reset_index()
+
+    breakdown_text = f"{'標的':<6} | {'次數':<4} | {'預估保證金':<9} | {'淨收益 (USD)'}\n"
+    breakdown_text += "-" * 42 + "\n"
+    for _, row in sym_group.iterrows():
+        breakdown_text += f"{row['Symbol']:<6} | {row['Result']:<4} | ${row['Margin']:<7} | {row['USD_Profit']:>+9.2f} USD\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 斐波那契進階趨勢回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 主流/美股波段收益與資金報告**\n"
         f"```text\n"
-        f"總進場次數  : {total_trades} 次 (多單: {long_trades} / 空單: {short_trades})\n"
-        f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
-        f"TP2 終極達標: {tp2_count} 次\n"
-        f"SL 停損離場 : {sl_count} 次\n"
-        f"持倉中/未結 : {holding_count} 次\n"
-        f"----------------------------------------\n"
-        f"近期交易明細 (前 10 筆):\n"
-        f"{trade_details}"
+        f"帳戶本金規模: ${ACCOUNT_BALANCE:,.2f} USD \vert{} 單筆固定風險: ${RISK_PER_TRADE:,.2f} USD (1.5%)\n"
+        f"總進場次數  : {total_trades} 次 | TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
+        f"TP2 終極達標: {tp2_count} 次 | SL 停損: {sl_count} 次 | 未結: {holding_count} 次\n"
+        f"單週累計 R 數: {total_r:+.1f} R\n"
+        f"預期總淨利潤: {total_net_usd:+,.2f} USD (本金收益率: {total_net_usd/ACCOUNT_BALANCE*100:+.1f}%)\n"
+        f"------------------------------------------\n"
+        f"各資產投入成本與收益明細:\n"
+        f"{breakdown_text}"
         f"```"
     )
     send_discord_alert(report_msg)
