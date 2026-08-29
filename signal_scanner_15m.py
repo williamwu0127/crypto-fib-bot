@@ -14,13 +14,18 @@ RISK_PERCENT = 0.01      # 動態 1% 風控
 DEFAULT_BALANCE = 100.0  # 無 API Key 時之預設參考本金
 
 SYMBOLS = {
+    # 1. 加密貨幣 (100x 槓桿 / 實盤全自動下單)
     'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'ccxt_s': 'BTC/USDT:USDT',  'lev': 100.0, 'trade': True},
     'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'ccxt_s': 'ETH/USDT:USDT',  'lev': 100.0, 'trade': True},
     'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'ccxt_s': 'SOL/USDT:USDT',  'lev': 100.0, 'trade': True},
     'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'ccxt_s': 'BNB/USDT:USDT',  'lev': 100.0, 'trade': True},
     'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'ccxt_s': 'DOGE/USDT:USDT', 'lev': 100.0, 'trade': True},
+    
+    # 2. 大宗商品 & 貴金屬 (100x 槓桿 / 僅推播)
     'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'ccxt_s': 'PAXG/USDT:USDT', 'lev': 100.0, 'trade': False},
     'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0, 'trade': False},
+    
+    # 3. 美股龍頭 (20x 槓桿 / 僅推播)
     'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0,  'trade': False},
     'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0,  'trade': False},
     'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0,  'trade': False},
@@ -141,7 +146,7 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
             except Exception as err:
                 print(f"第二止盈掛單失敗: {err}")
 
-        return f"✅ 開倉成功 (ID: {order_id}) | SL/第一止盈/第二止盈 條件單全數部署"
+        return f"✅ 開倉成功 (ID: {order_id}) / SL與第一第二止盈均已部署"
     except Exception as err:
         return f"開單失敗: {err}"
 
@@ -158,7 +163,7 @@ def send_discord(content):
 def get_latest_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=100"
+            url = f"[https://data-api.binance.vision/api/v3/klines?symbol=](https://data-api.binance.vision/api/v3/klines?symbol=){cfg['s']}&interval=15m&limit=100"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 60:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -189,7 +194,7 @@ def get_latest_data(cfg):
 def scan_symbol(sym, cfg, exchange, current_risk):
     df = get_latest_data(cfg)
     if df is None or len(df) < 60:
-        return None, f"{sym:<5} | 休市/無數據"
+        return None, f"{sym:<5} / 休市無數據"
 
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
@@ -214,7 +219,7 @@ def scan_symbol(sym, cfg, exchange, current_risk):
 
     trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
     market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
-    status_summary = f"{sym:<5} | 現價: {entry_price:8.2f} USDT | EMA: {trend_label} | RSI: {bar['rsi']:4.1f}{market_flag}"
+    status_summary = f"{sym:<5} / 現價: {entry_price:8.2f} USDT / EMA: {trend_label} / RSI: {bar['rsi']:4.1f}{market_flag}"
 
     if wave <= 0 or (wave / l) < 0.005:
         return None, status_summary
@@ -299,7 +304,6 @@ def main():
             m50, loss50 = pos_v / 50.0, min(sl_p * 50.0, 100.0)
             m100, loss100 = pos_v / 100.0, min(sl_p * 100.0, 100.0)
 
-            # 動態調整小數點位數
             entry_str = f"{s['entry']:.4f}" if s['entry'] < 1 else f"{s['entry']:.2f}"
             sl_str = f"{s['sl']:.4f}" if s['sl'] < 1 else f"{s['sl']:.2f}"
             tp1_str = f"{s['tp1']:.4f}" if s['tp1'] < 1 else f"{s['tp1']:.2f}"
@@ -310,16 +314,16 @@ def main():
                 "```text\n"
                 f"進場時間 : {s['time']} (台灣時間)\n"
                 f"現價     : ${entry_str} USDT\n"
-                f"停損價格 : ${sl_str} USDT (-{s['sl_pct']:.2f}% | 100% 止損)\n"
-                f"第一止盈 : ${tp1_str} USDT (Fib 0.382 | 50% 倉位)\n"
-                f"第二止盈 : ${tp2_str} USDT (前波極值 | 50% 倉位)\n"
+                f"停損價格 : ${sl_str} USDT (-{s['sl_pct']:.2f}% / 100% 止損)\n"
+                f"第一止盈 : ${tp1_str} USDT (Fib 0.382 / 50% 倉位)\n"
+                f"第二止盈 : ${tp2_str} USDT (前波極值 / 50% 倉位)\n"
                 "----------------------------------------------------\n"
-                f"合約錢包 : ${wallet_balance:.2f} USDT | 動態風控 1%: ${current_risk:.2f} USDT\n"
+                f"合約錢包 : ${wallet_balance:.2f} USDT / 動態風控 1%: ${current_risk:.2f} USDT\n"
                 "各槓桿所需倉位保證金與損耗比:\n"
-                f"• 10x  : 倉位 ${m10:5.2f} USDT | 損耗保證金 {loss10:5.1f}%\n"
-                f"• 20x  : 倉位 ${m20:5.2f} USDT | 損耗保證金 {loss20:5.1f}%\n"
-                f"• 50x  : 倉位 ${m50:5.2f} USDT | 損耗保證金 {loss50:5.1f}%\n"
-                f"• 100x : 倉位 ${m100:5.2f} USDT | 損耗保證金 {loss100:5.1f}%\n"
+                f"• 10x  : 倉位 ${m10:5.2f} USDT / 損耗保證金 {loss10:5.1f}%\n"
+                f"• 20x  : 倉位 ${m20:5.2f} USDT / 損耗保證金 {loss20:5.1f}%\n"
+                f"• 50x  : 倉位 ${m50:5.2f} USDT / 損耗保證金 {loss50:5.1f}%\n"
+                f"• 100x : 倉位 ${m100:5.2f} USDT / 損耗保證金 {loss100:5.1f}%\n"
                 "----------------------------------------------------\n"
                 f"實盤執行 : {s['order_status']}\n"
                 f"指標數據 : RSI(14) = {s['rsi']:.1f}\n"
@@ -331,8 +335,8 @@ def main():
         heartbeat_msg = (
             "📡 **[15m 掃描完成] 目前無觸發訊號**\n"
             "```text\n"
-            f"掃描時間: {tw_now.strftime('%H:%M')} (台灣時間) | 標的數: 20 檔\n"
-            f"合約錢包: ${wallet_balance:.2f} USDT \vert{} 動態風控: 1\% (${current_risk:.2f} USDT)\n"
+            f"掃描時間: {tw_now.strftime('%H:%M')} (台灣時間) / 標的數: 20 檔\n"
+            f"合約錢包: ${wallet_balance:.2f} USDT / 動態風控: 1% (${current_risk:.2f} USDT)\n"
             "----------------------------------------------------\n"
             f"{status_table}\n"
             "```"
