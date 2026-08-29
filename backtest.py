@@ -42,9 +42,9 @@ def get_historical_data(cfg):
                 df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         else:
-            # 抓取 1 年歷史 15m 數據
-            df = yf.download(cfg['s'], period="365d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) >= 100:
+            # 針對 yfinance 15m 數據，安全天數設為 59 天以內避免 Yahoo API 拒絕回應
+            df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
+            if df is not None and not df.empty and len(df) >= 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.reset_index()
@@ -67,7 +67,7 @@ def get_historical_data(cfg):
                         return None
                 
                 res_df = res_df.dropna().reset_index(drop=True)
-                if len(res_df) >= 100:
+                if len(res_df) >= 50:
                     return res_df
     except Exception:
         pass
@@ -79,7 +79,7 @@ def run_backtest():
 
     for sym, cfg in SYMBOLS.items():
         df = get_historical_data(cfg)
-        if df is None or len(df) < 100:
+        if df is None or len(df) < 50:
             continue
 
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
@@ -107,7 +107,6 @@ def run_backtest():
             fib_0618_l = h - (wave * 0.618)
             entry_price = bar['c']
             
-            # 伺服器原版寬鬆進場邏輯
             rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
             
@@ -136,7 +135,6 @@ def run_backtest():
                         'outcome': outcome
                     })
 
-    # 嚴格依照時間先後順序排列
     all_trades = sorted(all_trades, key=lambda x: x['time'])
 
     initial_balance = 100.0
@@ -144,7 +142,6 @@ def run_backtest():
     total_trades = 0
     total_wins = 0
 
-    # 依照時間軸依序跑複利滾動
     for trade in all_trades:
         current_risk = balance * 0.01
         total_trades += 1
@@ -169,7 +166,7 @@ def run_backtest():
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[伺服器原版策略 1年期時間軸+複利回測]**",
+        "📊 **[伺服器原版策略 60天高頻回測報告]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
