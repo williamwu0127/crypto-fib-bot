@@ -50,7 +50,8 @@ def get_latest_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.strftime('%H:%M')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']]
         else:
-            df = yf.download(cfg['s'], period="2d", interval="15m", progress=False)
+            # 改為 7d 確保週末亦可載入上週五之歷史 K 棒
+            df = yf.download(cfg['s'], period="7d", interval="15m", progress=False)
             if not df.empty and len(df) >= 60:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [c[0].lower() for c in df.columns]
@@ -68,7 +69,7 @@ def get_latest_data(cfg):
 def scan_symbol(sym, cfg):
     df = get_latest_data(cfg)
     if df is None or len(df) < 60:
-        return None, "數據取得失敗"
+        return None, "%-5s | 休市/無數據" % sym
 
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
@@ -92,7 +93,8 @@ def scan_symbol(sym, cfg):
     entry_price = bar['c']
 
     trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
-    status_summary = "%-5s | 價: %8.2f | EMA: %s | RSI: %4.1f" % (sym, entry_price, trend_label, bar['rsi'])
+    market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
+    status_summary = "%-5s | 價: %8.2f | EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
 
     if wave <= 0 or (wave / l) < 0.005:
         return None, status_summary
@@ -158,7 +160,6 @@ def main():
         market_status.append(stat)
         time.sleep(0.05)
 
-    # 1. 若有進場訊號，優先推播進場卡片
     if detected_signals:
         for s in detected_signals:
             side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
@@ -198,7 +199,6 @@ def main():
             )
             send_discord(msg)
     else:
-        # 2. 無訊號時發送簡潔存活與市場狀態
         status_table = "\n".join(market_status)
         heartbeat_msg = (
             "📡 **[15m 掃描完成] 目前無觸發訊號**\n"
