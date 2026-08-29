@@ -29,7 +29,7 @@ SYMBOLS = {
     'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
 }
 
-def get_historical_data(cfg):
+def get_historical_data(sym, cfg):
     if cfg['t'] == 'binance':
         try:
             url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
@@ -41,8 +41,8 @@ def get_historical_data(cfg):
                     df[col] = df[col].astype(float)
                 df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Binance error for {sym}: {e}")
     else:
         try:
             df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
@@ -66,13 +66,18 @@ def get_historical_data(cfg):
                             found = True
                             break
                     if not found:
+                        print(f"Stock {sym} missing column {target}, columns found: {list(df.columns)}")
                         return None
                 
                 res_df = res_df.dropna().reset_index(drop=True)
                 if len(res_df) >= 50:
                     return res_df
-        except Exception:
-            pass
+                else:
+                    print(f"Stock {sym} data too short: {len(res_df)} rows")
+            else:
+                print(f"Stock {sym} returned empty data from yfinance")
+        except Exception as e:
+            print(f"YFinance error for {sym}: {e}")
     return None
 
 def run_backtest():
@@ -80,8 +85,9 @@ def run_backtest():
     symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in SYMBOLS.keys()}
 
     for sym, cfg in SYMBOLS.items():
-        df = get_historical_data(cfg)
+        df = get_historical_data(sym, cfg)
         if df is None or len(df) < 50:
+            print(f"Skipping {sym} due to insufficient data.")
             continue
 
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
@@ -99,11 +105,9 @@ def run_backtest():
         for i in range(50, len(df) - 15):
             bar = df.iloc[i]
             
-            # 【美股優化邏輯】若是美股，過濾掉非開盤時段的雜訊訊號 (限定台灣時間晚上 22:30 到凌晨 03:00 之間的黃金交投期)
             if is_stock:
                 hour = bar['timestamp'].hour
-                # 台灣時間 22:30 到 03:00 約對應美股開盤後的前幾小時
-                if not (22 <= hour or hour <= 3):
+                if not (21 <= hour or hour <= 4):
                     continue
 
             sub = df.iloc[i-25:i+1]
@@ -119,7 +123,6 @@ def run_backtest():
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002)
             
             if cond_long:
-                # 美股使用稍微收窄的防守距離，減少盤中雜訊誤觸
                 atr_mult = 1.2 if is_stock else 1.5
                 sl = min(l, entry_price - (bar['atr'] * atr_mult))
                 tp1 = entry_price + abs(entry_price - sl)
@@ -145,7 +148,6 @@ def run_backtest():
                         'outcome': outcome
                     })
 
-    # 嚴格依照時間順序排列
     all_trades = sorted(all_trades, key=lambda x: x['time'])
 
     initial_balance = 100.0
@@ -165,38 +167,27 @@ def run_backtest():
         else:
             balance -= current_risk
 
-    symbol_reports = []
+    crypto_reports = []
+    stock_reports = []
+    
     for sym, stats in symbol_stats.items():
         t_cnt = stats['trades']
         w_cnt = stats['wins']
         w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
         if t_cnt > 0:
-            symbol_reports.append(sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%")
+            line = sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%"
+            if SYMBOLS[sym]['t'] == 'binance' or sym == 'XAU':
+                crypto_reports.append(line)
+            else:
+                stock_reports.append(line)
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
-    report = [
-        "📊 **[美股時段過濾優化 + 複利滾動回測]**",
+    msg1 = "\n".join([
+        "📊 **[回測報告 (1/2) - 總結與加密貨幣]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
-        "總交易次數: " + str(total_trades) + " 次",
-        "綜合勝率: " + str(round(overall_win_rate, 1)) + "%",
-        "----------------------------------------------------",
-        "\n".join(symbol_reports),
-        "```"
-    ]
-    
-    msg = "\n".join(report)
-    
-    if DISCORD_WEBHOOK_URL and DISCORD_WEBHOOK_URL != "你的Discord網址":
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=8)
-        except Exception:
-            pass
-
-    print(msg)
-
-if __name__ == '__main__':
-    run_backtest()
+        "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + str(round(overall_win_rate, 1)) + "%",
+        "----------------------------------------------------
