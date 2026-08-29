@@ -59,7 +59,7 @@ def get_wallet_balance(exchange):
         usdt_free = float(bal['free'].get('USDT', 0.0))
         return usdt_free if usdt_free > 0 else DEFAULT_BALANCE
     except Exception as e:
-        print("取得合約錢包餘額失敗，使用預設本金:", e)
+        print(f"取得合約錢包餘額失敗: {e}")
         return DEFAULT_BALANCE
 
 def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, tp2_price, risk_amount):
@@ -71,7 +71,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
     if exchange is None:
         return "未開單: 未檢測到 BINANCE_API_KEY / SECRET"
 
-    market_sym = cfg.get('ccxt_s', sym_key + '/USDT:USDT')
+    market_sym = cfg.get('ccxt_s', f"{sym_key}/USDT:USDT")
     try:
         exchange.load_markets()
         market = exchange.market(market_sym)
@@ -80,7 +80,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
         try:
             exchange.set_leverage(int(cfg['lev']), market_sym)
         except Exception as lev_err:
-            return "開單失敗 [設定槓桿錯誤]: " + str(lev_err)
+            return f"開單失敗 [設定槓桿錯誤]: {lev_err}"
 
         # 2. 計算動態名義開倉數量
         sl_pct = abs(entry_price - sl_price) / entry_price
@@ -92,7 +92,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
         
         # 幣安最小名義金額防護 (需 >= 5 USDT)
         if qty * entry_price < 5.0:
-            return "未開單: 開倉價值 ($%.2f USDT) 低於幣安 5 USDT 限制" % (qty * entry_price)
+            return f"未開單: 開倉價值 (${qty * entry_price:.2f} USDT) 低於幣安 5 USDT 限制"
 
         # 3. 市價開倉
         order_side = 'buy' if side == 'LONG' else 'sell'
@@ -102,11 +102,11 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
             entry_res = exchange.create_order(symbol=market_sym, type='market', side=order_side, amount=qty)
             order_id = entry_res.get('id', 'N/A')
         except ccxt.InsufficientFunds as e:
-            return "開單失敗 [合約保證金不足]: " + str(e)
+            return f"開單失敗 [合約保證金不足]: {e}"
         except ccxt.ExchangeError as e:
-            return "開單失敗 [交易所拒絕]: " + str(e)
+            return f"開單失敗 [交易所拒絕]: {e}"
         except Exception as e:
-            return "開單失敗 [市價下單異常]: " + str(e)
+            return f"開單失敗 [市價下單異常]: {e}"
 
         # 4. 掛全倉 SL 條件止損單 (Stop-Market / 100% 倉位)
         sl_err_note = ""
@@ -120,7 +120,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
                 params={'stopPrice': sl_p_str, 'reduceOnly': True}
             )
         except Exception as e:
-            sl_err_note = " (SL掛單失敗: " + str(e) + ")"
+            sl_err_note = f" (SL掛單失敗: {e})"
 
         # 5. 掛 TP1 條件止盈單 (Take-Profit-Market / 50% 倉位)
         tp1_qty = float(exchange.amount_to_precision(market_sym, qty * 0.5))
@@ -136,7 +136,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
                     params={'stopPrice': tp1_p_str, 'reduceOnly': True}
                 )
             except Exception as e:
-                tp_err_note += " (TP1掛單失敗: " + str(e) + ")"
+                tp_err_note += f" (TP1掛單失敗: {e})"
 
         # 6. 掛 TP2 條件止盈單 (Take-Profit-Market / 剩餘 50% 倉位)
         tp2_qty = float(exchange.amount_to_precision(market_sym, qty - tp1_qty))
@@ -151,11 +151,11 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
                     params={'stopPrice': tp2_p_str, 'reduceOnly': True}
                 )
             except Exception as e:
-                tp_err_note += " (TP2掛單失敗: " + str(e) + ")"
+                tp_err_note += f" (TP2掛單失敗: {e})"
 
-        return "✅ 開倉成功 (ID: %s) | SL/TP1/TP2 條件單已全數部署%s%s" % (str(order_id), sl_err_note, tp_err_note)
+        return f"✅ 開倉成功 (ID: {order_id}) | SL/TP1/TP2 條件單已全數部署{sl_err_note}{tp_err_note}"
     except Exception as e:
-        return "開單失敗 [底層異常]: " + str(e)
+        return f"開單失敗 [底層異常]: {e}"
 
 def send_discord(content):
     if not DISCORD_WEBHOOK_URL:
@@ -171,7 +171,7 @@ def send_discord(content):
 def get_latest_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=100"
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=100"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 60:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -196,13 +196,13 @@ def get_latest_data(cfg):
                     res_df['time'] = dt_tw.strftime('%H:%M')
                     return res_df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
     except Exception as e:
-        print("Fetch error " + str(cfg['s']) + ": " + str(e))
+        print(f"Fetch error {cfg['s']}: {e}")
     return None
 
 def scan_symbol(sym, cfg, current_risk):
     df = get_latest_data(cfg)
     if df is None or len(df) < 60:
-        return None, "%-5s | 休市/無數據" % sym
+        return None, f"{sym:<5} | 休市/無數據"
 
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
@@ -227,7 +227,7 @@ def scan_symbol(sym, cfg, current_risk):
 
     trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
     market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
-    status_summary = "%-5s | 現價: %8.2f USDT | EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
+    status_summary = f"{sym:<5} | 現價: {entry_price:8.2f} USDT | EMA: {trend_label} | RSI: {bar['rsi']:4.1f}{market_flag}"
 
     if wave <= 0 or (wave / l) < 0.005:
         return None, status_summary
@@ -318,48 +318,43 @@ def main():
             m50, loss50 = pos_v / 50.0, min(sl_p * 50.0, 100.0)
             m100, loss100 = pos_v / 100.0, min(sl_p * 100.0, 100.0)
 
-            price_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
+            p_fmt = "{:.4f}" if s['entry'] < 1 else "{:.2f}"
+            entry_s = p_fmt.format(s['entry'])
+            sl_s = p_fmt.format(s['sl'])
+            tp1_s = p_fmt.format(s['tp1'])
+            tp2_s = p_fmt.format(s['tp2'])
             
             msg = (
-                "%s **%s** (15m 趨勢觸發)\n"
-                "```text\n"
-                "進場時間 : %s (台灣時間)\n"
-                "進場價格 : $%s USDT\n"
-                "停損價格 : $%s USDT (-%.2f%% | 100%% 止損)\n"
-                "第一目標 : $%s USDT (Fib 0.382 | 50%% 止盈)\n"
-                "終極目標 : $%s USDT (前波極值 | 50%% 止盈)\n"
-                "----------------------------------------------------\n"
-                "合約錢包 : $%.2f USDT | 單筆動態風控 1%%: $%.2f USDT\n"
-                "各槓桿所需保證金與損耗比:\n"
-                "• 10x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
-                "• 20x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
-                "• 50x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
-                "• 100x : 押 $%5.2f USDT | 損耗保證金 %5.1f%%\n"
-                "----------------------------------------------------\n"
-                "實盤執行 : %s\n"
-                "指標數據 : RSI(14) = %.1f\n"
-                "```" % (
-                    side_tag, s['sym'],
-                    s['time'],
-                    price_fmt % s['entry'], price_fmt % s['sl'], s['sl_pct'],
-                    price_fmt % s['tp1'], price_fmt % s['tp2'],
-                    wallet_balance, current_risk,
-                    m10, loss10, m20, loss20, m50, loss50, m100, loss100,
-                    s['order_status'],
-                    s['rsi']
-                )
+                f"{side_tag} **{s['sym']}** (15m 趨勢觸發)\n"
+                f"```text\n"
+                f"進場時間 : {s['time']} (台灣時間)\n"
+                f"進場價格 : ${entry_s} USDT\n"
+                f"停損價格 : ${sl_s} USDT (-{s['sl_pct']:.2f}% | 100% 止損)\n"
+                f"第一目標 : ${tp1_s} USDT (Fib 0.382 | 50% 止盈)\n"
+                f"終極目標 : ${tp2_s} USDT (前波極值 | 50% 止盈)\n"
+                f"----------------------------------------------------\n"
+                f"合約錢包 : ${wallet_balance:.2f} USDT | 單筆動態風控 1%: ${current_risk:.2f} USDT\n"
+                f"各槓桿所需保證金與損耗比:\n"
+                f"• 10x  : 押 ${m10:5.2f} USDT | 損耗保證金 {loss10:5.1f}%\n"
+                f"• 20x  : 押 ${m20:5.2f} USDT | 損耗保證金 {loss20:5.1f}%\n"
+                f"• 50x  : 押 ${m50:5.2f} USDT | 損耗保證金 {loss50:5.1f}%\n"
+                f"• 100x : 押 ${m100:5.2f} USDT | 損耗保證金 {loss100:5.1f}%\n"
+                f"----------------------------------------------------\n"
+                f"實盤執行 : {s['order_status']}\n"
+                f"指標數據 : RSI(14) = {s['rsi']:.1f}\n"
+                f"```"
             )
             send_discord(msg)
     else:
         status_table = "\n".join(market_status)
         heartbeat_msg = (
-            "📡 **[15m 掃描完成] 目前無觸發訊號**\n"
-            "```text\n"
-            "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔\n"
-            "合約錢包: $" + ("\%.2f" \% wallet_balance) + " USDT \vert{} 動態風控: 1\% ($" + ("%.2f" % current_risk) + " USDT)\n"
-            "----------------------------------------------------\n"
-            + status_table + "\n"
-            "```"
+            f"📡 **[15m 掃描完成] 目前無觸發訊號**\n"
+            f"```text\n"
+            f"掃描時間: {tw_now.strftime('%H:%M')} (台灣時間) | 標的數: 20 檔\n"
+            f"合約錢包: ${wallet_balance:.2f} USDT \vert{} 動態風控: 1\% (${current_risk:.2f} USDT)\n"
+            f"----------------------------------------------------\n"
+            f"{status_table}\n"
+            f"```"
         )
         send_discord(heartbeat_msg)
 
