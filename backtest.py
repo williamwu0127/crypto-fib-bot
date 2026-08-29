@@ -5,41 +5,24 @@ import ccxt
 import pandas as pd
 import numpy as np
 
-# 1. 讀取 Discord Webhook URL
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 2. 加密貨幣監控清單 (Binance 現貨/永續合約通用)
 CRYPTO_SYMBOLS = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'PAXG/USDT',      # 黃金代幣 (XAU)
-    'PLAY/USDT',
-    'LAB/USDT',
-    'CLU/USDT',
-    '币安人生/USDT'
+    'BTC/USDT', 'ETH/USDT', 'PAXG/USDT',
+    'PLAY/USDT', 'LAB/USDT', 'CLU/USDT'
 ]
 
-# 3. 幣安美股永續合約監控清單 (TradFi Perps)
 STOCK_PERP_SYMBOLS = [
-    'TSM/USDT:USDT',    # 台積電
-    'NVDA/USDT:USDT',   # 輝達
-    'TSLA/USDT:USDT',   # 特斯拉
-    'AAPL/USDT:USDT',   # 蘋果
-    'GOOGL/USDT:USDT',  # 谷歌
-    'MU/USDT:USDT',     # 美光
-    'AMZN/USDT:USDT',   # 亞馬遜
-    'MSFT/USDT:USDT',   # 微軟
-    'META/USDT:USDT',   # Meta
-    'PLTR/USDT:USDT',   # Palantir
-    'COIN/USDT:USDT',   # Coinbase
-    'MSTR/USDT:USDT'    # 微策略
+    'TSM/USDT:USDT', 'NVDA/USDT:USDT', 'TSLA/USDT:USDT',
+    'AAPL/USDT:USDT', 'GOOGL/USDT:USDT', 'MU/USDT:USDT',
+    'AMZN/USDT:USDT', 'MSFT/USDT:USDT', 'META/USDT:USDT',
+    'PLTR/USDT:USDT', 'COIN/USDT:USDT', 'MSTR/USDT:USDT'
 ]
 
 TIMEFRAME = '15m'
 FETCH_LIMIT = 800
 
 def send_discord_alert(content):
-    """發送 Discord 訊息"""
     if not DISCORD_WEBHOOK_URL:
         return
     try:
@@ -68,39 +51,42 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
+        df['ema_fast'] = df['close'].ewm(span=20, adjust=False).mean()
 
         i = 35
         while i < len(df) - 1:
             sub_df = df.iloc[:i+1]
-            swing_high = sub_df['high'][-30:].max()
-            swing_low = sub_df['low'][-30:].min()
-            fib_range = swing_high - swing_low
+            
+            # 尋找過去 30 根的波段高低點
+            recent_high = sub_df['high'][-30:].max()
+            recent_low = sub_df['low'][-30:].min()
+            wave_range = recent_high - recent_low
 
-            fib_0618 = swing_high - (fib_range * 0.618)
-            fib_0382 = swing_high - (fib_range * 0.382)
-            fib_0786 = swing_high - (fib_range * 0.786)
+            if wave_range <= 0:
+                i += 1
+                continue
+
+            # 修正幾何邏輯：Fib 0.618 回調支撐位 = 波段高點 - 0.618 * 波段幅度
+            fib_0618_support = recent_high - (wave_range * 0.618)
+            fib_0382_tp = recent_high - (wave_range * 0.382)
 
             candle = sub_df.iloc[-1]
-            prev_candle = sub_df.iloc[-2]
             entry_price = candle['close']
 
+            # 進場條件：
+            # 1. 價格回踩 Fib 0.618 支撐區間 (容許 0.3% 浮動帶)
+            in_fib_zone = (candle['low'] <= fib_0618_support * 1.003) and (candle['close'] >= fib_0618_support * 0.995)
+            # 2. RSI 處於相對低位 (<= 45)
+            rsi_condition = candle['rsi'] <= 45
+            # 3. 收陽線或下影線承接
             lower_wick = min(candle['open'], candle['close']) - candle['low']
             body_size = abs(candle['close'] - candle['open'])
+            rejection = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
 
-            # 實戰平衡版條件
-            hit_fib = (candle['low'] <= fib_0618) and (candle['close'] >= fib_0618)
-            rsi_oversold = candle['rsi'] <= 42
-            vol_spike = candle['volume'] > (candle['vol_sma'] * 1.2)
-            
-            # K 線型態：長下影線 OR 多頭吞噬（陽包陰）
-            is_hammer = lower_wick >= (body_size * 1.0)
-            is_engulfing = (candle['close'] > candle['open']) and (prev_candle['close'] < prev_candle['open']) and (candle['close'] >= prev_candle['open'])
-            price_action = is_hammer or is_engulfing
-
-            if hit_fib and rsi_oversold and vol_spike and price_action:
-                stop_loss = min(candle['low'] * 0.998, fib_0786)
-                tp_1 = fib_0382
-                tp_2 = swing_high
+            if in_fib_zone and rsi_condition and rejection:
+                stop_loss = min(candle['low'] * 0.998, recent_low * 0.999)
+                tp_1 = fib_0382_tp if fib_0382_tp > entry_price else recent_high
+                tp_2 = recent_high
 
                 outcome = "HOLDING"
                 bars_held = 0
@@ -126,7 +112,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                     'Result': outcome
                 })
 
-                i += max(bars_held, 1)
+                i += max(bars_held, 2)
             else:
                 i += 1
 
@@ -136,7 +122,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 開始執行「平衡版」7 天量化回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 執行修復後 Fib 波段回測...**")
     
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
@@ -151,7 +137,7 @@ def main():
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT] 平衡版 7 天回測**\n```text\n未觸發任何進場條件 (0.618 + RSI<=42 + 形態 + 1.2x量能)。\n```")
+        send_discord_alert("📋 **[BACKTEST REPORT] 過去 7 天回測**\n```text\n未觸發任何訊號。\n```")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -167,7 +153,7 @@ def main():
         trade_details += f"[{r['Time']}] {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 實戰平衡版 7 天回測 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 動態 Fib 波段 7 天回測 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
@@ -175,12 +161,12 @@ def main():
         f"SL 停損離場 : {sl_count} 次\n"
         f"持倉/未觸發 : {holding_count} 次\n"
         f"----------------------------------------\n"
-        f"交易明細紀錄 (近期):\n"
+        f"近期交易明細:\n"
         f"{trade_details}"
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== 平衡版回測與推播完成 ===")
+    print("=== 回測完成 ===")
 
 if __name__ == '__main__':
     main()
