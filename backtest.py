@@ -32,7 +32,6 @@ SYMBOLS = {
 def get_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            # 幣安可直接抓取足夠數量的歷史 15m 數據
             url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 100:
@@ -43,32 +42,33 @@ def get_historical_data(cfg):
                 df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         else:
-            # 為了突破 Yahoo 15m 60天限制，透過多次抓取拼接最近 1 年的 1h 數據，或者分段抓取 59 天拼湊
-            frames = []
-            for start_day in [59, 118, 177, 236, 295, 354]:
-                end_day = max(0, start_day - 59)
-                df = yf.download(cfg['s'], start=pd.Timestamp.today() - pd.Timedelta(days=start_day), end=pd.Timestamp.today() - pd.Timedelta(days=end_day), interval="1h", progress=False)
-                if df is not None and not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    df = df.reset_index()
-                    cols_lower = [str(c).lower() for c in df.columns]
-                    df.columns = cols_lower
-                    time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
-                    
-                    res_df = pd.DataFrame()
-                    res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
-                    for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
-                        for cand in candidates:
-                            if cand in df.columns:
-                                res_df[target] = df[cand].astype(float)
-                                break
-                    frames.append(res_df.dropna())
-            
-            if frames:
-                full_df = pd.concat(frames).drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
-                if len(full_df) >= 100:
-                    return full_df
+            # 使用最穩定的 59 天 15m 高頻抓取法，確保美股與商品個股完整回歸
+            df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
+            if df is not None and not df.empty and len(df) >= 50:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.reset_index()
+                cols_lower = [str(c).lower() for c in df.columns]
+                df.columns = cols_lower
+                
+                time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
+                
+                res_df = pd.DataFrame()
+                res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
+                
+                for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
+                    found = False
+                    for cand in candidates:
+                        if cand in df.columns:
+                            res_df[target] = df[cand].astype(float)
+                            found = True
+                            break
+                    if not found:
+                        return None
+                
+                res_df = res_df.dropna().reset_index(drop=True)
+                if len(res_df) >= 50:
+                    return res_df
     except Exception:
         pass
     return None
@@ -102,17 +102,10 @@ def run_backtest():
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
         df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
-        is_stock = (cfg['t'] == 'stock' and sym != 'XAU')
-
-        for i in range(50, len(df) - 10):
+        for i in range(50, len(df) - 15):
             bar = df.iloc[i]
             prev_bar = df.iloc[i-1]
             
-            if is_stock:
-                hour = bar['timestamp'].hour
-                if not (22 <= hour or hour <= 3):
-                    continue
-
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
@@ -127,13 +120,12 @@ def run_backtest():
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
             
             if cond_long:
-                atr_mult = 1.2 if is_stock else 1.5
-                sl = min(l, entry_price - (bar['atr'] * atr_mult))
+                sl = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1 = entry_price + abs(entry_price - sl)
                 
                 outcome = None
                 exit_idx = i
-                for j in range(1, 6):
+                for j in range(1, 11):
                     future_bar = df.iloc[i + j]
                     if future_bar['l'] <= sl:
                         outcome = 'LOSS'
@@ -187,12 +179,12 @@ def run_backtest():
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
-
     time_range_str = str(min_time).split()[0] + " ~ " + str(max_time).split()[0] if min_time and max_time else "N/A"
 
     msg1 = "\n".join([
-        "📊 **[1年期跨標的時間軸回測 (1/2)]**",
+        "📊 **[15m 高頻時間軸 + 複利滾動回測 (1/2)]**",
         "```text",
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能",
         "回測區間: " + time_range_str,
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
@@ -203,7 +195,7 @@ def run_backtest():
     ])
 
     msg2 = "\n".join([
-        "📊 **[1年期跨標的時間軸回測 (2/2)]**",
+        "📊 **[15m 高頻時間軸 + 複利滾動回測 (2/2) - 美股與商品]**",
         "```text",
         "\n".join(stock_reports),
         "```"
