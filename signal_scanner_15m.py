@@ -6,24 +6,36 @@ import numpy as np
 import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-ACCOUNT_BALANCE = 10000.0  # 帳戶本金 (USDT)
-RISK_PER_TRADE = 100.0     # 單筆固定 1% 風控 (100 USDT)
+ACCOUNT_BALANCE = 100.0   # 帳戶本金 100 USDT
+RISK_PER_TRADE = 1.0      # 單筆固定 1% 風控 ($1.0 USDT)
 
+# 20 檔標的與幣安合約專用槓桿配置 (加密/商品 100x，美股 20x)
 SYMBOLS = {
-    'BTC': {'t': 'binance', 's': 'BTCUSDT'},
-    'ETH': {'t': 'binance', 's': 'ETHUSDT'},
-    'XAU': {'t': 'binance', 's': 'PAXGUSDT'},
-    'CLU': {'t': 'stock', 's': 'CL=F'},
-    'TSM': {'t': 'stock', 's': 'TSM'},
-    'NVDA': {'t': 'stock', 's': 'NVDA'},
-    'TSLA': {'t': 'stock', 's': 'TSLA'},
-    'AAPL': {'t': 'stock', 's': 'AAPL'},
-    'GOOGL': {'t': 'stock', 's': 'GOOGL'},
-    'MU': {'t': 'stock', 's': 'MU'},
-    'AMZN': {'t': 'stock', 's': 'AMZN'},
-    'GLW': {'t': 'stock', 's': 'GLW'},
-    'SPCX': {'t': 'stock', 's': 'SPCX'},
-    'SNDK': {'t': 'stock', 's': 'SNDK'}
+    # 1. 主流加密貨幣 (Binance 100x)
+    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
+    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
+    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
+    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0, 'cat': '加密貨幣 (100x)'},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0, 'cat': '加密貨幣 (100x)'},
+    
+    # 2. 大宗商品 & 貴金屬 (Binance 100x)
+    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0, 'cat': '貴金屬 (100x)'},
+    'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0, 'cat': '原油商品 (100x)'},
+    
+    # 3. 美股龍頭 (Binance 20x)
+    'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'MSFT': {'t': 'stock',   's': 'MSFT',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'AAPL': {'t': 'stock',   's': 'AAPL',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'GOOGL':{'t': 'stock',   's': 'GOOGL',    'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'AMZN': {'t': 'stock',   's': 'AMZN',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'META': {'t': 'stock',   's': 'META',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'TSLA': {'t': 'stock',   's': 'TSLA',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'MU':   {'t': 'stock',   's': 'MU',       'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'GLW':  {'t': 'stock',   's': 'GLW',      'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'SPCX': {'t': 'stock',   's': 'SPCX',     'lev': 20.0,  'cat': '美股合約 (20x)'},
+    'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0,  'cat': '美股合約 (20x)'}
 }
 
 def send_discord(content):
@@ -31,7 +43,7 @@ def send_discord(content):
         print("[No Webhook URL]\n", content)
         return False
     try:
-        res = requests.post(DISCORD_WEBHOOK_URL, json={"content": content[:1950]}, timeout=8)
+        res = requests.post(DISCORD_WEBHOOK_URL, json={"content": content[:1900]}, timeout=8)
         return res.status_code in [200, 204]
     except Exception as e:
         print("Webhook Error:", e)
@@ -47,23 +59,31 @@ def get_latest_data(cfg):
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                df['time'] = pd.to_datetime(df['t'], unit='ms').dt.strftime('%H:%M')
+                
+                dt_tw = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
+                df['time'] = dt_tw.dt.strftime('%H:%M')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']]
         else:
-            # 改為 7d 確保週末亦可載入上週五之歷史 K 棒
             df = yf.download(cfg['s'], period="7d", interval="15m", progress=False)
-            if not df.empty and len(df) >= 60:
+            if df is not None and not df.empty and len(df) >= 60:
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [c[0].lower() for c in df.columns]
-                else:
-                    df.columns = [c.lower() for c in df.columns]
-                df = df.reset_index()
-                time_col = 'datetime' if 'datetime' in df.columns else 'date'
-                df['time'] = pd.to_datetime(df[time_col]).dt.strftime('%H:%M')
-                rename_map = {'open': 'o', 'high': 'h', 'low': 'l', 'close': 'c', 'volume': 'v'}
-                return df[['time', 'open', 'high', 'low', 'close', 'volume']].rename(columns=rename_map)
-    except Exception:
-        pass
+                    df.columns = df.columns.get_level_values(0)
+                df = df.rename(columns=str.lower)
+                
+                req_cols = ['open', 'high', 'low', 'close', 'volume']
+                if all(c in df.columns for c in req_cols):
+                    res_df = df[req_cols].copy()
+                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    
+                    idx = df.index
+                    if idx.tz is None:
+                        dt_tw = idx.tz_localize('UTC').tz_convert('Asia/Taipei')
+                    else:
+                        dt_tw = idx.tz_convert('Asia/Taipei')
+                    res_df['time'] = dt_tw.strftime('%H:%M')
+                    return res_df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+    except Exception as e:
+        print("Fetch error " + str(cfg['s']) + ": " + str(e))
     return None
 
 def scan_symbol(sym, cfg):
@@ -112,10 +132,10 @@ def scan_symbol(sym, cfg):
     side = None
     sl, tp1, tp2 = 0.0, 0.0, 0.0
 
-    rsi_bull = (30 <= bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+    rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
     cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l)
     
-    rsi_bear = (45 <= bar['rsi'] <= 70) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+    rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
     cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h)
 
     if cond_long and (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and rsi_bull:
@@ -133,9 +153,13 @@ def scan_symbol(sym, cfg):
         sl_pct = abs(entry_price - sl) / entry_price
         sl_pct = max(sl_pct, 0.002)
         pos_val = RISK_PER_TRADE / sl_pct
+        lev = cfg['lev']
+        margin_req = pos_val / lev
 
         return {
             'sym': sym,
+            'cat': cfg['cat'],
+            'lev': int(lev),
             'side': side,
             'time': bar['time'],
             'entry': entry_price,
@@ -144,12 +168,14 @@ def scan_symbol(sym, cfg):
             'tp2': tp2,
             'sl_pct': sl_pct * 100,
             'pos_val': pos_val,
+            'margin': margin_req,
             'rsi': bar['rsi']
         }, status_summary
 
     return None, status_summary
 
 def main():
+    tw_now = pd.to_datetime('now', utc=True).tz_convert('Asia/Taipei')
     detected_signals = []
     market_status = []
 
@@ -163,37 +189,29 @@ def main():
     if detected_signals:
         for s in detected_signals:
             side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
-            pos_v = s['pos_val']
-            sl_p = s['sl_pct']
-
-            m10, loss10 = pos_v / 10.0, sl_p * 10.0
-            m20, loss20 = pos_v / 20.0, sl_p * 20.0
-            m50, loss50 = pos_v / 50.0, min(sl_p * 50.0, 100.0)
-            m100, loss100 = pos_v / 100.0, min(sl_p * 100.0, 100.0)
-
             price_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
             
             msg = (
-                "%s **%s** (15m 趨勢觸發)\n"
+                "%s **%s** (%s)\n"
                 "```text\n"
-                "進場時間 : %s UTC\n"
+                "進場時間 : %s (台灣時間)\n"
                 "進場價格 : $%s\n"
-                "停損價格 : $%s (-%.2f%% | ATR 防插針)\n"
-                "第一目標 : $%s (Fib 0.382 / 減半設保本)\n"
-                "終極目標 : $%s (前波極值 / 全平)\n"
+                "停損價格 : $%s (-%.2f%% | ATR 緩衝防插針)\n"
+                "第一目標 : $%s (Fib 0.382 | 平倉50%% + 設保本損)\n"
+                "終極目標 : $%s (前波極值 | 全平)\n"
                 "----------------------------------------------------\n"
-                "各槓桿所需保證金與本金損耗比 (固定風控 $100 USDT):\n"
-                "• 10x  : 押 $%5.0f USDT | 觸及停損損耗保證金 %5.1f%%\n"
-                "• 20x  : 押 $%5.0f USDT | 觸及停損損耗保證金 %5.1f%%\n"
-                "• 50x  : 押 $%5.0f USDT | 觸及停損損耗保證金 %5.1f%%\n"
-                "• 100x : 押 $%5.0f USDT | 觸及停損損耗保證金 %5.1f%%\n"
+                "幣安合約參數設定 (固定風控 $1.0 USDT):\n"
+                "• 槓桿倍數 : %dx 槓桿\n"
+                "• 名義開倉 : $%5.1f USDT\n"
+                "• 應押保證金: $%5.2f USDT (佔帳戶 %.2f%%)\n"
                 "----------------------------------------------------\n"
                 "指標數據 : RSI(14) = %.1f\n"
                 "```" % (
-                    side_tag, s['sym'], s['time'],
+                    side_tag, s['sym'], s['cat'],
+                    s['time'],
                     price_fmt % s['entry'], price_fmt % s['sl'], s['sl_pct'],
                     price_fmt % s['tp1'], price_fmt % s['tp2'],
-                    m10, loss10, m20, loss20, m50, loss50, m100, loss100,
+                    s['lev'], s['pos_val'], s['margin'], (s['margin'] / ACCOUNT_BALANCE) * 100,
                     s['rsi']
                 )
             )
@@ -203,7 +221,8 @@ def main():
         heartbeat_msg = (
             "📡 **[15m 掃描完成] 目前無觸發訊號**\n"
             "```text\n"
-            "監控狀態: 14 檔標的連線正常 | 風控: 1% ($100 USDT)\n"
+            "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔\n"
+            "合約規格: 加密/商品 100x | 美股 20x | 風控: 1% ($1.0 USDT)\n"
             "----------------------------------------------------\n"
             + status_table + "\n"
             "```"
