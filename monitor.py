@@ -6,9 +6,8 @@ import numpy as np
 import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-ACCOUNT_BALANCE = 10000.0  # 帳戶本金
+ACCOUNT_BALANCE = 10000.0  # 帳戶本金 (USDT)
 RISK_PER_TRADE = 100.0     # 單筆固定 1% 風控 (100 USDT)
-LEVERAGE = 10.0            # 10x 槓桿
 
 # 14 檔標的現貨數據源配置
 SYMBOLS = {
@@ -30,12 +29,14 @@ SYMBOLS = {
 
 def send_discord(content):
     if not DISCORD_WEBHOOK_URL:
-        print("[Console Log]\n", content)
-        return
+        print("[未偵測到 DISCORD_WEBHOOK_URL]\n", content)
+        return False
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
+        res = requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
+        return res.status_code in [200, 204]
     except Exception as e:
         print("Webhook Error:", e)
+        return False
 
 def get_latest_data(cfg):
     try:
@@ -70,7 +71,6 @@ def scan_signal(sym, cfg):
     if df is None or len(df) < 60:
         return None
 
-    # 指標運算
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     
@@ -83,7 +83,7 @@ def scan_signal(sym, cfg):
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
-    # 取已確認收盤的 K 棒 (倒數第 2 筆)
+    # 最新完成 K 棒 (倒數第二筆)
     idx = len(df) - 2
     sub = df.iloc[idx-25:idx+1]
     h, l = sub['h'].max(), sub['l'].min()
@@ -109,11 +109,9 @@ def scan_signal(sym, cfg):
     side = None
     sl, tp1, tp2 = 0.0, 0.0, 0.0
 
-    # 多頭訊號判定
     rsi_bull = (30 <= bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
     cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l)
     
-    # 空頭訊號判定
     rsi_bear = (45 <= bar['rsi'] <= 70) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
     cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h)
 
@@ -131,7 +129,7 @@ def scan_signal(sym, cfg):
     if side:
         sl_pct = abs(entry_price - sl) / entry_price
         sl_pct = max(sl_pct, 0.002)
-        pos_val = RISK_PER_TRADE / sl_pct  # 名義開倉總價值 (建議倉位)
+        pos_val = RISK_PER_TRADE / sl_pct
 
         return {
             'sym': sym,
@@ -157,24 +155,39 @@ def main():
         time.sleep(0.05)
 
     if not detected_signals:
-        print("[No Signal] 14 檔標的目前無符合交易條件之訊號。")
+        print("[No Signal] 本週期 14 檔標的皆無符合之進場訊號。")
         return
 
     for s in detected_signals:
         side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
+        pos_v = s['pos_val']
+        sl_p = s['sl_pct']
+
+        # 計算 10x / 20x / 50x / 100x 下的保證金與保證金虧損率
+        m10, loss10 = pos_v / 10.0, sl_p * 10.0
+        m20, loss20 = pos_v / 20.0, sl_p * 20.0
+        m50, loss50 = pos_v / 50.0, min(sl_p * 50.0, 100.0)
+        m100, loss100 = pos_v / 100.0, min(sl_p * 100.0, 100.0)
+
+        price_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
+        
         msg = (
-            side_tag + " **" + s['sym'] + "** (15m 趨勢觸發)\n"
-            "```text\n"
-            "進場時間 : " + s['time'] + " UTC\n"
-            "進場價格 : $" + ("%.2f" % s['entry']) + "\n"
-            "停損價格 : $" + ("%.2f" % s['sl']) + " (-" + ("%.2f" % s['sl_pct']) + "% | ATR 防插針)\n"
-            "第一目標 : $" + ("%.2f" % s['tp1']) + " (Fib 0.382 / 減半保本)\n"
-            "終極目標 : $" + ("%.2f" % s['tp2']) + " (前波極值 / 清倉)\n"
-            "-----------------------------------------\n"
-            "建議倉位 : $" + ("{:,.0f}".format(s['pos_val'])) + " USDT (10x 槓桿)\n"
-            "風險鎖定 : 固定虧損 -$100 USDT (1.0%)\n"
-            "動態指標 : RSI(14) = " + ("%.1f" % s['rsi']) + "\n"
-            "```"
+            f"{side_tag} **{s['sym']}** (15m 趨勢訊號)\n"
+            f"```text\n"
+            f"進場時間 : {s['time']} UTC\n"
+            f"進場價格 : ${price_fmt % s['entry']}\n"
+            f"停損價格 : ${price_fmt % s['sl']} (-{s['sl_pct']:.2f}% | 實體停損位)\n"
+            f"第一目標 : ${price_fmt % s['tp1']} (Fib 0.382 / 減半設保本)\n"
+            f"終極目標 : ${price_fmt % s['tp2']} (前波極值 / 全平)\n"
+            f"----------------------------------------------------\n"
+            f"各槓桿所需保證金與保證金虧損比 (固定風控 $100 USDT):\n"
+            f"• 10x  : 押 ${m10:>5.0f} USDT | 觸及停損損耗本金 {loss10:>5.1f}%\n"
+            f"• 20x  : 押 ${m20:>5.0f} USDT | 觸及停損損耗本金 {loss20:>5.1f}%\n"
+            f"• 50x  : 押 ${m50:>5.0f} USDT | 觸及停損損耗本金 {loss50:>5.1f}%\n"
+            f"• 100x : 押 ${m100:>5.0f} USDT | 觸及停損損耗本金 {loss100:>5.1f}%\n"
+            f"----------------------------------------------------\n"
+            f"指標數據 : RSI(14) = {s['rsi']:.1f}\n"
+            f"```"
         )
         send_discord(msg)
 
