@@ -20,7 +20,6 @@ def send_discord_alert(content):
     if not DISCORD_WEBHOOK_URL:
         return
     try:
-        # 避免 Discord 單則訊息超過 2000 字限制
         if len(content) > 1900:
             chunks = [content[i:i+1900] for i in range(0, len(content), 1900)]
             for chunk in chunks:
@@ -40,61 +39,81 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def resolve_symbol_and_fetch(perp_ex, spot_ex, raw_name):
-    """跨合約與現貨市場嘗試所有可能的代號格式"""
-    candidates = []
+def find_matched_symbol(exchange, raw_name):
+    """從已載入的市場清單中智慧匹配合適的交易對"""
+    raw = raw_name.upper()
+    markets = exchange.markets
     
-    if raw_name.upper() == 'XAU':
-        candidates = ['PAXG/USDT:USDT', 'PAXG/USDT', 'XAU/USDT:USDT', 'XAUUSDT']
-    elif raw_name.upper() == 'CLU':
-        candidates = ['CLU/USDT:USDT', 'CL/USDT:USDT', 'OIL/USDT:USDT', 'CLU/USDT', 'USO/USDT:USDT']
-    else:
-        candidates = [
-            f"{raw_name}/USDT:USDT",
-            f"{raw_name}/USDT",
-            f"{raw_name}USDT",
-            f"1000{raw_name}/USDT:USDT",
-            f"{raw_name.upper()}/USDT:USDT",
-            f"{raw_name.upper()}/USDT"
-        ]
+    # 專屬別名對照
+    alias_map = {
+        'XAU': ['PAXG/USDT', 'PAXG/USDT:USDT', 'XAU/USDT'],
+        'CLU': ['CL/USDT:USDT', 'CLU/USDT:USDT', 'OIL/USDT:USDT', 'USO/USDT:USDT'],
+        '币安人生': ['LIFE/USDT', 'BINANCE/USDT']
+    }
+    
+    if raw in alias_map:
+        for candidate in alias_map[raw]:
+            if candidate in markets:
+                return candidate
 
-    # 1. 優先嘗試合約
-    for sym in candidates:
-        try:
-            ohlcv = perp_ex.fetch_ohlcv(sym, TIMEFRAME, limit=FETCH_LIMIT)
-            if ohlcv and len(ohlcv) >= 60:
-                return f"合約:{sym}", ohlcv
-        except Exception:
-            pass
+    # 一般標的優先嘗試標準合約與現貨格式
+    standard_candidates = [
+        f"{raw}/USDT:USDT",
+        f"{raw}/USDT",
+        f"1000{raw}/USDT:USDT",
+        f"{raw}USDT"
+    ]
+    for candidate in standard_candidates:
+        if candidate in markets:
+            return candidate
 
-    # 2. 次要嘗試現貨
-    for sym in candidates:
-        try:
-            ohlcv = spot_ex.fetch_ohlcv(sym, TIMEFRAME, limit=FETCH_LIMIT)
-            if ohlcv and len(ohlcv) >= 60:
-                return f"現貨:{sym}", ohlcv
-        except Exception:
-            pass
+    # 模糊搜尋包含該名稱的 USDT 交易對
+    for sym in markets.keys():
+        if raw in sym and ('USDT' in sym):
+            return sym
 
-    return None, None
+    return None
 
 def run_backtest():
-    send_discord_alert("🧪 **[BACKTEST] 啟動全透明診斷回測（掃描 17 檔標的）...**")
+    send_discord_alert("🧪 **[BACKTEST] 初始化市場與 K 線抓取中...**")
     
     perp_ex = ccxt.binanceusdm({'enableRateLimit': True})
     spot_ex = ccxt.binance({'enableRateLimit': True})
     
+    try:
+        perp_ex.load_markets()
+        spot_ex.load_markets()
+    except Exception as e:
+        send_discord_alert(f"⚠️ 市場清單載入失敗: {e}")
+        return
+
     status_log = []
     all_trades = []
 
     for name in TARGET_SYMBOLS:
-        resolved_sym, ohlcv = resolve_symbol_and_fetch(perp_ex, spot_ex, name)
+        ex = perp_ex
+        matched_sym = find_matched_symbol(perp_ex, name)
+        market_type = "合約"
         
-        if not ohlcv:
-            status_log.append(f"❌ {name:<8} : 抓取失敗 (查無對應合約/現貨代碼)")
+        if not matched_sym:
+            matched_sym = find_matched_symbol(spot_ex, name)
+            ex = spot_ex
+            market_type = "現貨"
+
+        if not matched_sym:
+            status_log.append(f"❌ {name:<8} : 幣安無對應交易對")
             continue
 
-        status_log.append(f"✅ {name:<8} : 成功 ({resolved_sym}, {len(ohlcv)} 根 K 線)")
+        try:
+            ohlcv = ex.fetch_ohlcv(matched_sym, TIMEFRAME, limit=FETCH_LIMIT)
+            if not ohlcv or len(ohlcv) < 50:
+                status_log.append(f"⚠️ {name:<8} : K 線不足 ({matched_sym})")
+                continue
+
+            status_log.append(f"✅ {name:<8} : 成功 [{market_type}] ({matched_sym}, {len(ohlcv)} 根)")
+        except Exception as err:
+            status_log.append(f"❌ {name:<8} : 抓取錯誤 ({err})")
+            continue
 
         # 執行 Fib 回測計算
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -179,13 +198,13 @@ def run_backtest():
                 i += 1
         time.sleep(0.1)
 
-    # 1. 發送 17 檔標的連線狀態報告
+    # 1. 推播標的載入診斷
     status_msg = "🔍 **[標的連線與數據診斷報告]**\n```text\n" + "\n".join(status_log) + "\n```"
     send_discord_alert(status_msg)
 
-    # 2. 發送回測結果報告
+    # 2. 推播回測統計
     if not all_trades:
-        send_discord_alert("📋 **[策略統計]** 所有成功連線的標的在此區間皆未觸發進場訊號。")
+        send_discord_alert("📋 **[策略統計]** 本輪成功載入之標的未產生符合條件的進場訊號。")
         return
 
     res_df = pd.DataFrame(all_trades)
@@ -212,7 +231,7 @@ def run_backtest():
         f"SL 停損離場 : {sl_count} 次\n"
         f"持倉/未觸發 : {holding_count} 次\n"
         f"----------------------------------------\n"
-        f"近期交易明細 (前10筆):\n"
+        f"近期交易明細:\n"
         f"{trade_details}"
         f"```"
     )
