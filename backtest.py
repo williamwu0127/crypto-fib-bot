@@ -53,7 +53,6 @@ def get_historical_data(cfg):
                 cols_lower = [str(c).lower() for c in df.columns]
                 df.columns = cols_lower
                 
-                # 尋找對應的欄位名稱
                 time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
                 
                 res_df = pd.DataFrame()
@@ -95,8 +94,18 @@ def run_backtest():
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
 
+        is_stock = (cfg['t'] == 'stock' and sym != 'XAU')
+
         for i in range(50, len(df) - 15):
             bar = df.iloc[i]
+            
+            # 【美股優化邏輯】若是美股，過濾掉非開盤時段的雜訊訊號 (限定台灣時間晚上 22:30 到凌晨 03:00 之間的黃金交投期)
+            if is_stock:
+                hour = bar['timestamp'].hour
+                # 台灣時間 22:30 到 03:00 約對應美股開盤後的前幾小時
+                if not (22 <= hour or hour <= 3):
+                    continue
+
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
@@ -110,7 +119,9 @@ def run_backtest():
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002)
             
             if cond_long:
-                sl = min(l, entry_price - (bar['atr'] * 1.5))
+                # 美股使用稍微收窄的防守距離，減少盤中雜訊誤觸
+                atr_mult = 1.2 if is_stock else 1.5
+                sl = min(l, entry_price - (bar['atr'] * atr_mult))
                 tp1 = entry_price + abs(entry_price - sl)
                 
                 outcome = None
@@ -166,7 +177,7 @@ def run_backtest():
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[時間軸排序 + 複利滾動 15m 回測報告]**",
+        "📊 **[美股時段過濾優化 + 複利滾動回測]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
