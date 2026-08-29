@@ -4,46 +4,49 @@ import requests
 import ccxt
 import pandas as pd
 
-# 1. Discord Webhook URL
+# 1. 讀取 Discord Webhook URL (由 GitHub Secrets 注入)
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # 2. 加密貨幣監控清單 (Binance 現貨/永續合約通用)
 CRYPTO_SYMBOLS = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'PAXG/USDT',      # 黃金代幣 (XAU)
-    'PLAY/USDT',
-    'LAB/USDT',
-    'CLU/USDT',
-    '币安人生/USDT'
+    'BTC/USDT',
+    'ETH/USDT',
+    'PAXG/USDT',      # 黃金代幣 (XAU)
+    'PLAY/USDT',
+    'LAB/USDT',
+    'CLU/USDT',
+    '币安人生/USDT'
 ]
 
+# 3. 幣安美股永續合約監控清單 (TradFi Perps)
 STOCK_PERP_SYMBOLS = [
-    'TSM/USDT:USDT',
-    'NVDA/USDT:USDT',
-    'TSLA/USDT:USDT',
-    'AAPL/USDT:USDT',
-    'GOOGL/USDT:USDT',
-    'MU/USDT:USDT',
-    'AMZN/USDT:USDT',
-    'MSFT/USDT:USDT',
-    'META/USDT:USDT',
-    'PLTR/USDT:USDT',
-    'COIN/USDT:USDT',
-    'MSTR/USDT:USDT'
+    'TSM/USDT:USDT',    # 台積電
+    'NVDA/USDT:USDT',   # 輝達
+    'TSLA/USDT:USDT',   # 特斯拉
+    'AAPL/USDT:USDT',   # 蘋果
+    'GOOGL/USDT:USDT',  # 谷歌
+    'MU/USDT:USDT',     # 美光
+    'AMZN/USDT:USDT',   # 亞馬遜
+    'MSFT/USDT:USDT',   # 微軟
+    'META/USDT:USDT',   # Meta
+    'PLTR/USDT:USDT',   # Palantir
+    'COIN/USDT:USDT',   # Coinbase
+    'MSTR/USDT:USDT'    # 微策略
 ]
 
-TIMEFRAME = '15m'
+TIMEFRAME = '1h'  # K 線週期：1 小時
 
 def send_discord_alert(content):
+    """發送 Discord 訊息"""
     if not DISCORD_WEBHOOK_URL:
         return
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=10)
     except Exception as err:
-        print("推播失敗:", err)
+        print(f"發送 Discord 失敗: {err}")
 
 def calculate_rsi(series, period=14):
+    """計算標準 RSI"""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -52,17 +55,21 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def evaluate_resonance(exchange, symbol, market_type):
+def evaluate_resonance(exchange, symbol, market_type="Crypto"):
     display_name = symbol.split(':')[0]
     try:
+        # 抓取 100 根 K 線 (OHLCV)
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=100)
-        if not ohlcv or len(ohlcv) < 35:
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+        if len(df) < 35:
             return "INSUFFICIENT_DATA"
 
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        # 技術指標計算
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
 
+        # 計算過去 30 根 K 線的波段高低點與斐波那契點位
         swing_high = df['high'][-30:].max()
         swing_low = df['low'][-30:].min()
         fib_range = swing_high - swing_low
@@ -71,61 +78,65 @@ def evaluate_resonance(exchange, symbol, market_type):
         fib_0382 = swing_high - (fib_range * 0.382)
         fib_0786 = swing_high - (fib_range * 0.786)
 
-        candle = df.iloc[-2]
+        candle = df.iloc[-2]  # 最新收盤完成的 K 棒
         current_price = candle['close']
 
         lower_wick = min(candle['open'], candle['close']) - candle['low']
         body_size = abs(candle['close'] - candle['open'])
 
+        # 共振條件判定
         hit_fib = (candle['low'] <= fib_0618) and (candle['close'] >= fib_0618)
         rsi_oversold = candle['rsi'] <= 35
         hammer_candle = lower_wick > (body_size * 1.5)
         vol_spike = candle['volume'] > (candle['vol_sma'] * 1.5)
 
-        stop_loss = min(candle['low'] * 0.998, fib_0786)
-        tp_1 = fib_0382
-        tp_2 = swing_high
+        # 自動計算 TP / SL 與盈虧比
+        stop_loss = min(candle['low'] * 0.998, fib_0786)  # 取下影線底部或 0.786 支撐下方
+        tp_1 = fib_0382                                   # 第一目標：Fib 0.382 阻力
+        tp_2 = swing_high                                 # 第二目標：前波高點 (Fib 1.000)
 
         risk = max(current_price - stop_loss, 1e-4)
         reward_tp1 = max(tp_1 - current_price, 0)
         rr_ratio = reward_tp1 / risk
 
-        print(f"[{market_type} | {display_name}] P: {current_price:.2f} | Fib: {fib_0618:.2f} | RSI: {candle['rsi']:.2f}")
+        print(f"[{market_type} | {display_name}] 現價: {current_price:.2f} | 0.618位: {fib_0618:.2f} | RSI: {candle['rsi']:.2f}")
 
+        # 階段三：完全共振進場訊號 (附帶 TP/SL)
         if hit_fib and rsi_oversold and hammer_candle and vol_spike:
             msg = (
-                "🎯 **[SIGNAL] 共振進場確認｜" + display_name + " (" + TIMEFRAME + ")**\n"
-                "```text\n"
-                "Market      : " + market_type + "\n"
-                "Entry Price : $" + f"{current_price:.2f}" + "\n"
-                "Stop Loss   : $" + f"{stop_loss:.2f}" + "\n"
-                "TP1 (0.382) : $" + f"{tp_1:.2f}" + "\n"
-                "TP2 (High)  : $" + f"{tp_2:.2f}" + "\n"
-                "Risk/Reward : 1 : " + f"{rr_ratio:.2f}" + "\n"
-                "Condition   : Fib 0.618 + RSI 超賣 (" + f"{candle['rsi']:.1f}" + ") + 爆量長下影\n"
-                "```"
+                f"🔥 **【{market_type}：完全共振進場訊號】**\n"
+                f"**標的**：`{display_name}` ({TIMEFRAME})\n"
+                f"**建議進場價**：`${current_price:.2f}`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🛑 **停損點 (SL)**：`${stop_loss:.2f}` (跌破反轉結構)\n"
+                f"🎯 **第一止盈 (TP1)**：`${tp_1:.2f}` (Fib 0.382 / 減倉設保本)\n"
+                f"🚀 **第二止盈 (TP2)**：`${tp_2:.2f}` (波段前高)\n"
+                f"📊 **預估盈虧比 (R:R)**：`1 : {rr_ratio:.2f}`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"**技術狀態**：✅ 踩點 0.618 + ✅ RSI 超賣 ({candle['rsi']:.1f}) + ✅ 爆量長下影線"
             )
             send_discord_alert(msg)
             return "STAGE_3"
 
+        # 階段二：動能預警
         elif hit_fib and rsi_oversold:
             msg = (
-                "⚡ **[ALERT] 動能反轉預警｜" + display_name + " (" + TIMEFRAME + ")**\n"
-                "```text\n"
-                "Market: " + market_type + " | Price: $" + f"{current_price:.2f}" + " | Fib 0.618: $" + f"{fib_0618:.2f}" + " | RSI: " + f"{candle['rsi']:.1f}" + "\n"
-                "Status: 觸及 0.618 且 RSI 超賣，待 K 棒收線確認。\n"
-                "```"
+                f"⚡ **【{market_type}：動能預警 - 準備反轉】**\n"
+                f"**標的**：`{display_name}` ({TIMEFRAME})\n"
+                f"**現價**：`${current_price:.2f}` | **Fib 0.618 支撐**：`${fib_0618:.2f}`\n"
+                f"**RSI 數值**：`{candle['rsi']:.1f}` (超賣)\n"
+                f"⏳ **備註**：價格已至 0.618 關鍵支撐且 RSI 超賣，等待收出長下影或爆量確認！"
             )
             send_discord_alert(msg)
             return "STAGE_2"
 
+        # 階段一：觸及支撐
         elif hit_fib:
             msg = (
-                "👀 **[WATCH] 觸及關鍵支撐｜" + display_name + " (" + TIMEFRAME + ")**\n"
-                "```text\n"
-                "Market: " + market_type + " | Price: $" + f"{current_price:.2f}" + " \vert{} Fib 0.618: $" + f"{fib_0618:.2f}" + " | RSI: " + f"{candle['rsi']:.1f}" + "\n"
-                "Status: 價格回落至 Fib 0.618 區間。\n"
-                "```"
+                f"👀 **【{market_type}：觀察提醒 - 觸及支撐】**\n"
+                f"**標的**：`{display_name}` ({TIMEFRAME})\n"
+                f"**現價**：`${current_price:.2f}` | **Fib 0.618 支撐**：`${fib_0618:.2f}`\n"
+                f"👀 **備註**：價格已回落至 Fib 0.618 區域。"
             )
             send_discord_alert(msg)
             return "STAGE_1"
@@ -133,31 +144,35 @@ def evaluate_resonance(exchange, symbol, market_type):
         return "NO_SIGNAL"
 
     except Exception as e:
-        print("檢查標的略過:", symbol, e)
+        print(f"檢查標的 {symbol} 失敗: {e}")
         return "ERROR"
 
 def main():
-    send_discord_alert("📡 **系統啟動：開始執行市場掃描...**")
+    send_discord_alert("🤖 **【全市場監控】開始掃描 加密貨幣 ＋ 幣安美股合約...**")
     
+    # 建立幣安現貨與合約連線
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
     triggered_count = 0
 
+    # 1. 掃描加密貨幣
     for sym in CRYPTO_SYMBOLS:
-        status = evaluate_resonance(spot_exchange, sym, "Crypto")
+        status = evaluate_resonance(spot_exchange, sym, market_type="加密貨幣")
         if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
             triggered_count += 1
-        time.sleep(0.2)
+        time.sleep(0.3)
 
+    # 2. 掃描幣安美股永續合約
     for sym in STOCK_PERP_SYMBOLS:
-        status = evaluate_resonance(perp_exchange, sym, "TradFi Perp")
+        status = evaluate_resonance(perp_exchange, sym, market_type="美股合約")
         if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
             triggered_count += 1
-        time.sleep(0.2)
+        time.sleep(0.3)
 
+    # 3. 本輪無訊號彙總
     if triggered_count == 0:
         total_count = len(CRYPTO_SYMBOLS) + len(STOCK_PERP_SYMBOLS)
-        send_discord_alert("📋 **掃描完成**：共巡檢 `" + str(total_count) + "` 檔標的，目前皆無共振訊號。")
+        send_discord_alert(f"ℹ️ **【掃描完成】** 共檢查 `{total_count}` 個標的（加密貨幣 ＋ 美股合約），目前皆未觸發 Fib 0.618 關鍵進場條件。")
         
     print("=== 全數掃描完成 ===")
 
