@@ -6,13 +6,16 @@ import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "你的Discord網址")
 
-SYMBOLS = {
+CRYPTO_SYMBOLS = {
     'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
     'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
     'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0},
     'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0},
     'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0},
-    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0},
+    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0}
+}
+
+STOCK_SYMBOLS = {
     'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0},
     'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0},
     'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0},
@@ -29,58 +32,63 @@ SYMBOLS = {
     'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
 }
 
-def get_historical_data(cfg):
+def get_crypto_data(cfg):
     try:
-        if cfg['t'] == 'binance':
-            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
-            res = requests.get(url, timeout=6).json()
-            if isinstance(res, list) and len(res) >= 100:
-                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-                df = pd.DataFrame(res, columns=cols)
-                for col in ['o', 'h', 'l', 'c', 'v']:
-                    df[col] = df[col].astype(float)
-                df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
-                return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
-        else:
-            # 使用最穩定的 59 天 15m 高頻抓取法，確保美股與商品個股完整回歸
-            df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) >= 50:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                df = df.reset_index()
-                cols_lower = [str(c).lower() for c in df.columns]
-                df.columns = cols_lower
-                
-                time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
-                
-                res_df = pd.DataFrame()
-                res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
-                
-                for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
-                    found = False
-                    for cand in candidates:
-                        if cand in df.columns:
-                            res_df[target] = df[cand].astype(float)
-                            found = True
-                            break
-                    if not found:
-                        return None
-                
-                res_df = res_df.dropna().reset_index(drop=True)
-                if len(res_df) >= 50:
-                    return res_df
+        # 幣安抓取約 1 年的 15m 數據 (limit=35000 約等於 365 天)
+        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=35000"
+        res = requests.get(url, timeout=10).json()
+        if isinstance(res, list) and len(res) >= 100:
+            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+            df = pd.DataFrame(res, columns=cols)
+            for col in ['o', 'h', 'l', 'c', 'v']:
+                df[col] = df[col].astype(float)
+            df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+            return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
     except Exception:
         pass
     return None
 
-def run_backtest():
+def get_stock_data(cfg):
+    try:
+        # 美股抓取 Yahoo Finance 最久的高頻 15m 數據 (59天)
+        df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
+        if df is not None and not df.empty and len(df) >= 50:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.reset_index()
+            cols_lower = [str(c).lower() for c in df.columns]
+            df.columns = cols_lower
+            
+            time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
+            
+            res_df = pd.DataFrame()
+            res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
+            
+            for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
+                found = False
+                for cand in candidates:
+                    if cand in df.columns:
+                        res_df[target] = df[cand].astype(float)
+                        found = True
+                        break
+                if not found:
+                    return None
+            
+            res_df = res_df.dropna().reset_index(drop=True)
+            if len(res_df) >= 50:
+                return res_df
+    except Exception:
+        pass
+    return None
+
+def run_group_backtest(symbols_dict, data_fetch_func):
     all_trades = []
-    symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in SYMBOLS.keys()}
+    symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in symbols_dict.keys()}
     min_time = None
     max_time = None
 
-    for sym, cfg in SYMBOLS.items():
-        df = get_historical_data(cfg)
+    for sym, cfg in symbols_dict.items():
+        df = data_fetch_func(cfg)
         if df is None or len(df) < 50:
             continue
 
@@ -140,7 +148,6 @@ def run_backtest():
                     all_trades.append({
                         'sym': sym,
                         'time': bar['timestamp'],
-                        'exit_time': df.iloc[exit_idx]['timestamp'],
                         'outcome': outcome
                     })
 
@@ -163,40 +170,49 @@ def run_backtest():
         else:
             balance -= current_risk
 
-    crypto_reports = []
-    stock_reports = []
-    
+    reports = []
     for sym, stats in symbol_stats.items():
         t_cnt = stats['trades']
         w_cnt = stats['wins']
         w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
         if t_cnt > 0:
-            line = sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%"
-            if SYMBOLS[sym]['t'] == 'binance' or sym == 'XAU':
-                crypto_reports.append(line)
-            else:
-                stock_reports.append(line)
+            reports.append(sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%")
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
     time_range_str = str(min_time).split()[0] + " ~ " + str(max_time).split()[0] if min_time and max_time else "N/A"
 
+    return time_range_str, initial_balance, balance, profit_loss_pct, total_trades, overall_win_rate, reports
+
+def run_backtest():
+    # 1. 跑加密貨幣 (1年期 15m)
+    crypto_range, c_init, c_bal, c_pl, c_trades, c_win_rate, crypto_reports = run_group_backtest(CRYPTO_SYMBOLS, get_crypto_data)
+    
+    # 2. 跑美股與商品 (最久高頻 15m)
+    stock_range, s_init, s_bal, s_pl, s_trades, s_win_rate, stock_reports = run_group_backtest(STOCK_SYMBOLS, get_stock_data)
+
     msg1 = "\n".join([
-        "📊 **[15m 高頻時間軸 + 複利滾動回測 (1/2)]**",
+        "📊 **[加密貨幣專區 - 1年期 15m 複利回測]**",
         "```text",
         "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能",
-        "回測區間: " + time_range_str,
-        "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
-        "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
-        "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + str(round(overall_win_rate, 1)) + "%",
+        "回測區間: " + crypto_range,
+        "初始資金: $" + str(round(c_init, 2)) + " USDT",
+        "最終結餘: $" + str(round(c_bal, 2)) + " USDT (" + str(round(c_pl, 2)) + "%)",
+        "總交易次數: " + str(c_trades) + " 次 | 綜合勝率: " + str(round(c_win_rate, 1)) + "%",
         "----------------------------------------------------",
         "\n".join(crypto_reports),
         "```"
     ])
 
     msg2 = "\n".join([
-        "📊 **[15m 高頻時間軸 + 複利滾動回測 (2/2) - 美股與商品]**",
+        "📊 **[美股與商品專區 - 高頻 15m 複利回測]**",
         "```text",
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能",
+        "回測區間: " + stock_range,
+        "初始資金: $" + str(round(s_init, 2)) + " USDT",
+        "最終結餘: $" + str(round(s_bal, 2)) + " USDT (" + str(round(s_pl, 2)) + "%)",
+        "總交易次數: " + str(s_trades) + " 次 | 綜合勝率: " + str(round(s_win_rate, 1)) + "%",
+        "----------------------------------------------------",
         "\n".join(stock_reports),
         "```"
     ])
