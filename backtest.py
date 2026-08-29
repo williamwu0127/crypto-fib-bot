@@ -11,7 +11,7 @@ RISK_PER_TRADE = 100.0     # 單筆固定 1% 風控 ($100 USDT)
 LEVERAGE = 10.0            # 統一 10x 槓桿
 
 SYMBOLS = {
-    # 1. 主流加密貨幣 (24/7 全天候)
+    # 1. 主流加密貨幣 (24/7)
     'BTC': {'t': 'binance', 's': 'BTCUSDT'},
     'ETH': {'t': 'binance', 's': 'ETHUSDT'},
     'SOL': {'t': 'binance', 's': 'SOLUSDT'},
@@ -50,7 +50,7 @@ def send_discord(msg):
         print("Webhook Error:", e)
 
 def get_binance_1mo_data(symbol):
-    """分頁抓取近 30 天 15m K 線 (約 2880 根)"""
+    """分頁抓取近 30 天 15m K 線 (含時間戳轉 UTC+8)"""
     all_rows = []
     end_time = int(time.time() * 1000)
     
@@ -74,7 +74,11 @@ def get_binance_1mo_data(symbol):
     df = pd.DataFrame(all_rows, columns=cols).drop_duplicates(subset=['t']).sort_values('t')
     for col in ['o', 'h', 'l', 'c', 'v']:
         df[col] = df[col].astype(float)
-    return df[['o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+    
+    # 轉換為台灣時間 (UTC+8)
+    dt_utc = pd.to_datetime(df['t'], unit='ms', utc=True)
+    df['tw_hour'] = dt_utc.dt.tz_convert('Asia/Taipei').dt.hour
+    return df[['tw_hour', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
 
 def get_data(cfg):
     try:
@@ -91,7 +95,15 @@ def get_data(cfg):
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    return res_df.reset_index(drop=True)
+                    
+                    # 轉換 Index 時間為台灣時間
+                    idx = df.index
+                    if idx.tz is None:
+                        dt_tw = idx.tz_localize('UTC').tz_convert('Asia/Taipei')
+                    else:
+                        dt_tw = idx.tz_convert('Asia/Taipei')
+                    res_df['tw_hour'] = dt_tw.hour
+                    return res_df[['tw_hour', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
     except Exception as e:
         print("Error loading " + str(cfg['s']) + ": " + str(e))
     return None
@@ -118,6 +130,14 @@ def backtest():
 
         i = 40
         while i < len(df) - 1:
+            bar = df.iloc[i]
+            tw_hour = bar['tw_hour']
+
+            # ⏰ 時段過濾：僅允許台灣時間 08:00 ～ 23:59 (即 8 <= tw_hour < 24) 開倉
+            if not (8 <= tw_hour <= 23):
+                i += 1
+                continue
+
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
@@ -126,7 +146,6 @@ def backtest():
                 i += 1
                 continue
 
-            bar = df.iloc[i]
             prev_bar = df.iloc[i-1]
             entry_price = bar['c']
 
@@ -208,7 +227,7 @@ def backtest():
                 i += 1
 
     if not all_trades:
-        send_discord("⚠️ 近 30 天無觸發交易。")
+        send_discord("⚠️ 近 30 天無符合時段之交易。")
         return
 
     res = pd.DataFrame(all_trades)
@@ -236,12 +255,12 @@ def backtest():
     
     table_str = "\n".join(rows)
     line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
-    line2 = "回測週期: 近 30 天 | 15m 級別 10x 合約 (%d 檔標的)" % len(grp)
+    line2 = "回測週期: 近 30 天 | 交易時段: 台灣時間 08:00 - 24:00 (移除夜間)"
     line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
     line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
-        "📊 **[BACKTEST REPORT] 10x 合約波段回測 (20 檔標的 30 天)**\n"
+        "📊 **[BACKTEST REPORT] 日間黃金時段回測 (台時 08:00-24:00)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
@@ -252,7 +271,7 @@ def backtest():
         "```"
     )
     send_discord(report)
-    print("=== 20 檔標的 30 天回測完成 ===")
+    print("=== 時段過濾回測完成 ===")
 
 if __name__ == '__main__':
     backtest()
