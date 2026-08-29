@@ -1,9 +1,9 @@
 import os
 import time
+from datetime import datetime, timezone
 import requests
 import ccxt
 import pandas as pd
-from datetime import datetime
 
 # 1. 讀取 Discord Webhook URL
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -20,18 +20,18 @@ CRYPTO_SYMBOLS = [
 ]
 
 STOCK_PERP_SYMBOLS = [
-    'TSM/USDT:USDT',    # 台積電
-    'NVDA/USDT:USDT',   # 輝達
-    'TSLA/USDT:USDT',   # 特斯拉
-    'AAPL/USDT:USDT',   # 蘋果
-    'GOOGL/USDT:USDT',  # 谷歌
-    'MU/USDT:USDT',     # 美光
-    'AMZN/USDT:USDT',   # 亞馬遜
-    'MSFT/USDT:USDT',   # 微軟
-    'META/USDT:USDT',   # Meta
-    'PLTR/USDT:USDT',   # Palantir
-    'COIN/USDT:USDT',   # Coinbase
-    'MSTR/USDT:USDT'    # 微策略
+    'TSM/USDT:USDT',
+    'NVDA/USDT:USDT',
+    'TSLA/USDT:USDT',
+    'AAPL/USDT:USDT',
+    'GOOGL/USDT:USDT',
+    'MU/USDT:USDT',
+    'AMZN/USDT:USDT',
+    'MSFT/USDT:USDT',
+    'META/USDT:USDT',
+    'PLTR/USDT:USDT',
+    'COIN/USDT:USDT',
+    'MSTR/USDT:USDT'
 ]
 
 TIMEFRAME = '15m'  # 15 分鐘 K 線週期
@@ -59,10 +59,10 @@ def evaluate_resonance(exchange, symbol, asset_class="Crypto"):
     display_name = symbol.split(':')[0]
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=100)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-        if len(df) < 35:
+        if not ohlcv or len(ohlcv) < 35:
             return "INSUFFICIENT_DATA"
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
@@ -139,32 +139,38 @@ def evaluate_resonance(exchange, symbol, asset_class="Crypto"):
         return "NO_SIGNAL"
 
     except Exception as e:
-        print(f"Error checking {symbol}: {e}")
-        return "ERROR"
+        print(f"略過或讀取失敗 {symbol}: {e}")
+        return "SKIP"
 
 def main():
-    spot_exchange = ccxt.binance()
-    perp_exchange = ccxt.binanceusdm()
     triggered_count = 0
 
     # 1. 掃描加密貨幣
-    for sym in CRYPTO_SYMBOLS:
-        status = evaluate_resonance(spot_exchange, sym, asset_class="Crypto")
-        if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
-            triggered_count += 1
-        time.sleep(0.2)
+    try:
+        spot_exchange = ccxt.binance({'enableRateLimit': True})
+        for sym in CRYPTO_SYMBOLS:
+            status = evaluate_resonance(spot_exchange, sym, asset_class="Crypto")
+            if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
+                triggered_count += 1
+            time.sleep(0.2)
+    except Exception as e:
+        print(f"現貨掃描異常: {e}")
 
     # 2. 掃描美股合約
-    for sym in STOCK_PERP_SYMBOLS:
-        status = evaluate_resonance(perp_exchange, sym, asset_class="TradFi Perp")
-        if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
-            triggered_count += 1
-        time.sleep(0.2)
+    try:
+        perp_exchange = ccxt.binanceusdm({'enableRateLimit': True})
+        for sym in STOCK_PERP_SYMBOLS:
+            status = evaluate_resonance(perp_exchange, sym, asset_class="TradFi Perp")
+            if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
+                triggered_count += 1
+            time.sleep(0.2)
+    except Exception as e:
+        print(f"合約掃描異常: {e}")
 
     # 3. 若無訊號，發送極簡狀態回報
     if triggered_count == 0:
         total_assets = len(CRYPTO_SYMBOLS) + len(STOCK_PERP_SYMBOLS)
-        now_str = datetime.utcnow().strftime("%H:%M UTC")
+        now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
         send_discord_alert(f"`[{now_str}] 系統巡檢：{total_assets} 檔標的均未觸發共振條件。`")
 
     print("=== 掃描完成 ===")
