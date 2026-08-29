@@ -34,9 +34,9 @@ STOCK_SYMBOLS = {
 
 def get_crypto_data(cfg):
     try:
-        # 幣安抓取約 1 年的 15m 數據 (limit=35000 約等於 365 天)
+        # 透過幣安 API 抓取最大支援的 15m 歷史數據（約 1 年期）
         url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=35000"
-        res = requests.get(url, timeout=10).json()
+        res = requests.get(url, timeout=12).json()
         if isinstance(res, list) and len(res) >= 100:
             cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
             df = pd.DataFrame(res, columns=cols)
@@ -50,7 +50,7 @@ def get_crypto_data(cfg):
 
 def get_stock_data(cfg):
     try:
-        # 美股抓取 Yahoo Finance 最久的高頻 15m 數據 (59天)
+        # 美股與商品使用 yfinance 支援的最久 15m 高頻數據（59天）
         df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
         if df is not None and not df.empty and len(df) >= 50:
             if isinstance(df.columns, pd.MultiIndex):
@@ -185,10 +185,7 @@ def run_group_backtest(symbols_dict, data_fetch_func):
     return time_range_str, initial_balance, balance, profit_loss_pct, total_trades, overall_win_rate, reports
 
 def run_backtest():
-    # 1. 跑加密貨幣 (1年期 15m)
     crypto_range, c_init, c_bal, c_pl, c_trades, c_win_rate, crypto_reports = run_group_backtest(CRYPTO_SYMBOLS, get_crypto_data)
-    
-    # 2. 跑美股與商品 (最久高頻 15m)
     stock_range, s_init, s_bal, s_pl, s_trades, s_win_rate, stock_reports = run_group_backtest(STOCK_SYMBOLS, get_stock_data)
 
     msg1 = "\n".join([
@@ -198,34 +195,4 @@ def run_backtest():
         "回測區間: " + crypto_range,
         "初始資金: $" + str(round(c_init, 2)) + " USDT",
         "最終結餘: $" + str(round(c_bal, 2)) + " USDT (" + str(round(c_pl, 2)) + "%)",
-        "總交易次數: " + str(c_trades) + " 次 | 綜合勝率: " + str(round(c_win_rate, 1)) + "%",
-        "----------------------------------------------------",
-        "\n".join(crypto_reports),
-        "```"
-    ])
-
-    msg2 = "\n".join([
-        "📊 **[美股與商品專區 - 高頻 15m 複利回測]**",
-        "```text",
-        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能",
-        "回測區間: " + stock_range,
-        "初始資金: $" + str(round(s_init, 2)) + " USDT",
-        "最終結餘: $" + str(round(s_bal, 2)) + " USDT (" + str(round(s_pl, 2)) + "%)",
-        "總交易次數: " + str(s_trades) + " 次 | 綜合勝率: " + str(round(s_win_rate, 1)) + "%",
-        "----------------------------------------------------",
-        "\n".join(stock_reports),
-        "```"
-    ])
-    
-    if DISCORD_WEBHOOK_URL and DISCORD_WEBHOOK_URL != "你的Discord網址":
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg1}, timeout=8)
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg2}, timeout=8)
-        except Exception:
-            pass
-
-    print(msg1)
-    print(msg2)
-
-if __name__ == '__main__':
-    run_backtest()
+        "總交易次數: " + str(c_trades) + " 次 | 綜合勝率: " + str(round(c
