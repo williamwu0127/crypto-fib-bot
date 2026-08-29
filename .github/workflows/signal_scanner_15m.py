@@ -26,4 +26,4 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python monitor.py
+          python signal_scanner_15m.py
