@@ -7,7 +7,7 @@ import numpy as np
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 2. 加密貨幣監控清單 (Binance 現貨/永續合約通用)
+# 加密貨幣標的
 CRYPTO_SYMBOLS = [
     'BTC/USDT',
     'ETH/USDT',
@@ -18,7 +18,7 @@ CRYPTO_SYMBOLS = [
     '币安人生/USDT'
 ]
 
-# 3. 幣安美股永續合約監控清單 (TradFi Perps)
+# 幣安合約標的 (若美股合約無數據會自動略過並在 log 提示)
 STOCK_PERP_SYMBOLS = [
     'TSM/USDT:USDT',    # 台積電
     'NVDA/USDT:USDT',   # 輝達
@@ -34,9 +34,8 @@ STOCK_PERP_SYMBOLS = [
     'MSTR/USDT:USDT'    # 微策略
 ]
 
-
 TIMEFRAME = '15m'
-FETCH_LIMIT = 1500  # 擴展至約 15 天數據以獲取足夠統計樣本
+FETCH_LIMIT = 1000
 
 def send_discord_alert(content):
     if not DISCORD_WEBHOOK_URL:
@@ -58,132 +57,129 @@ def calculate_rsi(series, period=14):
 def run_backtest_on_symbol(exchange, symbol, market_name):
     display_name = symbol.split(':')[0]
     records = []
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=FETCH_LIMIT)
-        if not ohlcv or len(ohlcv) < 60:
-            return records
+    
+    # 嘗試抓取 K 線 (含相容處理)
+    ohlcv = None
+    target_symbols = [symbol, symbol + ":USDT", symbol.replace('/', '')]
+    
+    for s in target_symbols:
+        try:
+            ohlcv = exchange.fetch_ohlcv(s, TIMEFRAME, limit=FETCH_LIMIT)
+            if ohlcv and len(ohlcv) >= 60:
+                break
+        except Exception:
+            continue
 
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
-        df['rsi'] = calculate_rsi(df['close'], period=14)
+    if not ohlcv or len(ohlcv) < 60:
+        print(f"⚠️ [{market_name}] {display_name} 無法獲取足夠 K 線數據，略過。")
+        return records
 
-        i = 30
-        while i < len(df) - 1:
-            window = df.iloc[max(0, i-30):i+1]
-            
-            swing_high = window['high'].max()
-            swing_low = window['low'].min()
-            wave_range = swing_high - swing_low
+    print(f"✅ [{market_name}] {display_name} 成功載入 {len(ohlcv)} 根 K 線，開始計算 Fib 波段...")
 
-            if wave_range <= 0 or (wave_range / swing_low) < 0.008:  # 過濾波幅小於 0.8% 的橫盤無效波段
-                i += 1
-                continue
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
+    df['rsi'] = calculate_rsi(df['close'], period=14)
 
-            high_pos = window['high'].values.argmax()
-            low_pos = window['low'].values.argmin()
+    i = 25
+    while i < len(df) - 1:
+        sub = df.iloc[i-20:i+1]
+        
+        sw_high = sub['high'].max()
+        sw_low = sub['low'].min()
+        wave = sw_high - sw_low
 
-            candle = df.iloc[i]
-            entry_price = candle['close']
+        if wave <= 0 or (wave / sw_low) < 0.005:
+            i += 1
+            continue
 
-            trade_side = None
-            stop_loss = 0
-            tp_1 = 0
-            tp_2 = 0
+        candle = df.iloc[i]
+        entry_price = candle['close']
 
-            # 1. 多頭架構：低點在先，創出波段高點後回踩
-            if low_pos < high_pos:
-                fib_0618 = swing_high - (wave_range * 0.618)
-                fib_0786 = swing_high - (wave_range * 0.786)
-                fib_0382 = swing_high - (wave_range * 0.382)
+        # Fib 關鍵水位
+        fib_long_0618 = sw_high - (wave * 0.618)
+        fib_short_0618 = sw_low + (wave * 0.618)
 
-                # 回踩 0.618~0.786 區間且收陽線或下影線承接
-                in_fib_zone = (candle['low'] <= fib_0618 * 1.002) and (candle['close'] >= fib_0786 * 0.998)
-                rsi_ok = candle['rsi'] <= 50
+        fib_long_0382 = sw_high - (wave * 0.382)
+        fib_short_0382 = sw_low + (wave * 0.382)
 
-                if in_fib_zone and rsi_ok and (candle['close'] >= candle['open'] or (min(candle['open'], candle['close']) - candle['low']) > 0):
-                    trade_side = "LONG"
-                    stop_loss = swing_low * 0.997
-                    tp_1 = fib_0382
-                    tp_2 = swing_high
+        trade_side = None
+        stop_loss = 0
+        tp_1 = 0
+        tp_2 = 0
 
-            # 2. 空頭架構：高點在先，創出波段低點後反彈
-            elif high_pos < low_pos:
-                fib_0618 = swing_low + (wave_range * 0.618)
-                fib_0786 = swing_low + (wave_range * 0.786)
-                fib_0382 = swing_low + (wave_range * 0.382)
+        # 多單：觸及 Fib 0.618 支撐且收陽線/下影線
+        if candle['low'] <= fib_long_0618 and candle['close'] >= sw_low:
+            trade_side = "LONG"
+            stop_loss = sw_low * 0.997
+            tp_1 = fib_long_0382
+            tp_2 = sw_high
 
-                # 反彈 0.618~0.786 區間且收陰線或上影線承壓
-                in_fib_zone = (candle['high'] >= fib_0618 * 0.998) and (candle['close'] <= fib_0786 * 1.002)
-                rsi_ok = candle['rsi'] >= 50
+        # 空單：觸及 Fib 0.618 阻力且收陰線/上影線
+        elif candle['high'] >= fib_short_0618 and candle['close'] <= sw_high:
+            trade_side = "SHORT"
+            stop_loss = sw_high * 1.003
+            tp_1 = fib_short_0382
+            tp_2 = sw_low
 
-                if in_fib_zone and rsi_ok and (candle['close'] <= candle['open'] or (candle['high'] - max(candle['open'], candle['close'])) > 0):
-                    trade_side = "SHORT"
-                    stop_loss = swing_high * 1.003
-                    tp_1 = fib_0382
-                    tp_2 = swing_low
+        if trade_side:
+            outcome = "HOLDING"
+            bars_held = 0
 
-            if trade_side:
-                outcome = "HOLDING"
-                bars_held = 0
+            for j in range(i + 1, min(i + 33, len(df))):
+                fbar = df.iloc[j]
+                bars_held += 1
 
-                for j in range(i + 1, min(i + 49, len(df))):
-                    future_bar = df.iloc[j]
-                    bars_held += 1
+                if trade_side == "LONG":
+                    if fbar['low'] <= stop_loss:
+                        outcome = "SL"
+                        break
+                    elif fbar['high'] >= tp_2:
+                        outcome = "TP2_FULL"
+                        break
+                    elif fbar['high'] >= tp_1 and outcome != "TP1_HIT":
+                        outcome = "TP1_HIT"
+                else:
+                    if fbar['high'] >= stop_loss:
+                        outcome = "SL"
+                        break
+                    elif fbar['low'] <= tp_2:
+                        outcome = "TP2_FULL"
+                        break
+                    elif fbar['low'] <= tp_1 and outcome != "TP1_HIT":
+                        outcome = "TP1_HIT"
 
-                    if trade_side == "LONG":
-                        if future_bar['low'] <= stop_loss:
-                            outcome = "SL"
-                            break
-                        elif future_bar['high'] >= tp_2:
-                            outcome = "TP2_FULL"
-                            break
-                        elif future_bar['high'] >= tp_1 and outcome != "TP1_HIT":
-                            outcome = "TP1_HIT"
-                    else:
-                        if future_bar['high'] >= stop_loss:
-                            outcome = "SL"
-                            break
-                        elif future_bar['low'] <= tp_2:
-                            outcome = "TP2_FULL"
-                            break
-                        elif future_bar['low'] <= tp_1 and outcome != "TP1_HIT":
-                            outcome = "TP1_HIT"
+            records.append({
+                'Symbol': display_name,
+                'Side': trade_side,
+                'Market': market_name,
+                'Time': candle['datetime'],
+                'Entry': entry_price,
+                'Result': outcome
+            })
 
-                records.append({
-                    'Symbol': display_name,
-                    'Side': trade_side,
-                    'Market': market_name,
-                    'Time': candle['datetime'],
-                    'Entry': entry_price,
-                    'Result': outcome
-                })
-
-                i += max(bars_held, 3)
-            else:
-                i += 1
-
-    except Exception as e:
-        print(f"回測 {symbol} 略過: {e}")
+            i += max(bars_held, 2)
+        else:
+            i += 1
 
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 執行「動態斐波那契拉線（多空雙向）」回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 啟動多空斐波那契回測（含相容修復）...**")
     
-    spot_exchange = ccxt.binance()
-    perp_exchange = ccxt.binanceusdm()
+    spot = ccxt.binance()
+    perp = ccxt.binanceusdm()
     all_results = []
 
     for sym in CRYPTO_SYMBOLS:
-        all_results.extend(run_backtest_on_symbol(spot_exchange, sym, "現貨"))
+        all_results.extend(run_backtest_on_symbol(spot, sym, "現貨"))
         time.sleep(0.15)
 
     for sym in STOCK_PERP_SYMBOLS:
-        all_results.extend(run_backtest_on_symbol(perp_exchange, sym, "合約"))
+        all_results.extend(run_backtest_on_symbol(perp, sym, "合約"))
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT]** 未觸發波段回踩訊號。")
+        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪仍無交易數據。")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -202,7 +198,7 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 動態斐波那契拉線回測 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 多空斐波那契回測報告 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
@@ -215,7 +211,7 @@ def main():
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== 動態 Fib 回測完成 ===")
+    print("=== 回測完成 ===")
 
 if __name__ == '__main__':
     main()
