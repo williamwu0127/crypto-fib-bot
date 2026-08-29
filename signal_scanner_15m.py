@@ -11,7 +11,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
 RISK_PERCENT = 0.01      # 動態 1% 風控
-DEFAULT_BALANCE = 100.0  # 無 API Key 時之預設參考本金
+DEFAULT_BALANCE = 100.0  # 無法獲取錢包時之預設參考本金
 
 SYMBOLS = {
     # 1. 加密貨幣 (100x 槓桿 / 實盤全自動下單)
@@ -42,7 +42,6 @@ SYMBOLS = {
 }
 
 def clean_error_msg(err_str):
-    """將冗長帶有網址與 JSON 的報錯精簡為乾淨的原因說明"""
     err_lower = str(err_str).lower()
     if "restricted location" in err_lower or "451" in err_lower:
         return "合約API地區受限 (美國節點IP限制)"
@@ -72,13 +71,33 @@ def get_exchange():
 
 def get_wallet_usdt(exchange):
     if not exchange:
-        return DEFAULT_BALANCE
+        return None, "未配置 API Key"
+    
+    errors = []
     try:
         bal = exchange.fetch_balance()
+        if 'info' in bal and 'assets' in bal['info']:
+            for asset in bal['info']['assets']:
+                if asset.get('asset') == 'USDT':
+                    free_val = float(asset.get('availableBalance', 0.0))
+                    return free_val, None
+        
         free_usdt = float(bal['free'].get('USDT', 0.0))
-        return free_usdt if free_usdt > 0 else DEFAULT_BALANCE
-    except Exception:
-        return DEFAULT_BALANCE
+        return free_usdt, None
+    except Exception as e:
+        errors.append(str(e))
+
+    try:
+        response = exchange.fapiPrivateV2GetAccount()
+        if 'assets' in response:
+            for asset in response['assets']:
+                if asset.get('asset') == 'USDT':
+                    free_val = float(asset.get('availableBalance', 0.0))
+                    return free_val, None
+    except Exception as e:
+        errors.append(str(e))
+
+    return None, clean_error_msg(" | ".join(errors))
 
 def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, tp2_p, risk_usd):
     if not cfg.get('trade', False):
@@ -91,13 +110,11 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
         exchange.load_markets()
         market = exchange.market(market_sym)
 
-        # 1. 設置槓桿
         try:
             exchange.set_leverage(int(cfg['lev']), market_sym)
         except Exception as err:
             return "開單失敗: " + clean_error_msg(err)
 
-        # 2. 計算數量 (動態 1% 風控)
         sl_pct = max(abs(entry_p - sl_p) / entry_p, 0.002)
         notional = risk_usd / sl_pct
         raw_qty = notional / entry_p
@@ -110,14 +127,12 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
         close_side = 'sell' if side == 'LONG' else 'buy'
         sl_price_str = float(exchange.price_to_precision(market_sym, sl_p))
 
-        # 3. 市價開倉
         try:
             order = exchange.create_order(symbol=market_sym, type='market', side=order_side, amount=qty)
             order_id = str(order.get('id', 'N/A'))
         except Exception as err:
             return "開單失敗: " + clean_error_msg(err)
 
-        # 4. SL 掛單 (100% 倉位止損) - 若失敗立即市價平倉撤出
         try:
             exchange.create_order(
                 symbol=market_sym,
@@ -133,7 +148,6 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
                 pass
             return "開單失敗 (SL掛單失敗，已緊急平倉撤出: " + clean_error_msg(err) + ")"
 
-        # 5. 第一止盈 (50% 倉位)
         tp1_qty = float(exchange.amount_to_precision(market_sym, qty * 0.5))
         if tp1_qty > 0:
             try:
@@ -148,7 +162,6 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
             except Exception:
                 pass
 
-        # 6. 第二止盈 (剩餘 50% 倉位)
         tp2_qty = float(exchange.amount_to_precision(market_sym, qty - tp1_qty))
         if tp2_qty > 0:
             try:
@@ -288,6 +301,7 @@ def scan_symbol(sym, cfg, exchange, current_risk):
             'tp2': tp2,
             'sl_pct': sl_pct * 100,
             'pos_val': pos_val,
+            'lev': int(cfg['lev']),
             'order_status': order_status,
             'rsi': bar['rsi']
         }, status_summary
@@ -298,7 +312,15 @@ def main():
     tw_now = pd.to_datetime('now', utc=True).tz_convert('Asia/Taipei')
     
     exchange = get_exchange()
-    wallet_balance = get_wallet_usdt(exchange)
+    wallet_raw, wallet_err = get_wallet_usdt(exchange)
+    
+    if wallet_raw is not None:
+        wallet_str = "%.2f USDT" % wallet_raw
+        wallet_balance = wallet_raw
+    else:
+        wallet_str = "無法獲取 (" + wallet_err + ")"
+        wallet_balance = DEFAULT_BALANCE
+
     current_risk = wallet_balance * RISK_PERCENT
 
     detected_signals = []
@@ -317,12 +339,8 @@ def main():
         for s in detected_signals:
             side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
             pos_v = s['pos_val']
-            sl_p = s['sl_pct']
-
-            m10, loss10 = pos_v / 10.0, sl_p * 10.0
-            m20, loss20 = pos_v / 20.0, sl_p * 20.0
-            m50, loss50 = pos_v / 50.0, min(sl_p * 50.0, 100.0)
-            m100, loss100 = pos_v / 100.0, min(sl_p * 100.0, 100.0)
+            lev = s['lev']
+            margin_required = pos_v / lev  # 1% 風控金額在該槓桿下實際應押的保證金
 
             p_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
 
@@ -330,21 +348,17 @@ def main():
                 "📊 **[15m 綜合掃描報告] 發現觸發訊號**",
                 "```text",
                 "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔",
-                "合約錢包: $" + ("%.2f" % wallet_balance) + " USDT | 動態風控: 1% ($" + ("%.2f" % current_risk) + " USDT)",
+                "合約錢包: " + wallet_str + " | 動態風控: 1% ($" + ("%.2f" % current_risk) + " USDT)",
                 "----------------------------------------------------",
                 status_table,
                 "----------------------------------------------------",
                 side_tag + " **" + s['sym'] + "** 交易建議:",
                 "進場時間 : " + s['time'] + " (台灣時間)",
                 "進場價格 : $" + (p_fmt % s['entry']) + " USDT",
-                "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-" + ("%.2f" % s['sl_pct']) + "% | 100% 止損)",
+                "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-" + ("%.2f" % s['sl_pct']) + "% 動態止損)",
                 "第一止盈 : $" + (p_fmt % s['tp1']) + " USDT (Fib 0.382 | 50% 倉位)",
                 "第二止盈 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 | 50% 倉位)",
-                "各槓桿所需倉位保證金與損耗比:",
-                "• 10x  : 倉位 $" + ("%5.2f" % m10) + " USDT | 損耗保證金 " + ("%5.1f" % loss10) + "%",
-                "• 20x  : 倉位 $" + ("%5.2f" % m20) + " USDT | 損耗保證金 " + ("%5.1f" % loss20) + "%",
-                "• 50x  : 倉位 $" + ("%5.2f" % m50) + " USDT | 損耗保證金 " + ("%5.1f" % loss50) + "%",
-                "• 100x : 倉位 $" + ("%5.1f" % m100) + " USDT | 損耗保證金 " + ("%5.1f" % loss100) + "%",
+                "開倉規劃 : 槓桿 " + str(lev) + "x | 倉位價值 $" + ("%.2f" % pos_v) + " USDT | 應押保證金 $" + ("%.2f" % margin_required) + " USDT",
                 "實盤執行 : " + s['order_status'],
                 "指標數據 : RSI(14) = " + ("%.1f" % s['rsi']),
                 "```"
@@ -355,7 +369,7 @@ def main():
             "📡 **[15m 掃描完成] 目前無觸發訊號**",
             "```text",
             "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔",
-            "合約錢包: $" + ("%.2f" % wallet_balance) + " USDT | 動態風控: 1% ($" + ("%.2f" % current_risk) + " USDT)",
+            "合約錢包: " + wallet_str + " | 動態風控: 1% ($" + ("%.2f" % current_risk) + " USDT)",
             "----------------------------------------------------",
             status_table,
             "```"
