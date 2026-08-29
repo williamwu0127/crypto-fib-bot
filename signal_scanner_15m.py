@@ -278,11 +278,17 @@ def scan_symbol(sym, cfg, exchange, current_risk):
         side = "LONG"
         sl = min(l, entry_price - (atr_val * 1.5))
         tp1 = fib_0382_l
+        # 🛡️ 防護：確保多頭第一止盈大於進場價 (至少給予 1:1 風險報酬或 1 倍 ATR 空間)
+        if tp1 <= entry_price:
+            tp1 = entry_price + max(abs(entry_price - sl), atr_val * 1.0)
         tp2 = h
     elif cond_short and (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and rsi_bear:
         side = "SHORT"
         sl = max(h, entry_price + (atr_val * 1.5))
         tp1 = fib_0382_s
+        # 🛡️ 防護：確保空頭第一止盈小於進場價
+        if tp1 >= entry_price:
+            tp1 = entry_price - max(abs(entry_price - sl), atr_val * 1.0)
         tp2 = l
 
     if side:
@@ -340,7 +346,7 @@ def main():
             side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
             pos_v = s['pos_val']
             lev = s['lev']
-            margin_required = pos_v / lev  # 1% 風控金額在該槓桿下實際應押的保證金
+            margin_required = pos_v / lev
 
             p_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
 
@@ -356,8 +362,8 @@ def main():
                 "進場時間 : " + s['time'] + " (台灣時間)",
                 "進場價格 : $" + (p_fmt % s['entry']) + " USDT",
                 "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-" + ("%.2f" % s['sl_pct']) + "% 動態止損)",
-                "第一止盈 : $" + (p_fmt % s['tp1']) + " USDT (Fib 0.382 | 50% 倉位)",
-                "第二止盈 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 | 50% 倉位)",
+                "第一止盈 : $" + (p_fmt % s['tp1']) + " USDT (獲利目標 / 50% 倉位)",
+                "第二止盈 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 / 50% 倉位)",
                 "開倉規劃 : 槓桿 " + str(lev) + "x | 倉位價值 $" + ("%.2f" % pos_v) + " USDT | 應押保證金 $" + ("%.2f" % margin_required) + " USDT",
                 "實盤執行 : " + s['order_status'],
                 "指標數據 : RSI(14) = " + ("%.1f" % s['rsi']),
