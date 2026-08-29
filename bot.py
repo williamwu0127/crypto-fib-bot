@@ -34,7 +34,7 @@ STOCK_PERP_SYMBOLS = [
     'MSTR/USDT:USDT'    # 微策略
 ]
 
-TIMEFRAME = '1h'  # K 線週期：1 小時
+TIMEFRAME = '15m'  # K 線週期：15 分鐘
 
 def send_discord_alert(content):
     """發送 Discord 訊息"""
@@ -91,9 +91,9 @@ def evaluate_resonance(exchange, symbol, market_type="Crypto"):
         vol_spike = candle['volume'] > (candle['vol_sma'] * 1.5)
 
         # 自動計算 TP / SL 與盈虧比
-        stop_loss = min(candle['low'] * 0.998, fib_0786)  # 取下影線底部或 0.786 支撐下方
-        tp_1 = fib_0382                                   # 第一目標：Fib 0.382 阻力
-        tp_2 = swing_high                                 # 第二目標：前波高點 (Fib 1.000)
+        stop_loss = min(candle['low'] * 0.998, fib_0786)
+        tp_1 = fib_0382
+        tp_2 = swing_high
 
         risk = max(current_price - stop_loss, 1e-4)
         reward_tp1 = max(tp_1 - current_price, 0)
@@ -145,11 +145,11 @@ def evaluate_resonance(exchange, symbol, market_type="Crypto"):
         return "NO_SIGNAL"
 
     except Exception as e:
-        print(f"檢查標的 {symbol} 失敗: {e}")
+        print(f"檢查標的 {symbol} 略過: {e}")
         return "ERROR"
 
 def main():
-    send_discord_alert("**系統啟動：開始執行合約掃描**")
+    send_discord_alert("📡 **系統啟動：開始執行市場掃描...**")
     
     # 建立幣安現貨與合約連線
     spot_exchange = ccxt.binance()
@@ -161,19 +161,19 @@ def main():
         status = evaluate_resonance(spot_exchange, sym, market_type="Crypto")
         if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
             triggered_count += 1
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     # 2. 掃描幣安美股永續合約
     for sym in STOCK_PERP_SYMBOLS:
         status = evaluate_resonance(perp_exchange, sym, market_type="TradFi Perp")
         if status in ["STAGE_1", "STAGE_2", "STAGE_3"]:
             triggered_count += 1
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     # 3. 本輪無訊號彙總
     if triggered_count == 0:
         total_count = len(CRYPTO_SYMBOLS) + len(STOCK_PERP_SYMBOLS)
-        send_discord_alert(f" **掃描完成**：共巡檢 `{total_count}` 檔標的，目前皆無共振訊號。")
+        send_discord_alert(f"📋 **掃描完成**：共巡檢 `{total_count}` 檔標的，目前皆無共振訊號。")
         
     print("=== 全數掃描完成 ===")
 
