@@ -2,24 +2,41 @@ import os
 import time
 import requests
 import urllib.parse
+import pandas as pd
+import numpy as np
+import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-TARGET_SYMBOLS = [
-    'BTC', 'ETH', 'XAU', '币安人生', 'PLAY', 'LAB', 
-    'TSM', 'NVDA', 'TSLA', 'AAPL', 'GOOGL', 'MU', 
-    'AMZN', 'GLW', 'SPCX', 'CLU', 'SNDK', 'SAMSUNG'
-]
+# 18 檔標的配置
+SYMBOL_CONFIG = {
+    # 1. 幣安主流與中文幣 (USDT)
+    'BTC': {'type': 'binance', 'pair': 'BTCUSDT', 'curr': 'USDT'},
+    'ETH': {'type': 'binance', 'pair': 'ETHUSDT', 'curr': 'USDT'},
+    'XAU': {'type': 'binance', 'pair': 'PAXGUSDT', 'curr': 'USDT'},
+    '币安人生': {'type': 'binance', 'pair': '币安人生USDT', 'curr': 'USDT'},
+
+    # 2. 鏈上迷因幣 (GeckoTerminal 15m DEX, USD)
+    'PLAY': {'type': 'dex', 'network': 'base', 'pool': '0xf1cacdfb3260c67539097e366df047ef1fcf0b08', 'curr': 'USD'},
+    'LAB': {'type': 'dex', 'network': 'bsc', 'pool': '0xd9434e63fe78a6e77dafe2abc504121bf8500822f6d3a59eccba577cf0a070f2', 'curr': 'USD'},
+
+    # 3. 美股與商品期貨 (Yahoo Finance 15m, USD)
+    'TSM': {'type': 'stock', 'ticker': 'TSM', 'curr': 'USD'},
+    'NVDA': {'type': 'stock', 'ticker': 'NVDA', 'curr': 'USD'},
+    'TSLA': {'type': 'stock', 'ticker': 'TSLA', 'curr': 'USD'},
+    'AAPL': {'type': 'stock', 'ticker': 'AAPL', 'curr': 'USD'},
+    'GOOGL': {'type': 'stock', 'ticker': 'GOOGL', 'curr': 'USD'},
+    'MU': {'type': 'stock', 'ticker': 'MU', 'curr': 'USD'},
+    'AMZN': {'type': 'stock', 'ticker': 'AMZN', 'curr': 'USD'},
+    'GLW': {'type': 'stock', 'ticker': 'GLW', 'curr': 'USD'},
+    'SPCX': {'type': 'stock', 'ticker': 'SPCX', 'curr': 'USD'},
+    'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD'},
+    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'}
+}
 
 TIMEFRAME = '15m'
-FETCH_LIMIT = 60
-
-# 幣安免美國 IP 封鎖之現貨鏡像端點
-SPOT_MIRRORS = [
-    "https://data-api.binance.vision/api/v3/klines",
-    "https://api1.binance.com/api/v3/klines",
-    "https://api3.binance.com/api/v3/klines"
-]
+FETCH_LIMIT = 500
+BINANCE_MIRROR = "https://data-api.binance.vision/api/v3/klines"
 
 def send_discord_alert(content):
     if not DISCORD_WEBHOOK_URL:
@@ -36,77 +53,207 @@ def send_discord_alert(content):
     except Exception as err:
         print("推播失敗:", err)
 
-def test_fetch_pure_spot(raw_name):
-    """全部統一使用現貨鏡像端點嘗試抓取"""
-    name = raw_name.strip()
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    return 100 - (100 / (1 + rs))
+
+def get_kline_df(cfg):
+    """依照配置抓取 15m K 線並統一輸出 DataFrame"""
+    t = cfg['type']
     
-    # 候選交易對嘗試清單
-    candidates = []
-    if name == 'XAU':
-        candidates = ['PAXGUSDT', 'XAUUSDT']
-    elif name == 'CLU':
-        candidates = ['CLUSDT', 'CLUUSDT', 'OILUSDT']
-    elif name == '币安人生':
-        candidates = ['币安人生USDT', 'LIFEUSDT']
-    else:
-        candidates = [
-            f"{name.upper()}USDT",
-            f"{name}USDT",
-            f"1000{name.upper()}USDT",
-            f"{name.upper()}USDC",
-            f"{name.upper()}FDUSD"
-        ]
+    if t == 'binance':
+        encoded_pair = urllib.parse.quote(cfg['pair'])
+        url = f"{BINANCE_MIRROR}?symbol={encoded_pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
+        res = requests.get(url, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) >= 50:
+                df = pd.DataFrame(data, columns=[
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
+                ])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
+                return df
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    last_status = "無連線"
+    elif t == 'dex':
+        url = f"https://api.geckoterminal.com/api/v2/networks/{cfg['network']}/pools/{cfg['pool']}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
+        headers = {"Accept": "application/json;version=20230302"}
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            ohlcv = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
+            if ohlcv and len(ohlcv) >= 50:
+                # DEX OHLCV 預設由新到舊，需倒序排列
+                ohlcv.reverse()
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%m/%d %H:%M')
+                return df
 
-    for pair in candidates:
-        encoded_pair = urllib.parse.quote(pair)
-        for base_url in SPOT_MIRRORS:
-            url = f"{base_url}?symbol={encoded_pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
-            try:
-                res = requests.get(url, headers=headers, timeout=5)
-                last_status = f"HTTP {res.status_code}"
-                if res.status_code == 200:
-                    data = res.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        latest_close = float(data[-1][4])
-                        return True, pair, len(data), latest_close, "成功"
-            except Exception as e:
-                last_status = str(e)[:15]
-                continue
+    elif t == 'stock':
+        df = yf.download(cfg['ticker'], period="5d", interval="15m", progress=False)
+        if not df.empty and len(df) >= 50:
+            df = df.reset_index()
+            # 處理 multi-index 欄位
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0].lower() for c in df.columns]
+            else:
+                df.columns = [c.lower() for c in df.columns]
+            
+            time_col = 'datetime' if 'datetime' in df.columns else 'date'
+            df['datetime'] = pd.to_datetime(df[time_col]).dt.strftime('%m/%d %H:%M')
+            return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
 
-    return False, f"{name.upper()}USDT", 0, None, last_status
+    return None
+
+def backtest_strategy(name, cfg):
+    df = get_kline_df(cfg)
+    if df is None or len(df) < 50:
+        return f"❌ {name:<8} : 數據抓取失敗", []
+
+    df['rsi'] = calculate_rsi(df['close'], period=14)
+    trades = []
+    
+    i = 25
+    while i < len(df) - 1:
+        sub = df.iloc[i-20:i+1]
+        sw_high = sub['high'].max()
+        sw_low = sub['low'].min()
+        wave = sw_high - sw_low
+
+        if wave <= 0 or (wave / sw_low) < 0.003:
+            i += 1
+            continue
+
+        candle = df.iloc[i]
+        entry_price = candle['close']
+
+        fib_0618_long = sw_high - (wave * 0.618)
+        fib_0382_long = sw_high - (wave * 0.382)
+        fib_0618_short = sw_low + (wave * 0.618)
+        fib_0382_short = sw_low + (wave * 0.382)
+
+        trade_side = None
+        stop_loss = 0
+        tp1 = 0
+        tp2 = 0
+
+        # 多單條件：回踩 0.618 支撐帶且 RSI 處於合理低位
+        if candle['low'] <= fib_0618_long * 1.002 and candle['close'] >= sw_low:
+            trade_side = "LONG"
+            stop_loss = sw_low * 0.997
+            tp1 = fib_0382_long
+            tp2 = sw_high
+
+        # 空單條件：反彈至 0.618 阻力帶
+        elif candle['high'] >= fib_0618_short * 0.998 and candle['close'] <= sw_high:
+            trade_side = "SHORT"
+            stop_loss = sw_high * 1.003
+            tp1 = fib_0382_short
+            tp2 = sw_low
+
+        if trade_side:
+            outcome = "HOLDING"
+            bars_held = 0
+
+            for j in range(i + 1, min(i + 33, len(df))):
+                fbar = df.iloc[j]
+                bars_held += 1
+
+                if trade_side == "LONG":
+                    if fbar['low'] <= stop_loss:
+                        outcome = "SL"
+                        break
+                    elif fbar['high'] >= tp2:
+                        outcome = "TP2_FULL"
+                        break
+                    elif fbar['high'] >= tp1 and outcome != "TP1_HIT":
+                        outcome = "TP1_HIT"
+                else:
+                    if fbar['high'] >= stop_loss:
+                        outcome = "SL"
+                        break
+                    elif fbar['low'] <= tp2:
+                        outcome = "TP2_FULL"
+                        break
+                    elif fbar['low'] <= tp1 and outcome != "TP1_HIT":
+                        outcome = "TP1_HIT"
+
+            trades.append({
+                'Symbol': name,
+                'Side': trade_side,
+                'Time': candle['datetime'],
+                'Entry': entry_price,
+                'Result': outcome,
+                'Curr': cfg['curr']
+            })
+
+            i += max(bars_held, 2)
+        else:
+            i += 1
+
+    status_msg = f"✅ {name:<8} [{cfg['type']:<7}] : 載入 {len(df):3d} 根 K 線 | 觸發 {len(trades):2d} 次交易"
+    return status_msg, trades
 
 def main():
-    send_discord_alert("📡 **[全標的現貨抓法測試] 統一走 Binance Vision 現貨端點...**")
+    send_discord_alert("🧪 **[全資產多空斐波那契回測] 啟動雙引擎計算...**")
     
-    results = []
-    success_count = 0
+    status_log = []
+    all_trades = []
 
-    for sym in TARGET_SYMBOLS:
-        ok, matched_pair, count, price, status_info = test_fetch_pure_spot(sym)
-        if ok:
-            success_count += 1
-            if price < 1.0:
-                price_str = f"${price:.5f}"
-            else:
-                price_str = f"${price:,.2f}"
-            results.append(f"✅ {sym:<8} -> {matched_pair:<12} | {count:2d} 根 | 最新價: {price_str} USDT")
-        else:
-            results.append(f"❌ {sym:<8} -> {matched_pair:<12} | 失敗 ({status_info})")
+    for name, cfg in SYMBOL_CONFIG.items():
+        log_line, trades = backtest_strategy(name, cfg)
+        status_log.append(log_line)
+        all_trades.extend(trades)
         time.sleep(0.1)
 
-    summary_text = (
-        f"📋 **[全標的現貨端點測試總覽]**\n"
-        f"成功抓取: {success_count} / {len(TARGET_SYMBOLS)}\n"
+    # 1. 推播標的載入與觸發狀態
+    status_summary = "📋 **[標的數據與訊號掃描總覽]**\n```text\n" + "\n".join(status_log) + "\n```"
+    send_discord_alert(status_summary)
+
+    # 2. 統計總體回測勝率
+    if not all_trades:
+        send_discord_alert("📊 **[回測結果]** 本週期內未有符合策略條件之進場點。")
+        return
+
+    res_df = pd.DataFrame(all_trades)
+    total_trades = len(res_df)
+    long_trades = len(res_df[res_df['Side'] == 'LONG'])
+    short_trades = len(res_df[res_df['Side'] == 'SHORT'])
+
+    tp1_count = len(res_df[res_df['Result'].isin(['TP1_HIT', 'TP2_FULL'])])
+    tp2_count = len(res_df[res_df['Result'] == 'TP2_FULL'])
+    sl_count = len(res_df[res_df['Result'] == 'SL'])
+    holding_count = len(res_df[res_df['Result'] == 'HOLDING'])
+    win_rate = (tp1_count / total_trades) * 100 if total_trades > 0 else 0
+
+    trade_details = ""
+    for _, r in res_df.head(10).iterrows():
+        p_str = f"${r['Entry']:.4f}" if r['Entry'] < 1 else f"${r['Entry']:.2f}"
+        trade_details += f"[{r['Time']}] {r['Side']:<5} {r['Symbol']:<8} @ {p_str} {r['Curr']} -> {r['Result']}\n"
+
+    report_msg = (
+        f"📊 **[BACKTEST REPORT] 斐波那契多空回測報告 (15m)**\n"
         f"```text\n"
-        + "\n".join(results) +
-        f"\n```"
+        f"總進場次數  : {total_trades} 次 (多單: {long_trades} / 空單: {short_trades})\n"
+        f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
+        f"TP2 終極達標: {tp2_count} 次\n"
+        f"SL 停損離場 : {sl_count} 次\n"
+        f"持倉中/未結 : {holding_count} 次\n"
+        f"----------------------------------------\n"
+        f"近期交易明細 (前 10 筆):\n"
+        f"{trade_details}"
+        f"```"
     )
-    
-    send_discord_alert(summary_text)
-    print("=== 測試完成 ===")
+    send_discord_alert(report_msg)
+    print("=== 回測完成 ===")
 
 if __name__ == '__main__':
     main()
