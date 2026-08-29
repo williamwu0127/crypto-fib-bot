@@ -10,9 +10,8 @@ ACCOUNT_BALANCE = 10000.0  # 帳戶本金 10,000 USDT
 RISK_PER_TRADE = 100.0     # 單筆固定 1% 風控 ($100 USDT)
 LEVERAGE = 10.0            # 統一 10x 槓桿
 
-# 20 檔純個股、大宗商品與主流加密幣 (無 ETF)
 SYMBOLS = {
-    # 1. 主流加密貨幣 (24/7)
+    # 1. 主流加密貨幣 (24/7 全天候)
     'BTC': {'t': 'binance', 's': 'BTCUSDT'},
     'ETH': {'t': 'binance', 's': 'ETHUSDT'},
     'SOL': {'t': 'binance', 's': 'SOLUSDT'},
@@ -41,10 +40,13 @@ SYMBOLS = {
 
 def send_discord(msg):
     if not DISCORD_WEBHOOK_URL:
-        print(msg)
+        print("[No Webhook URL]\n", msg)
         return
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": msg[:1950]}, timeout=8)
+        # Discord 訊息上限 2000 字元，安全截斷至 1900 字元
+        res = requests.post(DISCORD_WEBHOOK_URL, json={"content": msg[:1900]}, timeout=8)
+        if res.status_code not in [200, 204]:
+            print("Webhook Status Code:", res.status_code, res.text)
     except Exception as e:
         print("Webhook Error:", e)
 
@@ -81,15 +83,19 @@ def get_data(cfg):
             return get_binance_1mo_data(cfg['s'])
         else:
             df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
-            if not df.empty and len(df) >= 60:
+            if df is not None and not df.empty and len(df) >= 60:
+                # 解決 yfinance MultiIndex 與不同版本大小寫問題
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [c[0].lower() for c in df.columns]
-                else:
-                    df.columns = [c.lower() for c in df.columns]
-                rename_map = {'open': 'o', 'high': 'h', 'low': 'l', 'close': 'c', 'volume': 'v'}
-                return df[['open', 'high', 'low', 'close', 'volume']].rename(columns=rename_map).reset_index(drop=True)
-    except Exception:
-        pass
+                    df.columns = df.columns.get_level_values(0)
+                df = df.rename(columns=str.lower)
+                
+                req_cols = ['open', 'high', 'low', 'close', 'volume']
+                if all(c in df.columns for c in req_cols):
+                    res_df = df[req_cols].copy()
+                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    return res_df.reset_index(drop=True)
+    except Exception as e:
+        print(f"Error loading {cfg['s']}: {e}")
     return None
 
 def backtest():
@@ -232,7 +238,7 @@ def backtest():
     
     table_str = "\n".join(rows)
     line1 = f"帳戶規模: ${int(ACCOUNT_BALANCE)} USDT \vert{} 單筆固定風險: ${int(RISK_PER_TRADE)} USDT (1%)"
-    line2 = "回測週期: 近 30 天 (1 個月) | 15m 級別 10x 合約 (20 檔標的)"
+    line2 = f"回測週期: 近 30 天 | 15m 級別 10x 合約 ({len(grp)} 檔標的)"
     line3 = f"交易統計: 共 {total} 筆 (勝 {win} / 負 {loss}) | 勝率: {winrate:.1f}%"
     line4 = f"累計績效: {total_r:+.1f} R | 淨利潤: {total_usd:+.1f} USD (ROI: {roi:+.1f}%)"
 
