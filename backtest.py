@@ -10,18 +10,30 @@ ACCOUNT_BALANCE = 10000.0  # 帳戶本金 10,000 USDT
 RISK_PER_TRADE = 100.0     # 單筆固定 1% 風控 ($100 USDT)
 LEVERAGE = 10.0            # 統一 10x 槓桿
 
+# 20 檔純個股、大宗商品與主流加密幣 (無 ETF)
 SYMBOLS = {
+    # 1. 主流加密貨幣 (24/7)
     'BTC': {'t': 'binance', 's': 'BTCUSDT'},
     'ETH': {'t': 'binance', 's': 'ETHUSDT'},
+    'SOL': {'t': 'binance', 's': 'SOLUSDT'},
+    'BNB': {'t': 'binance', 's': 'BNBUSDT'},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT'},
+    
+    # 2. 大宗商品 & 貴金屬
     'XAU': {'t': 'binance', 's': 'PAXGUSDT'},
     'CLU': {'t': 'stock', 's': 'CL=F'},
+    
+    # 3. 美股科技與晶片龍頭個股
     'TSM': {'t': 'stock', 's': 'TSM'},
     'NVDA': {'t': 'stock', 's': 'NVDA'},
-    'TSLA': {'t': 'stock', 's': 'TSLA'},
+    'AMD': {'t': 'stock', 's': 'AMD'},
+    'MSFT': {'t': 'stock', 's': 'MSFT'},
     'AAPL': {'t': 'stock', 's': 'AAPL'},
     'GOOGL': {'t': 'stock', 's': 'GOOGL'},
-    'MU': {'t': 'stock', 's': 'MU'},
     'AMZN': {'t': 'stock', 's': 'AMZN'},
+    'META': {'t': 'stock', 's': 'META'},
+    'TSLA': {'t': 'stock', 's': 'TSLA'},
+    'MU': {'t': 'stock', 's': 'MU'},
     'GLW': {'t': 'stock', 's': 'GLW'},
     'SPCX': {'t': 'stock', 's': 'SPCX'},
     'SNDK': {'t': 'stock', 's': 'SNDK'}
@@ -37,7 +49,7 @@ def send_discord(msg):
         print("Webhook Error:", e)
 
 def get_binance_1mo_data(symbol):
-    """分頁抓取近 30 天 (約 2880 根) 15m K 線"""
+    """分頁抓取近 30 天 15m K 線 (約 2880 根)"""
     all_rows = []
     end_time = int(time.time() * 1000)
     
@@ -68,7 +80,6 @@ def get_data(cfg):
         if cfg['t'] == 'binance':
             return get_binance_1mo_data(cfg['s'])
         else:
-            # 抓取近 1 個月美股與期貨數據 (period="1mo")
             df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
             if not df.empty and len(df) >= 60:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -220,13 +231,13 @@ def backtest():
         rows.append(row_line)
     
     table_str = "\n".join(rows)
-    line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
-    line2 = "回測週期: 近 30 天 (1 個月) | 15m 級別 10x 合約"
-    line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
-    line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
+    line1 = f"帳戶規模: ${int(ACCOUNT_BALANCE)} USDT \vert{} 單筆固定風險: ${int(RISK_PER_TRADE)} USDT (1%)"
+    line2 = "回測週期: 近 30 天 (1 個月) | 15m 級別 10x 合約 (20 檔標的)"
+    line3 = f"交易統計: 共 {total} 筆 (勝 {win} / 負 {loss}) | 勝率: {winrate:.1f}%"
+    line4 = f"累計績效: {total_r:+.1f} R | 淨利潤: {total_usd:+.1f} USD (ROI: {roi:+.1f}%)"
 
     report = (
-        "📊 **[BACKTEST REPORT] 10x 合約波段回測 (近 30 天完整報告)**\n"
+        "📊 **[BACKTEST REPORT] 10x 合約波段回測 (20 檔標的 30 天)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
@@ -237,7 +248,7 @@ def backtest():
         "```"
     )
     send_discord(report)
-    print("=== 30 天回測完成 ===")
+    print("=== 20 檔標的 30 天回測完成 ===")
 
 if __name__ == '__main__':
     backtest()
