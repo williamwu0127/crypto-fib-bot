@@ -54,6 +54,13 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
+def calculate_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
 def run_backtest_on_symbol(exchange, symbol, market_name):
     display_name = symbol.split(':')[0]
     records = []
@@ -65,12 +72,16 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
         df['rsi'] = calculate_rsi(df['close'], period=14)
+        df['vol_sma'] = df['volume'].rolling(window=20).mean()
+        df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+        df['atr'] = calculate_atr(df, period=14)
 
-        i = 35
+        i = 50
         while i < len(df) - 1:
             sub_df = df.iloc[:i+1]
-            swing_high = sub_df['high'][-30:].max()
-            swing_low = sub_df['low'][-30:].min()
+            swing_high = sub_df['high'][-40:].max()
+            swing_low = sub_df['low'][-40:].min()
             wave_range = swing_high - swing_low
 
             if wave_range <= 0:
@@ -78,36 +89,43 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                 continue
 
             candle = sub_df.iloc[-1]
-            prev_candle = sub_df.iloc[-2]
             entry_price = candle['close']
+            atr_val = candle['atr'] if not np.isnan(candle['atr']) else entry_price * 0.005
 
             lower_wick = min(candle['open'], candle['close']) - candle['low']
             upper_wick = candle['high'] - max(candle['open'], candle['close'])
             body_size = abs(candle['close'] - candle['open'])
 
-            # ================= 多單條件判定 =================
+            # ================= 順勢多單 (EMA 50 > EMA 200 且 價格 > EMA 200) =================
+            is_uptrend = candle['close'] > candle['ema_50'] or candle['ema_50'] > candle['ema_200']
             fib_0618_long = swing_high - (wave_range * 0.618)
             fib_0382_long = swing_high - (wave_range * 0.382)
-            long_zone = (candle['low'] <= fib_0618_long * 1.003) and (candle['close'] >= fib_0618_long * 0.995)
-            long_rsi = candle['rsi'] <= 45
-            long_pattern = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
+            
+            long_zone = (candle['low'] <= fib_0618_long * 1.002) and (candle['close'] >= fib_0618_long * 0.996)
+            long_rsi = candle['rsi'] <= 48
+            long_vol = candle['volume'] >= (candle['vol_sma'] * 1.2)
+            long_rejection = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
 
-            # ================= 空單條件判定 =================
+            # ================= 順勢空單 (EMA 50 < EMA 200 且 價格 < EMA 200) =================
+            is_downtrend = candle['close'] < candle['ema_50'] or candle['ema_50'] < candle['ema_200']
             fib_0618_short = swing_low + (wave_range * 0.618)
             fib_0382_short = swing_low + (wave_range * 0.382)
-            short_zone = (candle['high'] >= fib_0618_short * 0.997) and (candle['close'] <= fib_0618_short * 1.005)
-            short_rsi = candle['rsi'] >= 55
-            short_pattern = (upper_wick >= body_size * 0.8) or (candle['close'] < candle['open'])
+            
+            short_zone = (candle['high'] >= fib_0618_short * 0.998) and (candle['close'] <= fib_0618_short * 1.004)
+            short_rsi = candle['rsi'] >= 52
+            short_vol = candle['volume'] >= (candle['vol_sma'] * 1.2)
+            short_rejection = (upper_wick >= body_size * 0.8) or (candle['close'] < candle['open'])
 
             trade_side = None
-            if long_zone and long_rsi and long_pattern:
+            if is_uptrend and long_zone and long_rsi and long_vol and long_rejection:
                 trade_side = "LONG"
-                stop_loss = min(candle['low'] * 0.998, swing_low * 0.999)
+                stop_loss = candle['low'] - (atr_val * 1.2)
                 tp_1 = fib_0382_long if fib_0382_long > entry_price else swing_high
                 tp_2 = swing_high
-            elif short_zone and short_rsi and short_pattern:
+
+            elif is_downtrend and short_zone and short_rsi and short_vol and short_rejection:
                 trade_side = "SHORT"
-                stop_loss = max(candle['high'] * 1.002, swing_high * 1.001)
+                stop_loss = candle['high'] + (atr_val * 1.2)
                 tp_1 = fib_0382_short if fib_0382_short < entry_price else swing_low
                 tp_2 = swing_low
 
@@ -128,7 +146,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                             break
                         elif future_bar['high'] >= tp_1 and outcome != "TP1_HIT":
                             outcome = "TP1_HIT"
-                    else:  # SHORT
+                    else:
                         if future_bar['high'] >= stop_loss:
                             outcome = "SL"
                             break
@@ -147,7 +165,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                     'Result': outcome
                 })
 
-                i += max(bars_held, 2)
+                i += max(bars_held, 3)
             else:
                 i += 1
 
@@ -157,7 +175,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 執行「多空雙向」Fib 波段 7 天回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 執行「順勢量能 + ATR 動態止損」回測...**")
     
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
@@ -172,7 +190,7 @@ def main():
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT] 多空雙向 7 天回測**\n```text\n未觸發任何多空訊號。\n```")
+        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪回測未觸發符合高質量順勢條件之訊號。")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -191,20 +209,20 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 多空雙向 7 天回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 順勢 EMA + ATR 動態防守回測 (15m)**\n"
         f"```text\n"
-        f"總進場次數  : {total_trades} 次 (多單: {long_trades} / 空單: {short_trades})\n"
+        f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
         f"TP2 終極達標: {tp2_count} 次\n"
         f"SL 停損離場 : {sl_count} 次\n"
         f"持倉/未觸發 : {holding_count} 次\n"
         f"----------------------------------------\n"
-        f"近期交易明細:\n"
+        f"近期高質量交易明細:\n"
         f"{trade_details}"
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== 多空雙向回測完成 ===")
+    print("=== 高質量順勢回測完成 ===")
 
 if __name__ == '__main__':
     main()
