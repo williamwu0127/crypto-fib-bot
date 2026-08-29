@@ -2,8 +2,8 @@ name: Crypto Fib Alert
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小時整點自動執行
-  workflow_dispatch:       # 支援手動點擊測試
+    - cron: '*/15 * * * *'  # 每 15 分鐘自動執行一次 (00分, 15分, 30分, 45分)
+  workflow_dispatch:        # 保留網頁手動點擊測試按鈕
 
 jobs:
   run-bot:
