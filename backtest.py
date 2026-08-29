@@ -12,10 +12,10 @@ SYMBOL_CONFIG = {
     'BTC': {'type': 'crypto_binance', 'pairs': ['BTCUSDT'], 'curr': 'USDT'},
     'ETH': {'type': 'crypto_binance', 'pairs': ['ETHUSDT'], 'curr': 'USDT'},
     'XAU': {'type': 'crypto_binance', 'pairs': ['PAXGUSDT'], 'curr': 'USDT'},
-    '币安人生': {'type': 'crypto_binance', 'pairs': ['币安人生USDT', 'LIFEUSDT', 'BNBLIFEUSDT'], 'curr': 'USDT'},
+    '币安人生': {'type': 'crypto_binance', 'pairs': ['币安人生USDT'], 'curr': 'USDT'},
 
-    # 2. 鏈上 / Alpha 迷因幣 (GeckoTerminal 公開 15m K 線源, USD 計價)
-    'PLAY': {'type': 'crypto_dex', 'network': 'base', 'pool': '0x853a7c99227499dba9db8c3a02aa691afdebf841', 'curr': 'USD'},
+    # 2. 鏈上 / Alpha 迷因幣 (GeckoTerminal 15m K 線, USD 計價)
+    'PLAY': {'type': 'crypto_dex', 'network': 'base', 'pool': '0xf1cacdfb3260c67539097e366df047ef1fcf0b08', 'curr': 'USD'},
     'LAB': {'type': 'crypto_dex', 'network': 'bsc', 'pool': '0xd9434e63fe78a6e77dafe2abc504121bf8500822f6d3a59eccba577cf0a070f2', 'curr': 'USD'},
 
     # 3. 美股龍頭與商品期貨 (Yahoo Finance 美股數據, USD 計價)
@@ -29,7 +29,8 @@ SYMBOL_CONFIG = {
     'GLW': {'type': 'stock', 'ticker': 'GLW', 'curr': 'USD'},
     'SPCX': {'type': 'stock', 'ticker': 'SPCX', 'curr': 'USD'},
     'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD'},
-    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'}
+    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'},
+    'SAMSUNG': {'type': 'stock', 'ticker': 'SMSN.L', 'curr': 'USD'}   # 美元計價三星電子 GDR/美股
 }
 
 TIMEFRAME = '15m'
@@ -53,7 +54,7 @@ def send_discord_alert(content):
         print("推播失敗:", err)
 
 def fetch_binance_kline(pairs):
-    """抓取幣安主流現貨 K 線 (支援中文交易對 URL Encode)"""
+    """抓取幣安主流現貨 K 線"""
     headers = {"User-Agent": "Mozilla/5.0"}
     for pair in pairs:
         encoded_pair = urllib.parse.quote(pair)
@@ -98,7 +99,7 @@ def fetch_stock_kline(ticker):
         return False, 0, None, str(e), ticker
 
 def main():
-    send_discord_alert("📡 **[全資產連線測試] 啟動 17 檔全覆蓋測試 (含中文幣與 LAB DEX)...**")
+    send_discord_alert("📡 **[全資產連線測試] 啟動全 18 檔標的連線驗證...**")
     
     results = []
     success_count = 0
