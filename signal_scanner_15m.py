@@ -59,7 +59,7 @@ def get_wallet_usdt(exchange):
         free_usdt = float(bal['free'].get('USDT', 0.0))
         return free_usdt if free_usdt > 0 else DEFAULT_BALANCE
     except Exception as e:
-        print("獲取錢包餘額異常:", e)
+        print("獲取錢包餘額受限，使用預設本金:", e)
         return DEFAULT_BALANCE
 
 def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, tp2_p, risk_usd):
@@ -254,7 +254,6 @@ def scan_symbol(sym, cfg, exchange, current_risk):
         sl_pct = max(abs(entry_price - sl) / entry_price, 0.002)
         pos_val = current_risk / sl_pct
 
-        # 執行開單
         order_status = place_order_with_sl_tp(exchange, sym, cfg, side, entry_price, sl, tp1, tp2, current_risk)
 
         return {
@@ -304,23 +303,23 @@ def main():
             p_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
 
             lines = [
-                "%s **%s** (15m 趨勢觸發)" % (side_tag, s['sym']),
+                side_tag + " **" + s['sym'] + "** (15m 趨勢觸發)",
                 "```text",
-                "進場時間 : %s (台灣時間)" % s['time'],
+                "進場時間 : " + s['time'] + " (台灣時間)",
                 "進場價格 : $" + (p_fmt % s['entry']) + " USDT",
-                "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-%.2f%% | 100%% 止損)" % s['sl_pct'],
-                "第一目標 : $" + (p_fmt % s['tp1']) + " USDT (Fib 0.382 | 50%% 止盈)",
-                "終極目標 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 | 50%% 止盈)",
+                "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-" + ("%.2f" % s['sl_pct']) + "% | 100% 止損)",
+                "第一目標 : $" + (p_fmt % s['tp1']) + " USDT (Fib 0.382 | 50% 止盈)",
+                "終極目標 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 | 50% 止盈)",
                 "----------------------------------------------------",
-                "合約錢包 : $%.2f USDT | 單筆動態風控 1%%: $%.2f USDT" % (wallet_balance, current_risk),
+                "合約錢包 : $" + ("%.2f" % wallet_balance) + " USDT | 單筆動態風控 1%: $" + ("%.2f" % current_risk) + " USDT",
                 "各槓桿所需保證金與損耗比:",
-                "• 10x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%" % (m10, loss10),
-                "• 20x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%" % (m20, loss20),
-                "• 50x  : 押 $%5.2f USDT | 損耗保證金 %5.1f%%" % (m50, loss50),
-                "• 100x : 押 $%5.2f USDT | 損耗保證金 %5.1f%%" % (m100, loss100),
+                "• 10x  : 押 $" + ("%5.2f" % m10) + " USDT | 損耗保證金 " + ("%5.1f" % loss10) + "%",
+                "• 20x  : 押 $" + ("%5.2f" % m20) + " USDT | 損耗保證金 " + ("%5.1f" % loss20) + "%",
+                "• 50x  : 押 $" + ("%5.2f" % m50) + " USDT | 損耗保證金 " + ("%5.1f" % loss50) + "%",
+                "• 100x : 押 $" + ("%5.2f" % m100) + " USDT | 損耗保證金 " + ("%5.1f" % loss100) + "%",
                 "----------------------------------------------------",
-                "實盤執行 : %s" % s['order_status'],
-                "指標數據 : RSI(14) = %.1f" % s['rsi'],
+                "實盤執行 : " + s['order_status'],
+                "指標數據 : RSI(14) = " + ("%.1f" % s['rsi']),
                 "```"
             ]
             send_discord("\n".join(lines))
@@ -329,8 +328,8 @@ def main():
         lines = [
             "📡 **[15m 掃描完成] 目前無觸發訊號**",
             "```text",
-            "掃描時間: %s (台灣時間) | 標的數: 20 檔" % tw_now.strftime('%H:%M'),
-            "合約錢包: $\%.2f USDT \vert{} 動態風控: 1\%\% ($%.2f USDT)" % (wallet_balance, current_risk),
+            "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔",
+            "合約錢包: $" + ("\%.2f" \% wallet_balance) + " USDT \vert{} 動態風控: 1\% ($" + ("%.2f" % current_risk) + " USDT)",
             "----------------------------------------------------",
             status_table,
             "```"
