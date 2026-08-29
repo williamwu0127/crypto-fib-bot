@@ -8,7 +8,7 @@ import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 18 檔標的精準配置
+# 18 檔標的完整配置（全面 USD / USDT 計價）
 SYMBOL_CONFIG = {
     # 1. 幣安主流與中文幣 (USDT)
     'BTC': {'type': 'binance', 'pair': 'BTCUSDT', 'curr': 'USDT'},
@@ -69,28 +69,34 @@ def get_kline_df(cfg):
     if t == 'binance':
         encoded_pair = urllib.parse.quote(cfg['pair'])
         url = f"{BINANCE_MIRROR}?symbol={encoded_pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
-        res = requests.get(url, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) >= 50:
-                df = pd.DataFrame(data, columns=[
-                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                    'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
-                ])
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
-                return df
+        try:
+            res = requests.get(url, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) >= 50:
+                    df = pd.DataFrame(data, columns=[
+                        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                        'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
+                    ])
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = df[col].astype(float)
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
+                    return df
+        except Exception:
+            pass
 
     elif t == 'dex':
         headers = {"Accept": "application/json;version=20230302"}
+        target_addr = cfg['pool']
+        network = cfg['network']
+        
         # 1. 嘗試直接調用 pool
-        url = f"https://api.geckoterminal.com/api/v2/networks/{cfg['network']}/pools/{cfg['pool']}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
+        url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{target_addr}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
         try:
             res = requests.get(url, headers=headers, timeout=8)
             if res.status_code == 200:
                 ohlcv = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-                if ohlcv and len(ohlcv) >= 50:
+                if ohlcv and len(ohlcv) >= 30:
                     ohlcv.reverse()
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -100,18 +106,43 @@ def get_kline_df(cfg):
         except Exception:
             pass
 
+        # 2. 備援：透過 Token 地址自動搜尋 Top 1 活躍池
+        search_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{target_addr}/pools"
+        try:
+            s_res = requests.get(search_url, headers=headers, timeout=8)
+            if s_res.status_code == 200:
+                pools = s_res.json().get('data', [])
+                if pools:
+                    best_pool = pools[0]['attributes']['address']
+                    sub_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{best_pool}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
+                    sub_res = requests.get(sub_url, headers=headers, timeout=8)
+                    if sub_res.status_code == 200:
+                        ohlcv = sub_res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
+                        if ohlcv and len(ohlcv) >= 30:
+                            ohlcv.reverse()
+                            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                            for col in ['open', 'high', 'low', 'close', 'volume']:
+                                df[col] = df[col].astype(float)
+                            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.strftime('%m/%d %H:%M')
+                            return df
+        except Exception:
+            pass
+
     elif t == 'stock':
-        df = yf.download(cfg['ticker'], period="5d", interval="15m", progress=False)
-        if not df.empty and len(df) >= 50:
-            df = df.reset_index()
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [c[0].lower() for c in df.columns]
-            else:
-                df.columns = [c.lower() for c in df.columns]
-            
-            time_col = 'datetime' if 'datetime' in df.columns else 'date'
-            df['datetime'] = pd.to_datetime(df[time_col]).dt.strftime('%m/%d %H:%M')
-            return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+        try:
+            df = yf.download(cfg['ticker'], period="5d", interval="15m", progress=False)
+            if not df.empty and len(df) >= 50:
+                df = df.reset_index()
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [c[0].lower() for c in df.columns]
+                else:
+                    df.columns = [c.lower() for c in df.columns]
+                
+                time_col = 'datetime' if 'datetime' in df.columns else 'date'
+                df['datetime'] = pd.to_datetime(df[time_col]).dt.strftime('%m/%d %H:%M')
+                return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+        except Exception:
+            pass
 
     return None
 
@@ -120,7 +151,7 @@ def backtest_strategy(name, cfg):
     if df is None or len(df) < 50:
         return f"❌ {name:<8} : 數據抓取失敗", []
 
-    # 計算指標：RSI, EMA50, EMA200
+    # 技術指標：RSI, EMA 50, EMA 200
     df['rsi'] = calculate_rsi(df['close'], period=14)
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
@@ -145,7 +176,6 @@ def backtest_strategy(name, cfg):
         fib_0618_short = sw_low + (wave * 0.618)
         fib_0382_short = sw_low + (wave * 0.382)
 
-        # K 棒型態計算（實體與影線）
         body_size = abs(candle['close'] - candle['open'])
         lower_wick = min(candle['open'], candle['close']) - candle['low']
         upper_wick = candle['high'] - max(candle['open'], candle['close'])
@@ -155,11 +185,11 @@ def backtest_strategy(name, cfg):
         tp1 = 0
         tp2 = 0
 
-        # 趨勢狀態
+        # 大趨勢判定 (EMA 50)
         trend_bullish = candle['close'] >= candle['ema50']
         trend_bearish = candle['close'] <= candle['ema50']
 
-        # 🟢 多單條件：大趨勢偏多 + 回踩 0.618 + 右側下影線反彈或收陽
+        # 🟢 多單進場：順勢多頭 + 回踩 0.618 支撐 + 右側下影線反彈或收陽 + RSI 適中
         rejection_long = (lower_wick >= body_size * 0.6) or (candle['close'] > candle['open'])
         if trend_bullish and (candle['low'] <= fib_0618_long * 1.002) and (candle['close'] >= sw_low) and rejection_long and (candle['rsi'] <= 50):
             trade_side = "LONG"
@@ -167,7 +197,7 @@ def backtest_strategy(name, cfg):
             tp1 = fib_0382_long
             tp2 = sw_high
 
-        # 🔴 空單條件：大趨勢偏空 + 反彈 0.618 + 右側上影線受阻或收陰
+        # 🔴 空單進場：順勢空頭 + 反彈 0.618 阻力 + 右側上影線受阻或收陰 + RSI 適中
         rejection_short = (upper_wick >= body_size * 0.6) or (candle['close'] < candle['open'])
         if trend_bearish and (candle['high'] >= fib_0618_short * 0.998) and (candle['close'] <= sw_high) and rejection_short and (candle['rsi'] >= 50):
             trade_side = "SHORT"
@@ -230,9 +260,11 @@ def main():
         all_trades.extend(trades)
         time.sleep(0.1)
 
+    # 1. 輸出各標的狀態總覽
     status_summary = "📋 **[標的數據與進階訊號總覽]**\n```text\n" + "\n".join(status_log) + "\n```"
     send_discord_alert(status_summary)
 
+    # 2. 統計回測數據
     if not all_trades:
         send_discord_alert("📊 **[回測結果]** 本週期內無符合趨勢過濾條件之進場點。")
         return
