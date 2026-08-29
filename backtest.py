@@ -80,7 +80,8 @@ def run_backtest():
         sym_trades = 0
         sym_wins = 0
 
-        for i in range(50, len(df) - 1):
+        # 保留足夠空間檢查未來 K 線
+        for i in range(50, len(df) - 15):
             current_risk = balance * 0.01
             bar = df.iloc[i]
             
@@ -100,15 +101,29 @@ def run_backtest():
                 sl = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1 = entry_price + abs(entry_price - sl)
                 
-                next_bar = df.iloc[i+1]
-                total_trades += 1
-                sym_trades += 1
-                if next_bar['l'] <= sl:
-                    balance -= current_risk
-                elif next_bar['h'] >= tp1:
-                    balance += current_risk * 1.5
-                    total_wins += 1
-                    sym_wins += 1
+                # 檢查未來 10 根 K 線內是先打到 TP 還是 SL
+                trade_won = False
+                hit_target = False
+                for j in range(1, 11):
+                    future_bar = df.iloc[i + j]
+                    # 優先檢查是否觸發止損
+                    if future_bar['l'] <= sl:
+                        balance -= current_risk
+                        hit_target = True
+                        break
+                    # 檢查是否觸發止盈
+                    elif future_bar['h'] >= tp1:
+                        balance += current_risk * 1.5
+                        trade_won = True
+                        hit_target = True
+                        break
+                
+                if hit_target:
+                    total_trades += 1
+                    sym_trades += 1
+                    if trade_won:
+                        total_wins += 1
+                        sym_wins += 1
 
         win_rate = (sym_wins / sym_trades * 100) if sym_trades > 0 else 0
         symbol_reports.append(sym + " | 交易: " + str(sym_trades) + "次 | 勝率: " + str(round(win_rate, 1)) + "%")
@@ -117,7 +132,7 @@ def run_backtest():
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[20檔標的 15m 綜合回測報告]**",
+        "📊 **[優化後 20檔標的 15m 回測報告]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
