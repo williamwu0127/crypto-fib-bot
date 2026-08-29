@@ -39,32 +39,47 @@ def get_historical_data(cfg):
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                return df[['o', 'h', 'l', 'c', 'v']]
+                df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+                return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         else:
-            df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) >= 50:
+            # 抓取 1 年歷史 15m 數據
+            df = yf.download(cfg['s'], period="365d", interval="15m", progress=False)
+            if df is not None and not df.empty and len(df) >= 100:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
-                df = df.rename(columns=str.lower)
-                req_cols = ['open', 'high', 'low', 'close', 'volume']
-                if all(c in df.columns for c in req_cols):
-                    res_df = df[req_cols].copy()
-                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    return res_df.reset_index(drop=True)
+                df = df.reset_index()
+                cols_lower = [str(c).lower() for c in df.columns]
+                df.columns = cols_lower
+                
+                time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
+                
+                res_df = pd.DataFrame()
+                res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
+                
+                for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
+                    found = False
+                    for cand in candidates:
+                        if cand in df.columns:
+                            res_df[target] = df[cand].astype(float)
+                            found = True
+                            break
+                    if not found:
+                        return None
+                
+                res_df = res_df.dropna().reset_index(drop=True)
+                if len(res_df) >= 100:
+                    return res_df
     except Exception:
         pass
     return None
 
 def run_backtest():
-    initial_balance = 100.0
-    balance = initial_balance
-    total_trades = 0
-    total_wins = 0
-    symbol_reports = []
+    all_trades = []
+    symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in SYMBOLS.keys()}
 
     for sym, cfg in SYMBOLS.items():
         df = get_historical_data(cfg)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 100:
             continue
 
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
@@ -78,12 +93,7 @@ def run_backtest():
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
         df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
-        is_stock = (cfg['t'] == 'stock' and sym != 'XAU')
-        sym_trades = 0
-        sym_wins = 0
-
         for i in range(50, len(df) - 15):
-            current_risk = balance * 0.01
             bar = df.iloc[i]
             prev_bar = df.iloc[i-1]
             
@@ -91,57 +101,75 @@ def run_backtest():
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
             
-            # 【優化】美股拉高波段振幅要求 (從 0.5% 提高到 0.8%)，過濾小震盪雜訊
-            min_wave_ratio = 0.008 if is_stock else 0.005
-            if wave <= 0 or (wave / l) < min_wave_ratio:
+            if wave <= 0 or (wave / l) < 0.005:
                 continue
                 
             fib_0618_l = h - (wave * 0.618)
             entry_price = bar['c']
             
-            # 基礎趨勢與 Fib 條件
-            cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002)
+            # 伺服器原版寬鬆進場邏輯
+            rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+            cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
             
-            # 【優化】為美股加入更嚴格的 RSI 動能過濾
-            if is_stock:
-                rsi_strong = (bar['rsi'] >= 50) and (bar['rsi'] >= bar['rsi_ema'])
-                cond_long = cond_long and rsi_strong
-
             if cond_long:
-                atr_mult = 1.3 if is_stock else 1.5
-                sl = min(l, entry_price - (bar['atr'] * atr_mult))
+                sl = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1 = entry_price + abs(entry_price - sl)
                 
-                trade_won = False
-                hit_target = False
+                outcome = None
+                exit_idx = i
                 for j in range(1, 11):
                     future_bar = df.iloc[i + j]
                     if future_bar['l'] <= sl:
-                        balance -= current_risk
-                        hit_target = True
+                        outcome = 'LOSS'
+                        exit_idx = i + j
                         break
                     elif future_bar['h'] >= tp1:
-                        balance += current_risk * 1.5
-                        trade_won = True
-                        hit_target = True
+                        outcome = 'WIN'
+                        exit_idx = i + j
                         break
                 
-                if hit_target:
-                    total_trades += 1
-                    sym_trades += 1
-                    if trade_won:
-                        total_wins += 1
-                        sym_wins += 1
+                if outcome:
+                    all_trades.append({
+                        'sym': sym,
+                        'time': bar['timestamp'],
+                        'exit_time': df.iloc[exit_idx]['timestamp'],
+                        'outcome': outcome
+                    })
 
-        win_rate = (sym_wins / sym_trades * 100) if sym_trades > 0 else 0
-        if sym_trades > 0:
-            symbol_reports.append(sym + " | 交易: " + str(sym_trades) + "次 | 勝率: " + str(round(win_rate, 1)) + "%")
+    # 嚴格依照時間先後順序排列
+    all_trades = sorted(all_trades, key=lambda x: x['time'])
+
+    initial_balance = 100.0
+    balance = initial_balance
+    total_trades = 0
+    total_wins = 0
+
+    # 依照時間軸依序跑複利滾動
+    for trade in all_trades:
+        current_risk = balance * 0.01
+        total_trades += 1
+        symbol_stats[trade['sym']]['trades'] += 1
+
+        if trade['outcome'] == 'WIN':
+            balance += current_risk * 1.5
+            total_wins += 1
+            symbol_stats[trade['sym']]['wins'] += 1
+        else:
+            balance -= current_risk
+
+    symbol_reports = []
+    for sym, stats in symbol_stats.items():
+        t_cnt = stats['trades']
+        w_cnt = stats['wins']
+        w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
+        if t_cnt > 0:
+            symbol_reports.append(sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%")
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[美股動能門檻優化 15m 回測報告]**",
+        "📊 **[伺服器原版策略 1年期時間軸+複利回測]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
