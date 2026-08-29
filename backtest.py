@@ -232,6 +232,7 @@ def main():
 
     total_net_usd = res_df['USD_Profit'].sum()
     total_r = res_df['R_Profit'].sum()
+    roi_percent = (total_net_usd / ACCOUNT_BALANCE) * 100
 
     # 彙總各幣種投入與收益
     sym_group = res_df.groupby('Symbol').agg({
@@ -253,7 +254,7 @@ def main():
         f"總進場次數  : {total_trades} 次 | TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
         f"TP2 終極達標: {tp2_count} 次 | SL 停損: {sl_count} 次 | 未結: {holding_count} 次\n"
         f"單週累計 R 數: {total_r:+.1f} R\n"
-        f"預期總淨利潤: {total_net_usd:+,.2f} USD (本金收益率: {total_net_usd/ACCOUNT_BALANCE*100:+.1f}%)\n"
+        f"預期總淨利潤: {total_net_usd:+,.2f} USD (本金收益率: {roi_percent:+.1f}%)\n"
         f"------------------------------------------\n"
         f"各資產投入成本與收益明細:\n"
         f"{breakdown_text}"
