@@ -18,7 +18,7 @@ jobs:
       - name: 安裝套件
         run: pip install -r requirements.txt
 
-      - name: 執行過去 7 天量化回測
+      - name: 執行加密貨幣15m/1y 美股15m/60d量化回測
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python backtest.py
