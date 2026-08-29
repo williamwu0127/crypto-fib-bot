@@ -1,6 +1,4 @@
 requests
-urllib.parse
 pandas
 numpy
-ccxt
 yfinance
