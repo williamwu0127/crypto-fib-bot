@@ -34,8 +34,8 @@ STOCK_SYMBOLS = {
 
 def get_crypto_data(cfg):
     try:
-        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=35000"
-        res = requests.get(url, timeout=12).json()
+        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
+        res = requests.get(url, timeout=10).json()
         if isinstance(res, list) and len(res) >= 100:
             cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
             df = pd.DataFrame(res, columns=cols)
@@ -174,11 +174,11 @@ def run_group_backtest(symbols_dict, data_fetch_func):
         w_cnt = stats['wins']
         w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
         if t_cnt > 0:
-            reports.append(sym + " | 交易: " + str(t_cnt) + "次 | 勝率: " + str(round(w_rate, 1)) + "%")
+            reports.append(f"{sym} | 交易: {t_cnt}次 | 勝率: {round(w_rate, 1)}%")
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
-    time_range_str = str(min_time).split()[0] + " ~ " + str(max_time).split()[0] if min_time and max_time else "N/A"
+    time_range_str = f"{str(min_time).split()[0]} ~ {str(max_time).split()[0]}" if min_time and max_time else "N/A"
 
     return time_range_str, initial_balance, balance, profit_loss_pct, total_trades, overall_win_rate, reports
 
@@ -186,17 +186,20 @@ def run_backtest():
     crypto_range, c_init, c_bal, c_pl, c_trades, c_win_rate, crypto_reports = run_group_backtest(CRYPTO_SYMBOLS, get_crypto_data)
     stock_range, s_init, s_bal, s_pl, s_trades, s_win_rate, stock_reports = run_group_backtest(STOCK_SYMBOLS, get_stock_data)
 
-    s_trades_str = str(c_trades)
-    s_win_rate_str = str(round(c_win_rate, 1))
-    line1 = "總交易次數: " + s_trades_str + " 次 | 綜合勝率: " + s_win_rate_str + "%"
+    crypto_text = "\n".join(crypto_reports)
+    stock_text = "\n".join(stock_reports)
 
-    msg1 = "\n".join([
-        "📊 **[加密貨幣專區 - 1年期 15m 複利回測]**",
-        "```text",
-        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能",
-        "回測區間: " + crypto_range,
-        "初始資金: $" + str(round(c_init, 2)) + " USDT",
-        "最終結餘: $" + str(round(c_bal, 2)) + " USDT (" + str(round(c_pl, 2)) + "%)",
-        line1,
-        "----------------------------------------------------",
-        
+    msg1 = f"""📊 **[加密貨幣專區 - 15m 複利回測]**
+```text
+判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能
+回測區間: {crypto_range}
+初始資金: ${round(c_init, 2)} USDT
+最終結餘: ${round(c_bal, 2)} USDT ({round(c_pl, 2)}%)
+總交易次數: {c_trades} 次 | 綜合勝率: {round(c_win_rate, 1)}%
+----------------------------------------------------
+{crypto_text}
+```"""
+
+    msg2 = f"""📊 **[美股與商品專區 - 15m 複利回測]**
+```text
+判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 
