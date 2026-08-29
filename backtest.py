@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -35,19 +36,40 @@ def send_discord(msg):
     except Exception as e:
         print("Webhook Error:", e)
 
+def get_binance_1mo_data(symbol):
+    """分頁抓取近 30 天 (約 2880 根) 15m K 線"""
+    all_rows = []
+    end_time = int(time.time() * 1000)
+    
+    for _ in range(3):
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=15m&limit=1000&endTime={end_time}"
+        try:
+            res = requests.get(url, timeout=6).json()
+            if isinstance(res, list) and len(res) > 0:
+                all_rows = res + all_rows
+                end_time = res[0][0] - 1
+            else:
+                break
+        except Exception:
+            break
+        time.sleep(0.05)
+
+    if not all_rows:
+        return None
+
+    cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+    df = pd.DataFrame(all_rows, columns=cols).drop_duplicates(subset=['t']).sort_values('t')
+    for col in ['o', 'h', 'l', 'c', 'v']:
+        df[col] = df[col].astype(float)
+    return df[['o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+
 def get_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=400"
-            res = requests.get(url, timeout=6).json()
-            if isinstance(res, list) and len(res) >= 60:
-                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-                df = pd.DataFrame(res, columns=cols)
-                for col in ['o', 'h', 'l', 'c', 'v']:
-                    df[col] = df[col].astype(float)
-                return df[['o', 'h', 'l', 'c', 'v']]
+            return get_binance_1mo_data(cfg['s'])
         else:
-            df = yf.download(cfg['s'], period="7d", interval="15m", progress=False)
+            # 抓取近 1 個月美股與期貨數據 (period="1mo")
+            df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
             if not df.empty and len(df) >= 60:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [c[0].lower() for c in df.columns]
@@ -106,11 +128,9 @@ def backtest():
             side = None
             sl, tp1, tp2 = 0.0, 0.0, 0.0
 
-            # 🟢 多單條件：EMA50 > EMA200 + 回踩 0.618 + 下影線拒絕或收陽 + RSI 翻揚且 <= 55
             rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l)
             
-            # 🔴 空單條件：EMA50 < EMA200 + 反彈 0.618 + 上影線受阻或收陰 + RSI 轉弱且 >= 45
             rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
             cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h)
 
@@ -173,7 +193,7 @@ def backtest():
                 i += 1
 
     if not all_trades:
-        send_discord("⚠️ 本週期無觸發交易。")
+        send_discord("⚠️ 近 30 天無觸發交易。")
         return
 
     res = pd.DataFrame(all_trades)
@@ -201,12 +221,12 @@ def backtest():
     
     table_str = "\n".join(rows)
     line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
-    line2 = "進場機制: 順勢斐波 0.618 回踩 + RSI 轉折動態確認 (均衡最佳版)"
+    line2 = "回測週期: 近 30 天 (1 個月) | 15m 級別 10x 合約"
     line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
     line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
-        "📊 **[BACKTEST REPORT] 10x 合約波段回測 (均衡最佳版)**\n"
+        "📊 **[BACKTEST REPORT] 10x 合約波段回測 (近 30 天完整報告)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
@@ -217,7 +237,7 @@ def backtest():
         "```"
     )
     send_discord(report)
-    print("=== 完成 ===")
+    print("=== 30 天回測完成 ===")
 
 if __name__ == '__main__':
     backtest()
