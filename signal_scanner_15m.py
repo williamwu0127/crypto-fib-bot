@@ -88,19 +88,19 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
         if qty * entry_p < 5.0:
             return "未開單: 開倉價值 ($%.2f USDT) 低於幣安 5 USDT 門檻" % (qty * entry_p)
 
-        # 3. 市價開倉
         order_side = 'buy' if side == 'LONG' else 'sell'
         close_side = 'sell' if side == 'LONG' else 'buy'
-        
+        sl_price_str = float(exchange.price_to_precision(market_sym, sl_p))
+
+        # 3. 市價開倉
         try:
             order = exchange.create_order(symbol=market_sym, type='market', side=order_side, amount=qty)
             order_id = str(order.get('id', 'N/A'))
         except Exception as err:
             return "開單失敗 (市價開倉失敗: %s)" % str(err)
 
-        # 4. SL (100% 倉位止損)
+        # 4. SL 掛單 (100% 倉位止損) - 若失敗立即市價平倉撤出
         try:
-            sl_price_str = float(exchange.price_to_precision(market_sym, sl_p))
             exchange.create_order(
                 symbol=market_sym,
                 type='STOP_MARKET',
@@ -109,9 +109,13 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
                 params={'stopPrice': sl_price_str, 'reduceOnly': True}
             )
         except Exception as err:
-            print("SL 掛單失敗:", err)
+            try:
+                exchange.create_order(symbol=market_sym, type='market', side=close_side, amount=qty)
+            except Exception:
+                pass
+            return "開單失敗 (SL 止損單掛單失敗，已緊急撤出平倉: %s)" % str(err)
 
-        # 5. TP1 (50% 倉位止盈)
+        # 5. 第一止盈 (50% 倉位)
         tp1_qty = float(exchange.amount_to_precision(market_sym, qty * 0.5))
         if tp1_qty > 0:
             try:
@@ -124,9 +128,9 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
                     params={'stopPrice': tp1_price_str, 'reduceOnly': True}
                 )
             except Exception as err:
-                print("TP1 掛單失敗:", err)
+                print("第一止盈掛單失敗:", err)
 
-        # 6. TP2 (剩餘 50% 倉位止盈)
+        # 6. 第二止盈 (剩餘 50% 倉位)
         tp2_qty = float(exchange.amount_to_precision(market_sym, qty - tp1_qty))
         if tp2_qty > 0:
             try:
@@ -139,9 +143,9 @@ def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, t
                     params={'stopPrice': tp2_price_str, 'reduceOnly': True}
                 )
             except Exception as err:
-                print("TP2 掛單失敗:", err)
+                print("第二止盈掛單失敗:", err)
 
-        return "✅ 開倉成功 (ID: %s) | SL/TP1/TP2 條件單全數部署" % order_id
+        return "✅ 開倉成功 (ID: %s) | SL/第一止盈/第二止盈 條件單全數部署" % order_id
     except Exception as err:
         return "開單失敗: %s" % str(err)
 
@@ -308,15 +312,15 @@ def main():
                 "進場時間 : " + s['time'] + " (台灣時間)",
                 "進場價格 : $" + (p_fmt % s['entry']) + " USDT",
                 "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-" + ("%.2f" % s['sl_pct']) + "% | 100% 止損)",
-                "第一目標 : $" + (p_fmt % s['tp1']) + " USDT (Fib 0.382 | 50% 止盈)",
-                "終極目標 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 | 50% 止盈)",
+                "第一止盈 : $" + (p_fmt % s['tp1']) + " USDT (Fib 0.382 | 50% 倉位)",
+                "第二止盈 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 | 50% 倉位)",
                 "----------------------------------------------------",
-                "合約錢包 : $" + ("%.2f" % wallet_balance) + " USDT | 單筆動態風控 1%: $" + ("%.2f" % current_risk) + " USDT",
-                "各槓桿所需保證金與損耗比:",
-                "• 10x  : 押 $" + ("%5.2f" % m10) + " USDT | 損耗保證金 " + ("%5.1f" % loss10) + "%",
-                "• 20x  : 押 $" + ("%5.2f" % m20) + " USDT | 損耗保證金 " + ("%5.1f" % loss20) + "%",
-                "• 50x  : 押 $" + ("%5.2f" % m50) + " USDT | 損耗保證金 " + ("%5.1f" % loss50) + "%",
-                "• 100x : 押 $" + ("%5.2f" % m100) + " USDT | 損耗保證金 " + ("%5.1f" % loss100) + "%",
+                "合約錢包 : $" + ("%.2f" % wallet_balance) + " USDT | 動態風控 1%: $" + ("%.2f" % current_risk) + " USDT",
+                "各槓桿所需倉位保證金與損耗比:",
+                "• 10x  : 倉位 $" + ("%5.2f" % m10) + " USDT | 損耗保證金 " + ("%5.1f" % loss10) + "%",
+                "• 20x  : 倉位 $" + ("%5.2f" % m20) + " USDT | 損耗保證金 " + ("%5.1f" % loss20) + "%",
+                "• 50x  : 倉位 $" + ("%5.2f" % m50) + " USDT | 損耗保證金 " + ("%5.1f" % loss50) + "%",
+                "• 100x : 倉位 $" + ("%5.2f" % m100) + " USDT | 損耗保證金 " + ("%5.1f" % loss100) + "%",
                 "----------------------------------------------------",
                 "實盤執行 : " + s['order_status'],
                 "指標數據 : RSI(14) = " + ("%.1f" % s['rsi']),
