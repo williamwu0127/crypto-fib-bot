@@ -40,7 +40,7 @@ def send_discord(content):
 def get_latest_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=100"
+            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=100"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 60:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -83,7 +83,7 @@ def scan_signal(sym, cfg):
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
-    # 檢查剛收盤的這根 K 線 (倒數第二筆，即最新確認完成的 K 棒)
+    # 取已確認收盤的 K 棒 (倒數第 2 筆)
     idx = len(df) - 2
     sub = df.iloc[idx-25:idx+1]
     h, l = sub['h'].max(), sub['l'].min()
@@ -131,8 +131,7 @@ def scan_signal(sym, cfg):
     if side:
         sl_pct = abs(entry_price - sl) / entry_price
         sl_pct = max(sl_pct, 0.002)
-        pos_val = RISK_PER_TRADE / sl_pct
-        margin = pos_val / LEVERAGE
+        pos_val = RISK_PER_TRADE / sl_pct  # 名義開倉總價值 (建議倉位)
 
         return {
             'sym': sym,
@@ -143,7 +142,7 @@ def scan_signal(sym, cfg):
             'tp1': tp1,
             'tp2': tp2,
             'sl_pct': sl_pct * 100,
-            'margin': margin,
+            'pos_val': pos_val,
             'rsi': bar['rsi']
         }
     return None
@@ -161,22 +160,21 @@ def main():
         print("[No Signal] 14 檔標的目前無符合交易條件之訊號。")
         return
 
-    # 專業簡潔的 Discord 推播格式
     for s in detected_signals:
         side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
         msg = (
-            f"{side_tag} **{s['sym']}** (15m 趨勢觸發)\n"
-            f"```text\n"
-            f"進場時間 : {s['time']} UTC\n"
-            f"進場價格 : ${s['entry']:,.2f}\n"
-            f"停損價格 : ${s['sl']:,.2f} (-{s['sl_pct']:.2f}% | ATR 防插針)\n"
-            f"第一目標 : ${s['tp1']:,.2f} (Fib 0.382 / 50%減倉設保本)\n"
-            f"終極目標 : ${s['tp2']:,.2f} (前波極值 / 清倉)\n"
-            f"-----------------------------------------\n"
-            f"風控規模 : 10x 槓桿 | 建議保證金: ${s['margin']:,.0f} USDT\n"
-            f"風險鎖定 : 固定虧損 -$100 USDT (1.0%)\n"
-            f"動態指標 : RSI(14) = {s['rsi']:.1f}\n"
-            f"```"
+            side_tag + " **" + s['sym'] + "** (15m 趨勢觸發)\n"
+            "```text\n"
+            "進場時間 : " + s['time'] + " UTC\n"
+            "進場價格 : $" + ("%.2f" % s['entry']) + "\n"
+            "停損價格 : $" + ("%.2f" % s['sl']) + " (-" + ("%.2f" % s['sl_pct']) + "% | ATR 防插針)\n"
+            "第一目標 : $" + ("%.2f" % s['tp1']) + " (Fib 0.382 / 減半保本)\n"
+            "終極目標 : $" + ("%.2f" % s['tp2']) + " (前波極值 / 清倉)\n"
+            "-----------------------------------------\n"
+            "建議倉位 : $" + ("{:,.0f}".format(s['pos_val'])) + " USDT (10x 槓桿)\n"
+            "風險鎖定 : 固定虧損 -$100 USDT (1.0%)\n"
+            "動態指標 : RSI(14) = " + ("%.1f" % s['rsi']) + "\n"
+            "```"
         )
         send_discord(msg)
 
