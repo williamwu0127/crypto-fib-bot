@@ -1,22 +1,22 @@
 import os
 import time
 import requests
+import urllib.parse
 import pandas as pd
 import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 17 檔標的配置（全面 USD / USDT 計價）
 SYMBOL_CONFIG = {
     # 1. 幣安主流幣與現貨代幣 (USDT 計價)
-    'BTC': {'type': 'crypto_binance', 'pair': 'BTCUSDT', 'curr': 'USDT'},
-    'ETH': {'type': 'crypto_binance', 'pair': 'ETHUSDT', 'curr': 'USDT'},
-    'XAU': {'type': 'crypto_binance', 'pair': 'PAXGUSDT', 'curr': 'USDT'},
-    '币安人生': {'type': 'crypto_binance', 'pair': 'BIANRENSHENGUSDT', 'curr': 'USDT'},
+    'BTC': {'type': 'crypto_binance', 'pairs': ['BTCUSDT'], 'curr': 'USDT'},
+    'ETH': {'type': 'crypto_binance', 'pairs': ['ETHUSDT'], 'curr': 'USDT'},
+    'XAU': {'type': 'crypto_binance', 'pairs': ['PAXGUSDT'], 'curr': 'USDT'},
+    '币安人生': {'type': 'crypto_binance', 'pairs': ['币安人生USDT', 'LIFEUSDT', 'BNBLIFEUSDT'], 'curr': 'USDT'},
 
     # 2. 鏈上 / Alpha 迷因幣 (GeckoTerminal 公開 15m K 線源, USD 計價)
     'PLAY': {'type': 'crypto_dex', 'network': 'base', 'pool': '0x853a7c99227499dba9db8c3a02aa691afdebf841', 'curr': 'USD'},
-    'LAB': {'type': 'crypto_dex', 'network': 'bsc', 'pool': '0x7ec43cf65f1663f820427c62a5780b8f2e25593a', 'curr': 'USD'},
+    'LAB': {'type': 'crypto_dex', 'network': 'bsc', 'pool': '0xd9434e63fe78a6e77dafe2abc504121bf8500822f6d3a59eccba577cf0a070f2', 'curr': 'USD'},
 
     # 3. 美股龍頭與商品期貨 (Yahoo Finance 美股數據, USD 計價)
     'TSM': {'type': 'stock', 'ticker': 'TSM', 'curr': 'USD'},
@@ -28,8 +28,8 @@ SYMBOL_CONFIG = {
     'AMZN': {'type': 'stock', 'ticker': 'AMZN', 'curr': 'USD'},
     'GLW': {'type': 'stock', 'ticker': 'GLW', 'curr': 'USD'},
     'SPCX': {'type': 'stock', 'ticker': 'SPCX', 'curr': 'USD'},
-    'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD'},           # 原油期貨 (與 CLUSDT 連動)
-    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'}          # 閃迪 SanDisk
+    'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD'},
+    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'}
 }
 
 TIMEFRAME = '15m'
@@ -52,55 +52,36 @@ def send_discord_alert(content):
     except Exception as err:
         print("推播失敗:", err)
 
-def fetch_binance_kline(pair):
-    """抓取幣安主流現貨 K 線"""
-    candidates = [pair, pair.replace('USDT', 'USDC')]
-    for p in candidates:
-        url = f"{BINANCE_MIRROR}?symbol={p}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
+def fetch_binance_kline(pairs):
+    """抓取幣安主流現貨 K 線 (支援中文交易對 URL Encode)"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for pair in pairs:
+        encoded_pair = urllib.parse.quote(pair)
+        url = f"{BINANCE_MIRROR}?symbol={encoded_pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
         try:
-            res = requests.get(url, timeout=6)
+            res = requests.get(url, headers=headers, timeout=6)
             if res.status_code == 200:
                 data = res.json()
                 if isinstance(data, list) and len(data) > 0:
-                    return True, len(data), float(data[-1][4]), "Binance", p
+                    return True, len(data), float(data[-1][4]), "Binance", pair
         except Exception:
             continue
-    return False, 0, None, "Binance", pair
+    return False, 0, None, "Binance", pairs[0]
 
-def fetch_dex_kline(network, pool_or_token):
+def fetch_dex_kline(network, pool):
     """抓取 GeckoTerminal 鏈上 15m K 線"""
     headers = {"Accept": "application/json;version=20230302"}
-    
-    # 1. 嘗試以 pool 查詢
-    url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_or_token}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
+    url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
     try:
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             ohlcv_list = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
             if ohlcv_list:
                 latest_close = float(ohlcv_list[0][4])
-                return True, len(ohlcv_list), latest_close, "Alpha-DEX", pool_or_token[:8] + "..."
+                return True, len(ohlcv_list), latest_close, "Alpha-DEX", pool[:8] + "..."
     except Exception:
         pass
-
-    # 2. 嘗試以 token 地址搜尋 pools
-    search_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{pool_or_token}/pools"
-    try:
-        s_res = requests.get(search_url, headers=headers, timeout=8)
-        if s_res.status_code == 200:
-            pools = s_res.json().get('data', [])
-            if pools:
-                pool_addr = pools[0]['attributes']['address']
-                sub_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_addr}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
-                sub_res = requests.get(sub_url, headers=headers, timeout=8)
-                if sub_res.status_code == 200:
-                    ohlcv_list = sub_res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-                    if ohlcv_list:
-                        return True, len(ohlcv_list), float(ohlcv_list[0][4]), "Alpha-DEX", pool_addr[:8] + "..."
-    except Exception:
-        pass
-
-    return False, 0, None, "DEX無數據", pool_or_token
+    return False, 0, None, "Alpha-DEX", pool[:8] + "..."
 
 def fetch_stock_kline(ticker):
     """抓取美股/商品 15m K 線 (Yahoo Finance)"""
@@ -117,7 +98,7 @@ def fetch_stock_kline(ticker):
         return False, 0, None, str(e), ticker
 
 def main():
-    send_discord_alert("📡 **[全資產連線測試] 啟動 17 檔全美元資產連線測試 (含 SNDK)...**")
+    send_discord_alert("📡 **[全資產連線測試] 啟動 17 檔全覆蓋測試 (含中文幣與 LAB DEX)...**")
     
     results = []
     success_count = 0
@@ -127,7 +108,7 @@ def main():
         t = cfg['type']
         
         if t == 'crypto_binance':
-            ok, count, price, source, label = fetch_binance_kline(cfg['pair'])
+            ok, count, price, source, label = fetch_binance_kline(cfg['pairs'])
         elif t == 'crypto_dex':
             ok, count, price, source, label = fetch_dex_kline(cfg['network'], cfg['pool'])
         else:
@@ -145,7 +126,7 @@ def main():
         time.sleep(0.15)
 
     summary_text = (
-        f"📋 **[全資產連線測試總覽 (全 USD/USDT 計價)]**\n"
+        f"📋 **[全資產連線測試總覽]**\n"
         f"成功抓取: {success_count} / {len(SYMBOL_CONFIG)}\n"
         f"```text\n"
         + "\n".join(results) +
