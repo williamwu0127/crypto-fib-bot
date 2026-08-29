@@ -42,7 +42,7 @@ def get_historical_data(sym, cfg):
                 df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         except Exception as e:
-            print(f"Binance error for {sym}: {e}")
+            print("Binance error for " + sym + ": " + str(e))
     else:
         try:
             df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
@@ -66,18 +66,14 @@ def get_historical_data(sym, cfg):
                             found = True
                             break
                     if not found:
-                        print(f"Stock {sym} missing column {target}, columns found: {list(df.columns)}")
+                        print("Stock " + sym + " missing column " + target)
                         return None
                 
                 res_df = res_df.dropna().reset_index(drop=True)
                 if len(res_df) >= 50:
                     return res_df
-                else:
-                    print(f"Stock {sym} data too short: {len(res_df)} rows")
-            else:
-                print(f"Stock {sym} returned empty data from yfinance")
         except Exception as e:
-            print(f"YFinance error for {sym}: {e}")
+            print("YFinance error for " + sym + ": " + str(e))
     return None
 
 def run_backtest():
@@ -87,7 +83,7 @@ def run_backtest():
     for sym, cfg in SYMBOLS.items():
         df = get_historical_data(sym, cfg)
         if df is None or len(df) < 50:
-            print(f"Skipping {sym} due to insufficient data.")
+            print("Skipping " + sym + " due to insufficient data.")
             continue
 
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
@@ -190,4 +186,27 @@ def run_backtest():
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
         "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + str(round(overall_win_rate, 1)) + "%",
-        "----------------------------------------------------
+        "----------------------------------------------------",
+        "\n".join(crypto_reports),
+        "```"
+    ])
+
+    msg2 = "\n".join([
+        "📊 **[回測報告 (2/2) - 美股與商品個股]**",
+        "```text",
+        "\n".join(stock_reports),
+        "```"
+    ])
+    
+    if DISCORD_WEBHOOK_URL and DISCORD_WEBHOOK_URL != "你的Discord網址":
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg1}, timeout=8)
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg2}, timeout=8)
+        except Exception:
+            pass
+
+    print(msg1)
+    print(msg2)
+
+if __name__ == '__main__':
+    run_backtest()
