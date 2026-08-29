@@ -1,6 +1,7 @@
 import os
 import requests
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -36,16 +37,16 @@ def send_discord(msg):
 def get_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=300"
+            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=400"
             res = requests.get(url, timeout=6).json()
-            if isinstance(res, list) and len(res) >= 40:
+            if isinstance(res, list) and len(res) >= 50:
                 df = pd.DataFrame(res, columns=['t','o','h','l','c','v','ct','q','n','tb','tq','i'])
                 for c in ['o','h','l','c','v']:
                     df[c] = df[c].astype(float)
                 return df[['o','h','l','c','v']]
         else:
             df = yf.download(cfg['s'], period="5d", interval="15m", progress=False)
-            if not df.empty and len(df) >= 40:
+            if not df.empty and len(df) >= 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [c[0].lower() for c in df.columns]
                 else:
@@ -62,17 +63,30 @@ def backtest():
     
     for sym, cfg in SYMBOLS.items():
         df = get_data(cfg)
-        if df is None:
+        if df is None or len(df) < 60:
             continue
 
+        # 計算指標
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
         
-        i = 30
+        # ATR (14) 計算動態安全止損距離
+        tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
+        df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
+
+        # RSI (14)
+        delta = df['c'].diff()
+        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+
+        i = 40
         while i < len(df) - 1:
-            sub = df.iloc[i-20:i+1]
+            sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
-            if wave <= 0 or (wave / l) < 0.003:
+            
+            if wave <= 0 or (wave / l) < 0.005:
                 i += 1
                 continue
 
@@ -85,37 +99,52 @@ def backtest():
             body = abs(bar['c'] - bar['o'])
             lower_wick = min(bar['o'], bar['c']) - bar['l']
             upper_wick = bar['h'] - max(bar['o'], bar['c'])
+            atr_val = bar['atr']
 
             side = None
-            if bar['c'] >= df['ema50'].iloc[i] and bar['l'] <= fib_0618_l * 1.002 and (lower_wick >= body * 0.5 or bar['c'] > bar['o']):
-                side, sl, tp1, tp2 = "LONG", l * 0.997, fib_0382_l, h
-            elif bar['c'] <= df['ema50'].iloc[i] and bar['h'] >= fib_0618_s * 0.998 and (upper_wick >= body * 0.5 or bar['c'] < bar['o']):
-                side, sl, tp1, tp2 = "SHORT", h * 1.003, fib_0382_s, l
+            # 多單：EMA50 > EMA200 (大順勢) + 回踩 0.618 + 下影線反彈 + RSI <= 50
+            if (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l):
+                if (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and (bar['rsi'] <= 55):
+                    side = "LONG"
+                    sl = min(l, bar['c'] - (atr_val * 1.5))
+                    tp1 = fib_0382_l
+                    tp2 = h
+
+            # 空單：EMA50 < EMA200 (大順勢) + 反彈 0.618 + 上影線受阻 + RSI >= 50
+            elif (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h):
+                if (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and (bar['rsi'] >= 45):
+                    side = "SHORT"
+                    sl = max(h, bar['c'] + (atr_val * 1.5))
+                    tp1 = fib_0382_s
+                    tp2 = l
 
             if side:
                 r_profit = 0.0
                 step = 1
-                for j in range(i + 1, min(i + 25, len(df))):
+                hit_tp1 = False
+
+                for j in range(i + 1, min(i + 35, len(df))):
                     fb = df.iloc[j]
                     step += 1
+                    
                     if side == "LONG":
-                        if fb['l'] <= sl: 
-                            r_profit = -1.0
+                        if fb['l'] <= (bar['c'] if hit_tp1 else sl):
+                            r_profit = 1.0 if hit_tp1 else -1.0
                             break
-                        elif fb['h'] >= tp2: 
+                        if fb['h'] >= tp2:
                             r_profit = 2.8
                             break
-                        elif fb['h'] >= tp1: 
-                            r_profit = 1.0
+                        elif fb['h'] >= tp1:
+                            hit_tp1 = True
                     else:
-                        if fb['h'] <= sl: 
-                            r_profit = -1.0
+                        if fb['h'] >= (bar['c'] if hit_tp1 else sl):
+                            r_profit = 1.0 if hit_tp1 else -1.0
                             break
-                        elif fb['l'] <= tp2: 
+                        if fb['l'] <= tp2:
                             r_profit = 2.8
                             break
-                        elif fb['l'] <= tp1: 
-                            r_profit = 1.0
+                        elif fb['l'] <= tp1:
+                            hit_tp1 = True
 
                 all_trades.append({
                     'sym': sym,
@@ -128,7 +157,7 @@ def backtest():
                 i += 1
 
     if not all_trades:
-        send_discord("本週期無觸發交易。")
+        send_discord("⚠️ 本週期嚴格篩選下無觸發交易。")
         return
 
     res = pd.DataFrame(all_trades)
@@ -149,13 +178,12 @@ def backtest():
         rows.append(row_line)
     
     table_str = "\n".join(rows)
-
     line1 = "本金規模: $" + str(int(ACCOUNT_BALANCE)) + " USD \vert{} 單筆風控: $" + str(int(RISK_PER_TRADE)) + " USD (1.5%)"
     line2 = "交易統計: 共 " + str(total) + " 筆 (勝 " + str(win) + " / 負 " + str(loss) + ") | 勝率: %.1f%%" % winrate
     line3 = "累計收益: %+.1f R | 淨利: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
-        "📊 **[BACKTEST REPORT] 主流/美股波段績效報告**\n"
+        "📊 **[BACKTEST REPORT] 主流/美股波段績效報告 (嚴格風控優化版)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
