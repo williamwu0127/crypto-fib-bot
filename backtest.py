@@ -111,7 +111,7 @@ def run_backtest():
                     sym_wins += 1
 
         win_rate = (sym_wins / sym_trades * 100) if sym_trades > 0 else 0
-        symbol_reports.append(sym + " | 交易: " + str(sym_trades) + "次 | 勝率: " + "%.1f" % win_rate + "%")
+        symbol_reports.append(sym + " | 交易: " + str(sym_trades) + "次 | 勝率: " + str(round(win_rate, 1)) + "%")
 
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
@@ -119,8 +119,10 @@ def run_backtest():
     report = [
         "📊 **[20檔標的 15m 綜合回測報告]**",
         "```text",
-        "初始資金: $" + ("\%.2f" \% initial_balance) + " USDT \vert{} 最終結餘: $" + ("%.2f" % balance) + " USDT (" + ("%+.2f" % profit_loss_pct) + "%)",
-        "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + ("%.1f" % overall_win_rate) + "%",
+        "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
+        "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
+        "總交易次數: " + str(total_trades) + " 次",
+        "綜合勝率: " + str(round(overall_win_rate, 1)) + "%",
         "----------------------------------------------------",
         "\n".join(symbol_reports),
         "```"
