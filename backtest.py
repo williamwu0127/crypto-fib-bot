@@ -81,17 +81,23 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
             fib_0786 = swing_high - (fib_range * 0.786)
 
             candle = sub_df.iloc[-1]
+            prev_candle = sub_df.iloc[-2]
             entry_price = candle['close']
+
             lower_wick = min(candle['open'], candle['close']) - candle['low']
             body_size = abs(candle['close'] - candle['open'])
 
-            # 4 重共振進場條件
+            # 實戰平衡版條件
             hit_fib = (candle['low'] <= fib_0618) and (candle['close'] >= fib_0618)
-            rsi_oversold = candle['rsi'] <= 35
-            hammer = lower_wick > (body_size * 1.5)
-            vol_spike = candle['volume'] > (candle['vol_sma'] * 1.5)
+            rsi_oversold = candle['rsi'] <= 42
+            vol_spike = candle['volume'] > (candle['vol_sma'] * 1.2)
+            
+            # K 線型態：長下影線 OR 多頭吞噬（陽包陰）
+            is_hammer = lower_wick >= (body_size * 1.0)
+            is_engulfing = (candle['close'] > candle['open']) and (prev_candle['close'] < prev_candle['open']) and (candle['close'] >= prev_candle['open'])
+            price_action = is_hammer or is_engulfing
 
-            if hit_fib and rsi_oversold and hammer and vol_spike:
+            if hit_fib and rsi_oversold and vol_spike and price_action:
                 stop_loss = min(candle['low'] * 0.998, fib_0786)
                 tp_1 = fib_0382
                 tp_2 = swing_high
@@ -130,7 +136,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 開始執行過去 7 天 19 檔標的回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 開始執行「平衡版」7 天量化回測...**")
     
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
@@ -145,7 +151,7 @@ def main():
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT] 過去 7 天回測結果**\n```text\n未觸發任何完全共振進場條件 (0.618 + RSI<=35 + 長下影 + 爆量)。\n```")
+        send_discord_alert("📋 **[BACKTEST REPORT] 平衡版 7 天回測**\n```text\n未觸發任何進場條件 (0.618 + RSI<=42 + 形態 + 1.2x量能)。\n```")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -156,13 +162,12 @@ def main():
     holding_count = len(res_df[res_df['Result'] == 'HOLDING'])
     win_rate = (tp1_count / total_trades) * 100 if total_trades > 0 else 0
 
-    # 組合交易明細 (最多列出前 10 筆)
     trade_details = ""
-    for _, r in res_df.head(10).iterrows():
+    for _, r in res_df.head(12).iterrows():
         trade_details += f"[{r['Time']}] {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 過去 7 天量化回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 實戰平衡版 7 天回測 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
@@ -175,7 +180,7 @@ def main():
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== 回測與推播完成 ===")
+    print("=== 平衡版回測與推播完成 ===")
 
 if __name__ == '__main__':
     main()
