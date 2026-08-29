@@ -1,24 +1,51 @@
+import os
 import time
+import requests
 import ccxt
 import pandas as pd
 import numpy as np
 
-# 19 檔標的清單
+# 1. 讀取 Discord Webhook URL
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+# 2. 加密貨幣監控清單 (Binance 現貨/永續合約通用)
 CRYPTO_SYMBOLS = [
-    'BTC/USDT', 'ETH/USDT', 'PAXG/USDT',
-    'PLAY/USDT', 'LAB/USDT', 'CLU/USDT'
+    'BTC/USDT',
+    'ETH/USDT',
+    'PAXG/USDT',      # 黃金代幣 (XAU)
+    'PLAY/USDT',
+    'LAB/USDT',
+    'CLU/USDT',
+    '币安人生/USDT'
 ]
 
+# 3. 幣安美股永續合約監控清單 (TradFi Perps)
 STOCK_PERP_SYMBOLS = [
-    'TSM/USDT:USDT', 'NVDA/USDT:USDT', 'TSLA/USDT:USDT',
-    'AAPL/USDT:USDT', 'GOOGL/USDT:USDT', 'MU/USDT:USDT',
-    'AMZN/USDT:USDT', 'MSFT/USDT:USDT', 'META/USDT:USDT',
-    'PLTR/USDT:USDT', 'COIN/USDT:USDT', 'MSTR/USDT:USDT'
+    'TSM/USDT:USDT',    # 台積電
+    'NVDA/USDT:USDT',   # 輝達
+    'TSLA/USDT:USDT',   # 特斯拉
+    'AAPL/USDT:USDT',   # 蘋果
+    'GOOGL/USDT:USDT',  # 谷歌
+    'MU/USDT:USDT',     # 美光
+    'AMZN/USDT:USDT',   # 亞馬遜
+    'MSFT/USDT:USDT',   # 微軟
+    'META/USDT:USDT',   # Meta
+    'PLTR/USDT:USDT',   # Palantir
+    'COIN/USDT:USDT',   # Coinbase
+    'MSTR/USDT:USDT'    # 微策略
 ]
 
 TIMEFRAME = '15m'
-# 過去 7 天約為 7 * 24 * 4 = 672 根 15m K 線，多抓取一些確保歷史指標完整
 FETCH_LIMIT = 800
+
+def send_discord_alert(content):
+    """發送 Discord 訊息"""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=10)
+    except Exception as err:
+        print("推播失敗:", err)
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -38,11 +65,10 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
             return records
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
 
-        # 從第 35 根開始遍歷模擬每一根 K 線收盤時的狀態
         i = 35
         while i < len(df) - 1:
             sub_df = df.iloc[:i+1]
@@ -70,71 +96,56 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                 tp_1 = fib_0382
                 tp_2 = swing_high
 
-                # 追蹤進場後的後續 K 線 (最長觀察 48 根 K 棒 = 12 小時)
                 outcome = "HOLDING"
-                exit_price = entry_price
                 bars_held = 0
 
                 for j in range(i + 1, min(i + 49, len(df))):
                     future_bar = df.iloc[j]
                     bars_held += 1
 
-                    # 1. 檢查是否觸及 SL
                     if future_bar['low'] <= stop_loss:
                         outcome = "SL"
-                        exit_price = stop_loss
                         break
-                    # 2. 檢查是否觸及 TP2
                     elif future_bar['high'] >= tp_2:
                         outcome = "TP2_FULL"
-                        exit_price = tp_2
                         break
-                    # 3. 檢查是否觸及 TP1
                     elif future_bar['high'] >= tp_1 and outcome != "TP1_HIT":
                         outcome = "TP1_HIT"
-                        exit_price = tp_1
 
                 records.append({
                     'Symbol': display_name,
                     'Market': market_name,
                     'Time': candle['datetime'],
                     'Entry': entry_price,
-                    'SL': stop_loss,
-                    'TP1': tp_1,
-                    'TP2': tp_2,
-                    'Result': outcome,
-                    'Bars': bars_held
+                    'Result': outcome
                 })
 
-                # 進場後跳過已持倉期間，避免同一次反彈重複開單
                 i += max(bars_held, 1)
             else:
                 i += 1
 
     except Exception as e:
-        print(f"回測 {symbol} 失敗: {e}")
+        print(f"回測 {symbol} 略過: {e}")
 
     return records
 
 def main():
-    print("🚀 開始執行過去 7 天 19 檔標的回測...")
+    send_discord_alert("🧪 **[BACKTEST] 開始執行過去 7 天 19 檔標的回測...**")
+    
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
-
     all_results = []
 
     for sym in CRYPTO_SYMBOLS:
-        res = run_backtest_on_symbol(spot_exchange, sym, "現貨")
-        all_results.extend(res)
-        time.sleep(0.2)
+        all_results.extend(run_backtest_on_symbol(spot_exchange, sym, "現貨"))
+        time.sleep(0.15)
 
     for sym in STOCK_PERP_SYMBOLS:
-        res = run_backtest_on_symbol(perp_exchange, sym, "美股合約")
-        all_results.extend(res)
-        time.sleep(0.2)
+        all_results.extend(run_backtest_on_symbol(perp_exchange, sym, "合約"))
+        time.sleep(0.15)
 
     if not all_results:
-        print("\n過去 7 天內 19 檔標的皆未出現符合「四重共振（0.618+RSI<=35+長下影+爆量）」的進場訊號。")
+        send_discord_alert("📋 **[BACKTEST REPORT] 過去 7 天回測結果**\n```text\n未觸發任何完全共振進場條件 (0.618 + RSI<=35 + 長下影 + 爆量)。\n```")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -143,22 +154,28 @@ def main():
     tp2_count = len(res_df[res_df['Result'] == 'TP2_FULL'])
     sl_count = len(res_df[res_df['Result'] == 'SL'])
     holding_count = len(res_df[res_df['Result'] == 'HOLDING'])
-
     win_rate = (tp1_count / total_trades) * 100 if total_trades > 0 else 0
 
-    print("\n" + "="*50)
-    print("📊 【過去一週回測統計報告】")
-    print("="*50)
-    print(f"總進場機會 (Trades)    : {total_trades} 次")
-    print(f"達標 TP1 (第一止盈)   : {tp1_count} 次 (勝率: {win_rate:.1f}%)")
-    print(f"達標 TP2 (前高完全止盈): {tp2_count} 次")
-    print(f"觸發 SL (停損離場)     : {sl_count} 次")
-    print(f"持倉中 / 時間到未達標  : {holding_count} 次")
-    print("="*50)
+    # 組合交易明細 (最多列出前 10 筆)
+    trade_details = ""
+    for _, r in res_df.head(10).iterrows():
+        trade_details += f"[{r['Time']}] {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
-    print("\n詳細每筆交易明細：")
-    for _, r in res_df.iterrows():
-        print(f"[{r['Time']}] {r['Market']} {r['Symbol']} | Entry: {r['Entry']:.2f} | 狀態: {r['Result']}")
+    report_msg = (
+        f"📊 **[BACKTEST REPORT] 過去 7 天量化回測報告 (15m)**\n"
+        f"```text\n"
+        f"總進場次數  : {total_trades} 次\n"
+        f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
+        f"TP2 終極達標: {tp2_count} 次\n"
+        f"SL 停損離場 : {sl_count} 次\n"
+        f"持倉/未觸發 : {holding_count} 次\n"
+        f"----------------------------------------\n"
+        f"交易明細紀錄 (近期):\n"
+        f"{trade_details}"
+        f"```"
+    )
+    send_discord_alert(report_msg)
+    print("=== 回測與推播完成 ===")
 
 if __name__ == '__main__':
     main()
