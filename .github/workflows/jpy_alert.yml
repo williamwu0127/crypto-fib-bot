@@ -1,0 +1,27 @@
+name: JPY FX Alert
+
+on:
+  schedule:
+    # 週一到週五，台灣時間 09:15, 12:30, 16:00 (UTC 01:15, 04:30, 08:00) 執行
+    - cron: '15 1,4,8 * * 1-5'
+  workflow_dispatch:        # 保留手動測試按鈕
+
+jobs:
+  run-jpy-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 執行日幣匯率監控
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python jpy_monitor.py
