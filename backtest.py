@@ -6,18 +6,16 @@ import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 17 檔標的配置
+# 17 檔標的配置（全面 USD / USDT 計價）
 SYMBOL_CONFIG = {
     # 1. 幣安主流幣與現貨代幣 (USDT 計價)
     'BTC': {'type': 'crypto_binance', 'pair': 'BTCUSDT', 'curr': 'USDT'},
     'ETH': {'type': 'crypto_binance', 'pair': 'ETHUSDT', 'curr': 'USDT'},
     'XAU': {'type': 'crypto_binance', 'pair': 'PAXGUSDT', 'curr': 'USDT'},
-    '币安人生': {'type': 'crypto_binance', 'pair': 'LIFEUSDT', 'curr': 'USDT'},
+    '币安人生': {'type': 'crypto_binance', 'pair': 'BIANRENSHENGUSDT', 'curr': 'USDT'},
 
     # 2. 鏈上 / Alpha 迷因幣 (GeckoTerminal 公開 15m K 線源, USD 計價)
-    # PLAY (PlaysOut - Base Chain)
     'PLAY': {'type': 'crypto_dex', 'network': 'base', 'pool': '0x853a7c99227499dba9db8c3a02aa691afdebf841', 'curr': 'USD'},
-    # LAB (BSC Chain)
     'LAB': {'type': 'crypto_dex', 'network': 'bsc', 'pool': '0x7ec43cf65f1663f820427c62a5780b8f2e25593a', 'curr': 'USD'},
 
     # 3. 美股龍頭與商品期貨 (Yahoo Finance 美股數據, USD 計價)
@@ -31,7 +29,7 @@ SYMBOL_CONFIG = {
     'GLW': {'type': 'stock', 'ticker': 'GLW', 'curr': 'USD'},
     'SPCX': {'type': 'stock', 'ticker': 'SPCX', 'curr': 'USD'},
     'CLU': {'type': 'stock', 'ticker': 'CL=F', 'curr': 'USD'},           # 原油期貨 (與 CLUSDT 連動)
-    'SAMSUNG': {'type': 'stock', 'ticker': '005930.KS', 'curr': 'KRW'}    # 三星電子
+    'SNDK': {'type': 'stock', 'ticker': 'SNDK', 'curr': 'USD'}          # 閃迪 SanDisk
 }
 
 TIMEFRAME = '15m'
@@ -56,31 +54,38 @@ def send_discord_alert(content):
 
 def fetch_binance_kline(pair):
     """抓取幣安主流現貨 K 線"""
-    url = f"{BINANCE_MIRROR}?symbol={pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
-    try:
-        res = requests.get(url, timeout=6)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                return True, len(data), float(data[-1][4]), "Binance", pair
-        return False, 0, None, f"HTTP {res.status_code}", pair
-    except Exception as e:
-        return False, 0, None, str(e), pair
+    candidates = [pair, pair.replace('USDT', 'USDC')]
+    for p in candidates:
+        url = f"{BINANCE_MIRROR}?symbol={p}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
+        try:
+            res = requests.get(url, timeout=6)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return True, len(data), float(data[-1][4]), "Binance", p
+        except Exception:
+            continue
+    return False, 0, None, "Binance", pair
 
 def fetch_dex_kline(network, pool_or_token):
-    """抓取 GeckoTerminal 鏈上 15m K 線 (無地域限制)"""
-    url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_or_token}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
+    """抓取 GeckoTerminal 鏈上 15m K 線"""
     headers = {"Accept": "application/json;version=20230302"}
+    
+    # 1. 嘗試以 pool 查詢
+    url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_or_token}/ohlcv/minute?aggregate=15&limit={FETCH_LIMIT}"
     try:
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             ohlcv_list = res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
-            if ohlcv_list and len(ohlcv_list) > 0:
+            if ohlcv_list:
                 latest_close = float(ohlcv_list[0][4])
                 return True, len(ohlcv_list), latest_close, "Alpha-DEX", pool_or_token[:8] + "..."
-        
-        # 次選：嘗試以 token 搜尋池子
-        search_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{pool_or_token}/pools"
+    except Exception:
+        pass
+
+    # 2. 嘗試以 token 地址搜尋 pools
+    search_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{pool_or_token}/pools"
+    try:
         s_res = requests.get(search_url, headers=headers, timeout=8)
         if s_res.status_code == 200:
             pools = s_res.json().get('data', [])
@@ -92,10 +97,10 @@ def fetch_dex_kline(network, pool_or_token):
                     ohlcv_list = sub_res.json().get('data', {}).get('attributes', {}).get('ohlcv_list', [])
                     if ohlcv_list:
                         return True, len(ohlcv_list), float(ohlcv_list[0][4]), "Alpha-DEX", pool_addr[:8] + "..."
-                        
-        return False, 0, None, "DEX無數據", pool_or_token
-    except Exception as e:
-        return False, 0, None, str(e), pool_or_token
+    except Exception:
+        pass
+
+    return False, 0, None, "DEX無數據", pool_or_token
 
 def fetch_stock_kline(ticker):
     """抓取美股/商品 15m K 線 (Yahoo Finance)"""
@@ -112,7 +117,7 @@ def fetch_stock_kline(ticker):
         return False, 0, None, str(e), ticker
 
 def main():
-    send_discord_alert("📡 **[全資產連線測試] 啟動 17 檔全覆蓋驗證...**")
+    send_discord_alert("📡 **[全資產連線測試] 啟動 17 檔全美元資產連線測試 (含 SNDK)...**")
     
     results = []
     success_count = 0
@@ -140,7 +145,7 @@ def main():
         time.sleep(0.15)
 
     summary_text = (
-        f"📋 **[全資產連線測試總覽]**\n"
+        f"📋 **[全資產連線測試總覽 (全 USD/USDT 計價)]**\n"
         f"成功抓取: {success_count} / {len(SYMBOL_CONFIG)}\n"
         f"```text\n"
         + "\n".join(results) +
