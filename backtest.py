@@ -7,35 +7,15 @@ import numpy as np
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 加密貨幣標的
-CRYPTO_SYMBOLS = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'PAXG/USDT',      # 黃金代幣 (XAU)
-    'PLAY/USDT',
-    'LAB/USDT',
-    'CLU/USDT',
-    '币安人生/USDT'
-]
-
-# 幣安合約標的 (若美股合約無數據會自動略過並在 log 提示)
-STOCK_PERP_SYMBOLS = [
-    'TSM/USDT:USDT',    # 台積電
-    'NVDA/USDT:USDT',   # 輝達
-    'TSLA/USDT:USDT',   # 特斯拉
-    'AAPL/USDT:USDT',   # 蘋果
-    'GOOGL/USDT:USDT',  # 谷歌
-    'MU/USDT:USDT',     # 美光
-    'AMZN/USDT:USDT',   # 亞馬遜
-    'MSFT/USDT:USDT',   # 微軟
-    'META/USDT:USDT',   # Meta
-    'PLTR/USDT:USDT',   # Palantir
-    'COIN/USDT:USDT',   # Coinbase
-    'MSTR/USDT:USDT'    # 微策略
+# 17 檔指定監控標的 (涵蓋加密貨幣、美股合約、原油 CLU 與黃金 XAU)
+TARGET_SYMBOLS = [
+    'BTC', 'ETH', 'XAU', 'TSM', 'MU', 'SPCX', 'CLU', 
+    'GOOGL', 'SAMSUNG', 'NVDA', 'GLW', 'TSLA', 'AAPL', 
+    'LAB', 'PLAY', 'AMZN', '币安人生'
 ]
 
 TIMEFRAME = '15m'
-FETCH_LIMIT = 1000
+FETCH_LIMIT = 800
 
 def send_discord_alert(content):
     if not DISCORD_WEBHOOK_URL:
@@ -54,27 +34,47 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def run_backtest_on_symbol(exchange, symbol, market_name):
-    display_name = symbol.split(':')[0]
-    records = []
+def resolve_symbol_and_fetch(exchange, raw_name):
+    """
+    動態配對各類資產的 API 代號：
+    - XAU -> PAXG/USDT 或 XAU/USDT
+    - CLU -> CL/USDT, CLU/USDT (原油)
+    - 美股/加密貨幣合約 -> 標準 USDT:USDT 格式
+    """
+    candidates = []
     
-    # 嘗試抓取 K 線 (含相容處理)
-    ohlcv = None
-    target_symbols = [symbol, symbol + ":USDT", symbol.replace('/', '')]
-    
-    for s in target_symbols:
+    if raw_name.upper() == 'XAU':
+        candidates = ['PAXG/USDT:USDT', 'PAXG/USDT', 'XAU/USDT:USDT', 'XAUUSDT']
+    elif raw_name.upper() == 'CLU':
+        candidates = ['CLU/USDT:USDT', 'CL/USDT:USDT', 'OIL/USDT:USDT', 'CLU/USDT', 'CLUUSDT']
+    else:
+        candidates = [
+            f"{raw_name}/USDT:USDT",
+            f"{raw_name}/USDT",
+            f"{raw_name}USDT",
+            f"1000{raw_name}/USDT:USDT"
+        ]
+
+    for sym in candidates:
         try:
-            ohlcv = exchange.fetch_ohlcv(s, TIMEFRAME, limit=FETCH_LIMIT)
+            ohlcv = exchange.fetch_ohlcv(sym, TIMEFRAME, limit=FETCH_LIMIT)
             if ohlcv and len(ohlcv) >= 60:
-                break
+                return sym, ohlcv
         except Exception:
             continue
+            
+    return None, None
 
-    if not ohlcv or len(ohlcv) < 60:
-        print(f"⚠️ [{market_name}] {display_name} 無法獲取足夠 K 線數據，略過。")
+def run_backtest_on_symbol(exchange, raw_name):
+    symbol, ohlcv = resolve_symbol_and_fetch(exchange, raw_name)
+    records = []
+    
+    if not ohlcv:
+        print(f"⚠️ 標的 [{raw_name}] 嘗試多種格式仍未取得數據，已跳過。")
         return records
 
-    print(f"✅ [{market_name}] {display_name} 成功載入 {len(ohlcv)} 根 K 線，開始計算 Fib 波段...")
+    display_name = raw_name.upper()
+    print(f"✅ 成功載入 [{display_name}] (API 代號: {symbol})，共 {len(ohlcv)} 根 K 線，開始運算...")
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
@@ -88,17 +88,16 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
         sw_low = sub['low'].min()
         wave = sw_high - sw_low
 
-        if wave <= 0 or (wave / sw_low) < 0.005:
+        if wave <= 0 or (wave / sw_low) < 0.004:
             i += 1
             continue
 
         candle = df.iloc[i]
         entry_price = candle['close']
 
-        # Fib 關鍵水位
+        # 斐波那契關鍵點位 (0.618 / 0.382)
         fib_long_0618 = sw_high - (wave * 0.618)
         fib_short_0618 = sw_low + (wave * 0.618)
-
         fib_long_0382 = sw_high - (wave * 0.382)
         fib_short_0382 = sw_low + (wave * 0.382)
 
@@ -107,15 +106,15 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
         tp_1 = 0
         tp_2 = 0
 
-        # 多單：觸及 Fib 0.618 支撐且收陽線/下影線
-        if candle['low'] <= fib_long_0618 and candle['close'] >= sw_low:
+        # 多單：觸及 0.618 支撐區間
+        if candle['low'] <= fib_long_0618 * 1.002 and candle['close'] >= sw_low:
             trade_side = "LONG"
             stop_loss = sw_low * 0.997
             tp_1 = fib_long_0382
             tp_2 = sw_high
 
-        # 空單：觸及 Fib 0.618 阻力且收陰線/上影線
-        elif candle['high'] >= fib_short_0618 and candle['close'] <= sw_high:
+        # 空單：觸及 0.618 阻力區間
+        elif candle['high'] >= fib_short_0618 * 0.998 and candle['close'] <= sw_high:
             trade_side = "SHORT"
             stop_loss = sw_high * 1.003
             tp_1 = fib_short_0382
@@ -151,7 +150,6 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
             records.append({
                 'Symbol': display_name,
                 'Side': trade_side,
-                'Market': market_name,
                 'Time': candle['datetime'],
                 'Entry': entry_price,
                 'Result': outcome
@@ -164,22 +162,22 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 啟動多空斐波那契回測（含相容修復）...**")
+    send_discord_alert("🧪 **[BACKTEST] 啟動 17 檔指定標的 (含原油/美股/幣種) 多空回測...**")
     
-    spot = ccxt.binance()
-    perp = ccxt.binanceusdm()
+    perp_exchange = ccxt.binanceusdm({'enableRateLimit': True})
+    spot_exchange = ccxt.binance({'enableRateLimit': True})
     all_results = []
 
-    for sym in CRYPTO_SYMBOLS:
-        all_results.extend(run_backtest_on_symbol(spot, sym, "現貨"))
-        time.sleep(0.15)
-
-    for sym in STOCK_PERP_SYMBOLS:
-        all_results.extend(run_backtest_on_symbol(perp, sym, "合約"))
-        time.sleep(0.15)
+    for name in TARGET_SYMBOLS:
+        # 優先搜尋合約市場，查無再搜尋現貨市場
+        res = run_backtest_on_symbol(perp_exchange, name)
+        if not res:
+            res = run_backtest_on_symbol(spot_exchange, name)
+        all_results.extend(res)
+        time.sleep(0.1)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪仍無交易數據。")
+        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪未產生交易數據。")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -198,7 +196,7 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 多空斐波那契回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 17 檔標的多空斐波那契報告 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
