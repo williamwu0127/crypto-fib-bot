@@ -1,7 +1,5 @@
 import os
-import time
 import requests
-import urllib.parse
 import pandas as pd
 import yfinance as yf
 
@@ -9,7 +7,6 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 ACCOUNT_BALANCE = 10000.0
 RISK_PER_TRADE = 150.0
 
-# 14 檔主流與美股標的配置
 SYMBOLS = {
     'BTC': {'t': 'binance', 's': 'BTCUSDT', 'm': 1500},
     'ETH': {'t': 'binance', 's': 'ETHUSDT', 'm': 1200},
@@ -39,7 +36,7 @@ def send_discord(msg):
 def get_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=300"
+            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=300"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 40:
                 df = pd.DataFrame(res, columns=['t','o','h','l','c','v','ct','q','n','tb','tq','i'])
@@ -102,13 +99,23 @@ def backtest():
                     fb = df.iloc[j]
                     step += 1
                     if side == "LONG":
-                        if fb['l'] <= sl: r_profit = -1.0; break
-                        elif fb['h'] >= tp2: r_profit = 2.8; break
-                        elif fb['h'] >= tp1: r_profit = 1.0
+                        if fb['l'] <= sl: 
+                            r_profit = -1.0
+                            break
+                        elif fb['h'] >= tp2: 
+                            r_profit = 2.8
+                            break
+                        elif fb['h'] >= tp1: 
+                            r_profit = 1.0
                     else:
-                        if fb['h'] <= sl: r_profit = -1.0; break
-                        elif fb['l'] <= tp2: r_profit = 2.8; break
-                        elif fb['l'] <= tp1: r_profit = 1.0
+                        if fb['h'] <= sl: 
+                            r_profit = -1.0
+                            break
+                        elif fb['l'] <= tp2: 
+                            r_profit = 2.8
+                            break
+                        elif fb['l'] <= tp1: 
+                            r_profit = 1.0
 
                 all_trades.append({
                     'sym': sym,
@@ -121,7 +128,7 @@ def backtest():
                 i += 1
 
     if not all_trades:
-        send_discord("⚠️ 本週期無觸發交易。")
+        send_discord("本週期無觸發交易。")
         return
 
     res = pd.DataFrame(all_trades)
@@ -133,25 +140,29 @@ def backtest():
     total_usd = res['usd'].sum()
     roi = (total_usd / ACCOUNT_BALANCE) * 100
 
-    # 標的分組統計
     grp = res.groupby('sym').agg({'r': ['count', lambda x: (x > 0).sum()], 'usd': 'sum', 'm': 'first'})
     grp.columns = ['cnt', 'wins', 'usd', 'm']
     
     rows = []
     for s, r in grp.iterrows():
-        rows.append(f"{s:<5} | {int(r['cnt']):<3}筆 (勝{int(r['wins'])}) | 押 ${int(r['m']):<4} | {r['usd']:>+8.1f} U")
+        row_line = "%-5s | %2d筆 (勝%2d) | 押 $%4d | %+8.1f USD" % (s, int(r['cnt']), int(r['wins']), int(r['m']), r['usd'])
+        rows.append(row_line)
     
     table_str = "\n".join(rows)
 
+    line1 = "本金規模: $" + str(int(ACCOUNT_BALANCE)) + " USD \vert{} 單筆風控: $" + str(int(RISK_PER_TRADE)) + " USD (1.5%)"
+    line2 = "交易統計: 共 " + str(total) + " 筆 (勝 " + str(win) + " / 負 " + str(loss) + ") | 勝率: %.1f%%" % winrate
+    line3 = "累計收益: %+.1f R | 淨利: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
+
     report = (
-        f"📊 **[BACKTEST REPORT] 主流/美股波段績效報告**\n"
-        f"```text\n"
-        f"本金規模: ${ACCOUNT_BALANCE:,.0f} USD \vert{} 單筆風控: ${RISK_PER_TRADE:,.0f} USD (1.5%)\n"
-        f"交易統計: 共 {total} 筆 (勝 {win} / 負 {loss}) | 勝率: {winrate:.1f}%\n"
-        f"累計收益: {total_r:+.1f} R | 淨利: {total_usd:+,.1f} USD (ROI: {roi:+.1f}%)\n"
-        f"-----------------------------------------\n"
-        f"{table_str}\n"
-        f"```"
+        "📊 **[BACKTEST REPORT] 主流/美股波段績效報告**\n"
+        "```text\n"
+        + line1 + "\n"
+        + line2 + "\n"
+        + line3 + "\n"
+        "-----------------------------------------\n"
+        + table_str + "\n"
+        "```"
     )
     send_discord(report)
     print("=== 完成 ===")
