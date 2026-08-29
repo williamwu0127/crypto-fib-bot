@@ -38,7 +38,7 @@ def send_discord(msg):
 def get_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=500"
+            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=400"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 60:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -67,15 +67,12 @@ def backtest():
         if df is None or len(df) < 60:
             continue
 
-        # 1. 雙均線趨勢過濾 (EMA 50 / EMA 200)
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
         
-        # 2. ATR(14) 波動度計算
         tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
         df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
 
-        # 3. RSI(14) 與 RSI 平滑均線 (9)
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
@@ -88,8 +85,7 @@ def backtest():
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
             
-            # 過濾波動過低的無效盤整 (波幅 < 0.6%)
-            if wave <= 0 or (wave / l) < 0.006:
+            if wave <= 0 or (wave / l) < 0.005:
                 i += 1
                 continue
 
@@ -97,13 +93,9 @@ def backtest():
             prev_bar = df.iloc[i-1]
             entry_price = bar['c']
 
-            # 黃金口袋區間 (Golden Pocket: 0.618 ~ 0.660)
             fib_0618_l = h - (wave * 0.618)
-            fib_0660_l = h - (wave * 0.660)
             fib_0382_l = h - (wave * 0.382)
-
             fib_0618_s = l + (wave * 0.618)
-            fib_0660_s = l + (wave * 0.660)
             fib_0382_s = l + (wave * 0.382)
             
             body = abs(bar['c'] - bar['o'])
@@ -114,32 +106,20 @@ def backtest():
             side = None
             sl, tp1, tp2 = 0.0, 0.0, 0.0
 
-            # 🟢 多單四重共振條件：
-            # 1. 均線多頭排列且價格站上 EMA 50
-            # 2. 回踩進入 0.618 ~ 0.66 黃金口袋區間，且收盤守住前波低點
-            # 3. 右側拒絕 K 棒 (下影線 >= 實體 60% 或強勢陽線)
-            # 4. RSI 位於 35~50 區間且形成金叉 (RSI >= RSI_EMA 或向上拐頭)
-            is_bull_trend = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200'])
-            touch_gp_long = (bar['l'] <= fib_0618_l * 1.001) and (bar['c'] >= fib_0660_l * 0.998) and (bar['c'] >= l)
-            pa_long = (lower_wick >= body * 0.6) or (bar['c'] > bar['o'] and body > 0.3 * (bar['h'] - bar['l']))
-            rsi_long = (35 <= bar['rsi'] <= 52) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+            # 🟢 多單條件：EMA50 > EMA200 + 回踩 0.618 + 下影線拒絕或收陽 + RSI 翻揚且 <= 55
+            rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+            cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l)
+            
+            # 🔴 空單條件：EMA50 < EMA200 + 反彈 0.618 + 上影線受阻或收陰 + RSI 轉弱且 >= 45
+            rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+            cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h)
 
-            # 🔴 空單四重共振條件：
-            # 1. 均線空頭排列且價格壓在 EMA 50 之下
-            # 2. 反彈進入 0.618 ~ 0.66 阻力區間，且收盤未突破前波高點
-            # 3. 右側受阻 K 棒 (上影線 >= 實體 60% 或強勢陰線)
-            # 4. RSI 位於 48~65 區間且形成死叉 (RSI <= RSI_EMA 或向下拐頭)
-            is_bear_trend = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200'])
-            touch_gp_short = (bar['h'] >= fib_0618_s * 0.999) and (bar['c'] <= fib_0660_s * 1.002) and (bar['c'] <= h)
-            pa_short = (upper_wick >= body * 0.6) or (bar['c'] < bar['o'] and body > 0.3 * (bar['h'] - bar['l']))
-            rsi_short = (48 <= bar['rsi'] <= 65) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
-
-            if is_bull_trend and touch_gp_long and pa_long and rsi_long:
+            if cond_long and (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and rsi_bull:
                 side = "LONG"
                 sl = min(l, entry_price - (atr_val * 1.5))
                 tp1 = fib_0382_l
                 tp2 = h
-            elif is_bear_trend and touch_gp_short and pa_short and rsi_short:
+            elif cond_short and (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and rsi_bear:
                 side = "SHORT"
                 sl = max(h, entry_price + (atr_val * 1.5))
                 tp1 = fib_0382_s
@@ -193,7 +173,7 @@ def backtest():
                 i += 1
 
     if not all_trades:
-        send_discord("⚠️ 四重共振高勝率條件下，本週期無符合之進場點。")
+        send_discord("⚠️ 本週期無觸發交易。")
         return
 
     res = pd.DataFrame(all_trades)
@@ -221,12 +201,12 @@ def backtest():
     
     table_str = "\n".join(rows)
     line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
-    line2 = "進場機制: 四重共振 (黃金口袋 0.618-0.66 + RSI 動態轉折 + EMA 順勢)"
+    line2 = "進場機制: 順勢斐波 0.618 回踩 + RSI 轉折動態確認 (均衡最佳版)"
     line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
     line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
-        "📊 **[BACKTEST REPORT] 四重共振高勝率回測 (一週 15m 數據)**\n"
+        "📊 **[BACKTEST REPORT] 10x 合約波段回測 (均衡最佳版)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
