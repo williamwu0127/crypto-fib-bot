@@ -36,7 +36,7 @@ STOCK_PERP_SYMBOLS = [
 
 
 TIMEFRAME = '15m'
-FETCH_LIMIT = 800
+FETCH_LIMIT = 1500  # 擴展至約 15 天數據以獲取足夠統計樣本
 
 def send_discord_alert(content):
     if not DISCORD_WEBHOOK_URL:
@@ -55,82 +55,70 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
 def run_backtest_on_symbol(exchange, symbol, market_name):
     display_name = symbol.split(':')[0]
     records = []
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=FETCH_LIMIT)
-        if not ohlcv or len(ohlcv) < 80:
+        if not ohlcv or len(ohlcv) < 60:
             return records
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
         df['rsi'] = calculate_rsi(df['close'], period=14)
-        df['atr'] = calculate_atr(df, period=14)
 
-        i = 40
+        i = 30
         while i < len(df) - 1:
-            window = df.iloc[i-35:i+1]
+            window = df.iloc[max(0, i-30):i+1]
             
-            # 定義結構波段起點 A 與突破高低點 B
             swing_high = window['high'].max()
             swing_low = window['low'].min()
-            high_idx = window['high'].idxmax()
-            low_idx = window['low'].idxmin()
+            wave_range = swing_high - swing_low
+
+            if wave_range <= 0 or (wave_range / swing_low) < 0.008:  # 過濾波幅小於 0.8% 的橫盤無效波段
+                i += 1
+                continue
+
+            high_pos = window['high'].values.argmax()
+            low_pos = window['low'].values.argmin()
 
             candle = df.iloc[i]
             entry_price = candle['close']
-            atr_val = candle['atr'] if not np.isnan(candle['atr']) else entry_price * 0.005
-
-            lower_wick = min(candle['open'], candle['close']) - candle['low']
-            upper_wick = candle['high'] - max(candle['open'], candle['close'])
-            body_size = abs(candle['close'] - candle['open'])
 
             trade_side = None
             stop_loss = 0
             tp_1 = 0
             tp_2 = 0
 
-            # 1. 多頭波段：低點在先，隨後向上創出波段高點
-            if low_idx < high_idx and (high_idx - low_idx) >= 5:
-                wave_range = swing_high - swing_low
+            # 1. 多頭架構：低點在先，創出波段高點後回踩
+            if low_pos < high_pos:
                 fib_0618 = swing_high - (wave_range * 0.618)
                 fib_0786 = swing_high - (wave_range * 0.786)
                 fib_0382 = swing_high - (wave_range * 0.382)
 
-                # 回踩 0.618 ~ 0.786 支撐帶
-                in_golden_pocket = (candle['low'] <= fib_0618) and (candle['close'] >= fib_0786)
-                rsi_ok = candle['rsi'] <= 48
-                rejection = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
+                # 回踩 0.618~0.786 區間且收陽線或下影線承接
+                in_fib_zone = (candle['low'] <= fib_0618 * 1.002) and (candle['close'] >= fib_0786 * 0.998)
+                rsi_ok = candle['rsi'] <= 50
 
-                if in_golden_pocket and rsi_ok and rejection:
+                if in_fib_zone and rsi_ok and (candle['close'] >= candle['open'] or (min(candle['open'], candle['close']) - candle['low']) > 0):
                     trade_side = "LONG"
-                    stop_loss = swing_low - (atr_val * 0.5)
+                    stop_loss = swing_low * 0.997
                     tp_1 = fib_0382
                     tp_2 = swing_high
 
-            # 2. 空頭波段：高點在先，隨後向下創出波段低點
-            elif high_idx < low_idx and (low_idx - high_idx) >= 5:
-                wave_range = swing_high - swing_low
+            # 2. 空頭架構：高點在先，創出波段低點後反彈
+            elif high_pos < low_pos:
                 fib_0618 = swing_low + (wave_range * 0.618)
                 fib_0786 = swing_low + (wave_range * 0.786)
                 fib_0382 = swing_low + (wave_range * 0.382)
 
-                # 反彈 0.618 ~ 0.786 阻力帶
-                in_golden_pocket = (candle['high'] >= fib_0618) and (candle['close'] <= fib_0786)
-                rsi_ok = candle['rsi'] >= 52
-                rejection = (upper_wick >= body_size * 0.8) or (candle['close'] < candle['open'])
+                # 反彈 0.618~0.786 區間且收陰線或上影線承壓
+                in_fib_zone = (candle['high'] >= fib_0618 * 0.998) and (candle['close'] <= fib_0786 * 1.002)
+                rsi_ok = candle['rsi'] >= 50
 
-                if in_golden_pocket and rsi_ok and rejection:
+                if in_fib_zone and rsi_ok and (candle['close'] <= candle['open'] or (candle['high'] - max(candle['open'], candle['close'])) > 0):
                     trade_side = "SHORT"
-                    stop_loss = swing_high + (atr_val * 0.5)
+                    stop_loss = swing_high * 1.003
                     tp_1 = fib_0382
                     tp_2 = swing_low
 
@@ -180,7 +168,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 執行「MSS 結構破位 + Fib 黃金口袋」7 天回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 執行「動態斐波那契拉線（多空雙向）」回測...**")
     
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
@@ -195,7 +183,7 @@ def main():
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT]** 未觸發結構破位回踩訊號。")
+        send_discord_alert("📋 **[BACKTEST REPORT]** 未觸發波段回踩訊號。")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -214,9 +202,9 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] MSS 結構破位 + Fib 黃金口袋 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 動態斐波那契拉線回測 (15m)**\n"
         f"```text\n"
-        f"總進場次數  : {total_trades} 次 (多單: {long_trades} / 空單: {short_trades})\n"
+        f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
         f"TP2 終極達標: {tp2_count} 次\n"
         f"SL 停損離場 : {sl_count} 次\n"
@@ -227,7 +215,7 @@ def main():
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== MSS + Fib 回測完成 ===")
+    print("=== 動態 Fib 回測完成 ===")
 
 if __name__ == '__main__':
     main()
