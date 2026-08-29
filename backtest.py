@@ -9,7 +9,6 @@ ACCOUNT_BALANCE = 10000.0  # 模擬帳戶本金 10,000 USDT
 RISK_PER_TRADE = 100.0     # 單筆固定風險 1% = 100 USDT
 LEVERAGE = 10.0            # 統一 10x 槓桿
 
-# 14 檔主流加密幣、大宗商品與美股標的 (純現貨數據源)
 SYMBOLS = {
     'BTC': {'t': 'binance', 's': 'BTCUSDT'},
     'ETH': {'t': 'binance', 's': 'ETHUSDT'},
@@ -42,10 +41,11 @@ def get_data(cfg):
             url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=400"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 60:
-                df = pd.DataFrame(res, columns=['t','o','h','l','c','v','ct','q','n','tb','tq','i'])
-                for c in ['o','h','l','c','v']:
-                    df[c] = df[c].astype(float)
-                return df[['o','h','l','c','v']]
+                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+                df = pd.DataFrame(res, columns=cols)
+                for col in ['o', 'h', 'l', 'c', 'v']:
+                    df[col] = df[col].astype(float)
+                return df[['o', 'h', 'l', 'c', 'v']]
         else:
             df = yf.download(cfg['s'], period="5d", interval="15m", progress=False)
             if not df.empty and len(df) >= 60:
@@ -53,9 +53,8 @@ def get_data(cfg):
                     df.columns = [c[0].lower() for c in df.columns]
                 else:
                     df.columns = [c.lower() for c in df.columns]
-                return df[['open','high','low','close','volume']].rename(
-                    columns={'open':'o','high':'h','low':'l','close':'c','volume':'v'}
-                ).reset_index(drop=True)
+                rename_map = {'open': 'o', 'high': 'h', 'low': 'l', 'close': 'c', 'volume': 'v'}
+                return df[['open', 'high', 'low', 'close', 'volume']].rename(columns=rename_map).reset_index(drop=True)
     except Exception:
         pass
     return None
@@ -68,15 +67,15 @@ def backtest():
         if df is None or len(df) < 60:
             continue
 
-        # 1. 均線系統 (EMA 50, EMA 200)
+        # 1. 均線系統
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
         
-        # 2. 波動度 ATR (14) 動態停損計算
+        # 2. 波動度 ATR (14)
         tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
         df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
 
-        # 3. RSI (14) 指標與均線 RSI_EMA (9)
+        # 3. RSI (14) 與平滑線
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
@@ -112,21 +111,22 @@ def backtest():
             tp1 = 0.0
             tp2 = 0.0
 
-            rsi_bullish_signal = (30 <= bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-            if (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l):
-                if (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and rsi_bullish_signal:
-                    side = "LONG"
-                    sl = min(l, entry_price - (atr_val * 1.5))
-                    tp1 = fib_0382_l
-                    tp2 = h
+            rsi_bull = (30 <= bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+            cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l)
+            
+            rsi_bear = (45 <= bar['rsi'] <= 70) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+            cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h)
 
-            rsi_bearish_signal = (45 <= bar['rsi'] <= 70) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
-            elif (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h):
-                if (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and rsi_bearish_signal:
-                    side = "SHORT"
-                    sl = max(h, entry_price + (atr_val * 1.5))
-                    tp1 = fib_0382_s
-                    tp2 = l
+            if cond_long and (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and rsi_bull:
+                side = "LONG"
+                sl = min(l, entry_price - (atr_val * 1.5))
+                tp1 = fib_0382_l
+                tp2 = h
+            elif cond_short and (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and rsi_bear:
+                side = "SHORT"
+                sl = max(h, entry_price + (atr_val * 1.5))
+                tp1 = fib_0382_s
+                tp2 = l
 
             if side:
                 sl_pct = abs(entry_price - sl) / entry_price
@@ -145,7 +145,8 @@ def backtest():
                     step += 1
                     
                     if side == "LONG":
-                        if fb['l'] <= (entry_price if hit_tp1 else sl):
+                        curr_sl = entry_price if hit_tp1 else sl
+                        if fb['l'] <= curr_sl:
                             r_profit = 1.0 if hit_tp1 else -1.0
                             break
                         if fb['h'] >= tp2:
@@ -154,7 +155,8 @@ def backtest():
                         elif fb['h'] >= tp1:
                             hit_tp1 = True
                     else:
-                        if fb['h'] >= (entry_price if hit_tp1 else sl):
+                        curr_sl = entry_price if hit_tp1 else sl
+                        if fb['h'] >= curr_sl:
                             r_profit = 1.0 if hit_tp1 else -1.0
                             break
                         if fb['l'] <= tp2:
@@ -181,10 +183,10 @@ def backtest():
     total = len(res)
     win = len(res[res['r'] > 0])
     loss = len(res[res['r'] < 0])
-    winrate = (win / total) * 100 if total > 0 else 0
+    winrate = (win / total) * 100.0 if total > 0 else 0.0
     total_r = res['r'].sum()
     total_usd = res['usd'].sum()
-    roi = (total_usd / ACCOUNT_BALANCE) * 100
+    roi = (total_usd / ACCOUNT_BALANCE) * 100.0
 
     grp = res.groupby('sym').agg({
         'r': ['count', lambda x: (x > 0).sum()],
@@ -196,18 +198,18 @@ def backtest():
     rows = []
     for s, r in grp.iterrows():
         row_line = "%-5s | %2d筆 (勝%2d) | 10x均保證金 $%4.0f | %+8.1f USD" % (
-            s, int(r['cnt']), int(r['wins']), r['avg_margin'], r['usd']
+            s, int(r['cnt']), int(r['wins']), float(r['avg_margin']), float(r['usd'])
         )
         rows.append(row_line)
     
     table_str = "\n".join(rows)
-    line1 = "帳戶規模: $" + str(int(ACCOUNT_BALANCE)) + " USDT \vert{} 單筆固定風險: $" + str(int(RISK_PER_TRADE)) + " USDT (1%)"
+    line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
     line2 = "合約機制: 統一 10x 槓桿 | TP1 保本分批 + TP2 終極止盈"
-    line3 = "交易統計: 共 " + str(total) + " 筆 (勝 " + str(win) + " / 負 " + str(loss) + ") | 勝率: %.1f%%" % winrate
+    line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
     line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
-        "📊 **[BACKTEST REPORT] 10x 合約多空趨勢回測 (RSI 深度整合版)**\n"
+        "📊 **[BACKTEST REPORT] 10x 合約多空趨勢回測 (1% 風控版)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
