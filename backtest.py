@@ -43,7 +43,6 @@ def send_discord(msg):
         print("[No Webhook URL]\n", msg)
         return
     try:
-        # Discord 訊息上限 2000 字元，安全截斷至 1900 字元
         res = requests.post(DISCORD_WEBHOOK_URL, json={"content": msg[:1900]}, timeout=8)
         if res.status_code not in [200, 204]:
             print("Webhook Status Code:", res.status_code, res.text)
@@ -56,7 +55,7 @@ def get_binance_1mo_data(symbol):
     end_time = int(time.time() * 1000)
     
     for _ in range(3):
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=15m&limit=1000&endTime={end_time}"
+        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + symbol + "&interval=15m&limit=1000&endTime=" + str(end_time)
         try:
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) > 0:
@@ -84,7 +83,6 @@ def get_data(cfg):
         else:
             df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
             if df is not None and not df.empty and len(df) >= 60:
-                # 解決 yfinance MultiIndex 與不同版本大小寫問題
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -95,7 +93,7 @@ def get_data(cfg):
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
                     return res_df.reset_index(drop=True)
     except Exception as e:
-        print(f"Error loading {cfg['s']}: {e}")
+        print("Error loading " + str(cfg['s']) + ": " + str(e))
     return None
 
 def backtest():
@@ -237,10 +235,10 @@ def backtest():
         rows.append(row_line)
     
     table_str = "\n".join(rows)
-    line1 = f"帳戶規模: ${int(ACCOUNT_BALANCE)} USDT \vert{} 單筆固定風險: ${int(RISK_PER_TRADE)} USDT (1%)"
-    line2 = f"回測週期: 近 30 天 | 15m 級別 10x 合約 ({len(grp)} 檔標的)"
-    line3 = f"交易統計: 共 {total} 筆 (勝 {win} / 負 {loss}) | 勝率: {winrate:.1f}%"
-    line4 = f"累計績效: {total_r:+.1f} R | 淨利潤: {total_usd:+.1f} USD (ROI: {roi:+.1f}%)"
+    line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
+    line2 = "回測週期: 近 30 天 | 15m 級別 10x 合約 (%d 檔標的)" % len(grp)
+    line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
+    line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
         "📊 **[BACKTEST REPORT] 10x 合約波段回測 (20 檔標的 30 天)**\n"
