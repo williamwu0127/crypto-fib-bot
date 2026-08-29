@@ -4,7 +4,7 @@ on:
   schedule:
     # 每 15 分鐘自動執行一次 (UTC 0, 15, 30, 45 分)
     - cron: '*/15 * * * *'
-  workflow_dispatch: # 支援手動隨時觸發測試
+  workflow_dispatch: # 支援在 GitHub 介面手動點擊執行
 
 jobs:
   scan:
@@ -22,7 +22,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run Market Scanner
+      - name: Run 15m Scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
