@@ -2,9 +2,8 @@ name: 15m Signal Scanner
 
 on:
   schedule:
-    # 每 15 分鐘自動執行一次 (UTC 0, 15, 30, 45 分)
     - cron: '*/15 * * * *'
-  workflow_dispatch: # 支援在 GitHub 介面手動點擊執行
+  workflow_dispatch:
 
 jobs:
   scan:
@@ -22,8 +21,10 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run 15m Scanner
+      - name: Run 15m Scanner & Auto Trader
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
         run: |
           python signal_scanner_15m.py
