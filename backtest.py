@@ -34,6 +34,7 @@ STOCK_PERP_SYMBOLS = [
     'MSTR/USDT:USDT'    # 微策略
 ]
 
+
 TIMEFRAME = '15m'
 FETCH_LIMIT = 800
 
@@ -66,22 +67,24 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     records = []
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=FETCH_LIMIT)
-        if not ohlcv or len(ohlcv) < 60:
+        if not ohlcv or len(ohlcv) < 80:
             return records
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
         df['rsi'] = calculate_rsi(df['close'], period=14)
         df['atr'] = calculate_atr(df, period=14)
-        
-        # 布林通道 (20, 2.0)
-        df['bb_mid'] = df['close'].rolling(20).mean()
-        df['bb_std'] = df['close'].rolling(20).std()
-        df['bb_upper'] = df['bb_mid'] + (df['bb_std'] * 2.0)
-        df['bb_lower'] = df['bb_mid'] - (df['bb_std'] * 2.0)
 
-        i = 30
+        i = 40
         while i < len(df) - 1:
+            window = df.iloc[i-35:i+1]
+            
+            # 定義結構波段起點 A 與突破高低點 B
+            swing_high = window['high'].max()
+            swing_low = window['low'].min()
+            high_idx = window['high'].idxmax()
+            low_idx = window['low'].idxmin()
+
             candle = df.iloc[i]
             entry_price = candle['close']
             atr_val = candle['atr'] if not np.isnan(candle['atr']) else entry_price * 0.005
@@ -90,23 +93,46 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
             upper_wick = candle['high'] - max(candle['open'], candle['close'])
             body_size = abs(candle['close'] - candle['open'])
 
-            # 多單訊號：觸及/跌破布林下軌 + RSI 超賣 (<= 38) + 下影線承接或陽線收復
-            long_signal = (candle['low'] <= candle['bb_lower']) and (candle['rsi'] <= 38) and ((lower_wick >= body_size * 0.7) or (candle['close'] > candle['open']))
-            
-            # 空單訊號：觸及/突破布林上軌 + RSI 超買 (>= 62) + 上影線承壓或陰線回落
-            short_signal = (candle['high'] >= candle['bb_upper']) and (candle['rsi'] >= 62) and ((upper_wick >= body_size * 0.7) or (candle['close'] < candle['open']))
-
             trade_side = None
-            if long_signal:
-                trade_side = "LONG"
-                stop_loss = candle['low'] - (atr_val * 1.5)
-                tp_1 = candle['bb_mid']
-                tp_2 = candle['bb_upper']
-            elif short_signal:
-                trade_side = "SHORT"
-                stop_loss = candle['high'] + (atr_val * 1.5)
-                tp_1 = candle['bb_mid']
-                tp_2 = candle['bb_lower']
+            stop_loss = 0
+            tp_1 = 0
+            tp_2 = 0
+
+            # 1. 多頭波段：低點在先，隨後向上創出波段高點
+            if low_idx < high_idx and (high_idx - low_idx) >= 5:
+                wave_range = swing_high - swing_low
+                fib_0618 = swing_high - (wave_range * 0.618)
+                fib_0786 = swing_high - (wave_range * 0.786)
+                fib_0382 = swing_high - (wave_range * 0.382)
+
+                # 回踩 0.618 ~ 0.786 支撐帶
+                in_golden_pocket = (candle['low'] <= fib_0618) and (candle['close'] >= fib_0786)
+                rsi_ok = candle['rsi'] <= 48
+                rejection = (lower_wick >= body_size * 0.8) or (candle['close'] > candle['open'])
+
+                if in_golden_pocket and rsi_ok and rejection:
+                    trade_side = "LONG"
+                    stop_loss = swing_low - (atr_val * 0.5)
+                    tp_1 = fib_0382
+                    tp_2 = swing_high
+
+            # 2. 空頭波段：高點在先，隨後向下創出波段低點
+            elif high_idx < low_idx and (low_idx - high_idx) >= 5:
+                wave_range = swing_high - swing_low
+                fib_0618 = swing_low + (wave_range * 0.618)
+                fib_0786 = swing_low + (wave_range * 0.786)
+                fib_0382 = swing_low + (wave_range * 0.382)
+
+                # 反彈 0.618 ~ 0.786 阻力帶
+                in_golden_pocket = (candle['high'] >= fib_0618) and (candle['close'] <= fib_0786)
+                rsi_ok = candle['rsi'] >= 52
+                rejection = (upper_wick >= body_size * 0.8) or (candle['close'] < candle['open'])
+
+                if in_golden_pocket and rsi_ok and rejection:
+                    trade_side = "SHORT"
+                    stop_loss = swing_high + (atr_val * 0.5)
+                    tp_1 = fib_0382
+                    tp_2 = swing_low
 
             if trade_side:
                 outcome = "HOLDING"
@@ -144,7 +170,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
                     'Result': outcome
                 })
 
-                i += max(bars_held, 2)
+                i += max(bars_held, 3)
             else:
                 i += 1
 
@@ -154,7 +180,7 @@ def run_backtest_on_symbol(exchange, symbol, market_name):
     return records
 
 def main():
-    send_discord_alert("🧪 **[BACKTEST] 執行「布林通道 + RSI 極值 + ATR 防守」7 天回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 執行「MSS 結構破位 + Fib 黃金口袋」7 天回測...**")
     
     spot_exchange = ccxt.binance()
     perp_exchange = ccxt.binanceusdm()
@@ -169,7 +195,7 @@ def main():
         time.sleep(0.15)
 
     if not all_results:
-        send_discord_alert("📋 **[BACKTEST REPORT]** 本輪未產生訊號。")
+        send_discord_alert("📋 **[BACKTEST REPORT]** 未觸發結構破位回踩訊號。")
         return
 
     res_df = pd.DataFrame(all_results)
@@ -188,9 +214,9 @@ def main():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 布林極值反轉 7 天回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] MSS 結構破位 + Fib 黃金口袋 (15m)**\n"
         f"```text\n"
-        f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
+        f"總進場次數  : {total_trades} 次 (多單: {long_trades} / 空單: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
         f"TP2 終極達標: {tp2_count} 次\n"
         f"SL 停損離場 : {sl_count} 次\n"
@@ -201,7 +227,7 @@ def main():
         f"```"
     )
     send_discord_alert(report_msg)
-    print("=== 回測完成 ===")
+    print("=== MSS + Fib 回測完成 ===")
 
 if __name__ == '__main__':
     main()
