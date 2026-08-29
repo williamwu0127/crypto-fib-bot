@@ -6,6 +6,7 @@ import numpy as np
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
+# 17 檔指定標的清單
 TARGET_SYMBOLS = [
     'BTC', 'ETH', 'XAU', 'TSM', 'MU', 'SPCX', 'CLU', 
     'GOOGL', 'SAMSUNG', 'NVDA', 'GLW', 'TSLA', 'AAPL', 
@@ -38,68 +39,60 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def fetch_futures_kline(symbol_name):
-    """
-    透過合約公共端點抓取 15m K 線
-    """
-    # 嘗試不同的合約代號組合
-    candidates = [
-        f"{symbol_name.upper()}USDT",
-        f"1000{symbol_name.upper()}USDT",
-        f"{symbol_name.upper()}_USDT"
-    ]
-    if symbol_name.upper() == 'XAU':
-        candidates = ['XAUUSDT', 'PAXGUSDT']
-    elif symbol_name.upper() == 'CLU':
-        candidates = ['CLUUSDT', 'OILUSDT', 'CLUSDT', 'USO_USDT']
+def fetch_spot_kline(raw_name):
+    """從幣安現貨公開端點抓取 K 線"""
+    candidates = []
+    
+    # 特殊代號對照現貨交易對
+    if raw_name.upper() == 'XAU':
+        candidates = ['PAXGUSDT']
+    elif raw_name.upper() == 'CLU':
+        candidates = ['CLUUSDT', 'OILUSDT']
+    elif raw_name == '币安人生':
+        candidates = ['LIFEUSDT', 'BNBUSDT']
+    else:
+        candidates = [
+            f"{raw_name.upper()}USDT",
+            f"{raw_name.upper()}BTC"
+        ]
 
-    # 期貨端點輪詢
-    endpoints = [
-        "https://fapi.binance.com/fapi/v1/klines",
-        "https://dapi.binance.com/dapi/v1/klines"
-    ]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-
-    for sym in candidates:
-        for ep in endpoints:
-            try:
-                url = f"{ep}?symbol={sym}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
-                res = requests.get(url, headers=headers, timeout=8)
-                if res.status_code == 200:
-                    data = res.json()
-                    if isinstance(data, list) and len(data) >= 50:
-                        df = pd.DataFrame(data, columns=[
-                            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                            'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
-                        ])
-                        df['open'] = df['open'].astype(float)
-                        df['high'] = df['high'].astype(float)
-                        df['low'] = df['low'].astype(float)
-                        df['close'] = df['close'].astype(float)
-                        df['volume'] = df['volume'].astype(float)
-                        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
-                        return sym, df
-            except Exception:
-                continue
+    for pair in candidates:
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={TIMEFRAME}&limit={FETCH_LIMIT}"
+        try:
+            res = requests.get(url, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) >= 50:
+                    df = pd.DataFrame(data, columns=[
+                        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                        'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
+                    ])
+                    df['open'] = df['open'].astype(float)
+                    df['high'] = df['high'].astype(float)
+                    df['low'] = df['low'].astype(float)
+                    df['close'] = df['close'].astype(float)
+                    df['volume'] = df['volume'].astype(float)
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms').dt.strftime('%m/%d %H:%M')
+                    return pair, df
+        except Exception:
+            continue
+            
     return None, None
 
 def run_backtest():
-    send_discord_alert("🧪 **[BACKTEST] 啟動 17 檔永續合約多空斐波那契回測...**")
+    send_discord_alert("🧪 **[BACKTEST] 啟動 17 檔現貨多空斐波那契回測...**")
     
     status_log = []
     all_trades = []
 
     for name in TARGET_SYMBOLS:
-        matched_sym, df = fetch_futures_kline(name)
+        matched_pair, df = fetch_spot_kline(name)
         
         if df is None:
-            status_log.append(f"❌ {name:<8} : 永續合約無可用數據")
+            status_log.append(f"❌ {name:<8} : 現貨市場未上架")
             continue
 
-        status_log.append(f"✅ {name:<8} : 成功 ({matched_sym}, {len(df)} 根 K 線)")
+        status_log.append(f"✅ {name:<8} : 成功 ({matched_pair}, {len(df)} 根)")
         df['rsi'] = calculate_rsi(df['close'], period=14)
 
         i = 25
@@ -116,7 +109,6 @@ def run_backtest():
             candle = df.iloc[i]
             entry_price = candle['close']
 
-            # Fib 0.618 與 0.382 目標位
             fib_long_0618 = sw_high - (wave * 0.618)
             fib_short_0618 = sw_low + (wave * 0.618)
             fib_long_0382 = sw_high - (wave * 0.382)
@@ -127,14 +119,14 @@ def run_backtest():
             tp_1 = 0
             tp_2 = 0
 
-            # 多單：觸及 0.618 支撐且收陽線/下影線
+            # 多單：觸及 Fib 0.618 支撐區間
             if candle['low'] <= fib_long_0618 * 1.002 and candle['close'] >= sw_low:
                 trade_side = "LONG"
                 stop_loss = sw_low * 0.997
                 tp_1 = fib_long_0382
                 tp_2 = sw_high
 
-            # 空單：觸及 0.618 阻力且收陰線/上影線
+            # 空單：觸及 Fib 0.618 阻力區間
             elif candle['high'] >= fib_short_0618 * 0.998 and candle['close'] <= sw_high:
                 trade_side = "SHORT"
                 stop_loss = sw_high * 1.003
@@ -169,7 +161,7 @@ def run_backtest():
                             outcome = "TP1_HIT"
 
                 all_trades.append({
-                    'Symbol': matched_sym,
+                    'Symbol': matched_pair,
                     'Side': trade_side,
                     'Time': candle['datetime'],
                     'Entry': entry_price,
@@ -179,15 +171,15 @@ def run_backtest():
                 i += max(bars_held, 2)
             else:
                 i += 1
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     # 1. 推播標的連線狀態
-    status_msg = "🔍 **[永續合約連線診斷報告]**\n```text\n" + "\n".join(status_log) + "\n```"
+    status_msg = "🔍 **[現貨市場連線診斷報告]**\n```text\n" + "\n".join(status_log) + "\n```"
     send_discord_alert(status_msg)
 
     # 2. 推播回測結果
     if not all_trades:
-        send_discord_alert("📋 **[策略統計]** 本輪成功載入之永續合約未產生交易訊號。")
+        send_discord_alert("📋 **[策略統計]** 成功載入之現貨標的未產生交易訊號。")
         return
 
     res_df = pd.DataFrame(all_trades)
@@ -206,7 +198,7 @@ def run_backtest():
         trade_details += f"[{r['Time']}] {r['Side']} {r['Symbol']} @ ${r['Entry']:.2f} -> {r['Result']}\n"
 
     report_msg = (
-        f"📊 **[BACKTEST REPORT] 永續合約斐波那契回測報告 (15m)**\n"
+        f"📊 **[BACKTEST REPORT] 現貨斐波那契回測報告 (15m)**\n"
         f"```text\n"
         f"總進場次數  : {total_trades} 次 (多: {long_trades} / 空: {short_trades})\n"
         f"TP1 達標勝率: {win_rate:.1f}% ({tp1_count}/{total_trades})\n"
