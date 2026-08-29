@@ -30,8 +30,8 @@ SYMBOLS = {
 }
 
 def get_historical_data(cfg):
-    try:
-        if cfg['t'] == 'binance':
+    if cfg['t'] == 'binance':
+        try:
             url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 100:
@@ -39,24 +39,41 @@ def get_historical_data(cfg):
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                # 統一轉為 datetime 並移除時區以避免衝突
                 df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
-        else:
-            df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) >= 100:
+        except Exception:
+            pass
+    else:
+        try:
+            df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
+            if df is not None and not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
-                df = df.rename(columns=str.lower)
-                req_cols = ['open', 'high', 'low', 'close', 'volume']
-                if all(c in df.columns for c in req_cols):
-                    res_df = df[req_cols].copy()
-                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    # 統一轉為 datetime 並移除時區以避免衝突
-                    res_df['timestamp'] = pd.to_datetime(df.index).dt.tz_localize(None)
-                    return res_df.reset_index(drop=True)
-    except Exception:
-        pass
+                df = df.reset_index()
+                cols_lower = [str(c).lower() for c in df.columns]
+                df.columns = cols_lower
+                
+                # 尋找對應的欄位名稱
+                time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
+                
+                res_df = pd.DataFrame()
+                res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
+                
+                for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
+                    found = False
+                    for cand in candidates:
+                        if cand in df.columns:
+                            res_df[target] = df[cand].astype(float)
+                            found = True
+                            break
+                    if not found:
+                        return None
+                
+                res_df = res_df.dropna().reset_index(drop=True)
+                if len(res_df) >= 50:
+                    return res_df
+        except Exception:
+            pass
     return None
 
 def run_backtest():
@@ -65,7 +82,7 @@ def run_backtest():
 
     for sym, cfg in SYMBOLS.items():
         df = get_historical_data(cfg)
-        if df is None or len(df) < 100:
+        if df is None or len(df) < 50:
             continue
 
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
