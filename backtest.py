@@ -196,4 +196,22 @@ def run_backtest():
         "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
         "回測區間: " + stock_range + "\n"
         "初始資金: $" + str(round(s_init, 2)) + " USDT\n"
-        "最終結餘: $" + str(round(s_bal, 2)) + " USDT (" +
+        "最終結餘: $" + str(round(s_bal, 2)) + " USDT (" + str(round(s_pl, 2)) + "%)\n"
+        "總交易次數: " + str(s_trades) + " 次 | 綜合勝率: " + str(round(s_win_rate, 1)) + "%\n"
+        "----------------------------------------------------\n"
+        + stock_text + "\n"
+        "```"
+    )
+
+    if DISCORD_WEBHOOK_URL and DISCORD_WEBHOOK_URL != "你的Discord網址":
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg1}, timeout=8)
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg2}, timeout=8)
+        except Exception:
+            pass
+
+    print(msg1)
+    print(msg2)
+
+if __name__ == '__main__':
+    run_backtest()
