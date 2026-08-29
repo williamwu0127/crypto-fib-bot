@@ -6,36 +6,35 @@ import numpy as np
 import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-ACCOUNT_BALANCE = 10000.0  # 帳戶本金 10,000 USDT
-RISK_PER_TRADE = 100.0     # 單筆固定 1% 風控 ($100 USDT)
-LEVERAGE = 10.0            # 統一 10x 槓桿
+ACCOUNT_BALANCE = 100.0   # 帳戶本金 100 USDT
+RISK_PER_TRADE = 1.0      # 單筆固定 1% 風控 ($1.0 USDT)
 
 SYMBOLS = {
-    # 1. 主流加密貨幣 (24/7)
-    'BTC': {'t': 'binance', 's': 'BTCUSDT'},
-    'ETH': {'t': 'binance', 's': 'ETHUSDT'},
-    'SOL': {'t': 'binance', 's': 'SOLUSDT'},
-    'BNB': {'t': 'binance', 's': 'BNBUSDT'},
-    'DOGE': {'t': 'binance', 's': 'DOGEUSDT'},
+    # 1. 主流加密貨幣 (Binance 100x)
+    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
+    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
+    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0},
+    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0},
     
-    # 2. 大宗商品 & 貴金屬
-    'XAU': {'t': 'binance', 's': 'PAXGUSDT'},
-    'CLU': {'t': 'stock', 's': 'CL=F'},
+    # 2. 大宗商品 & 貴金屬 (Binance 100x)
+    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0},
+    'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0},
     
-    # 3. 美股科技與晶片龍頭個股
-    'TSM': {'t': 'stock', 's': 'TSM'},
-    'NVDA': {'t': 'stock', 's': 'NVDA'},
-    'AMD': {'t': 'stock', 's': 'AMD'},
-    'MSFT': {'t': 'stock', 's': 'MSFT'},
-    'AAPL': {'t': 'stock', 's': 'AAPL'},
-    'GOOGL': {'t': 'stock', 's': 'GOOGL'},
-    'AMZN': {'t': 'stock', 's': 'AMZN'},
-    'META': {'t': 'stock', 's': 'META'},
-    'TSLA': {'t': 'stock', 's': 'TSLA'},
-    'MU': {'t': 'stock', 's': 'MU'},
-    'GLW': {'t': 'stock', 's': 'GLW'},
-    'SPCX': {'t': 'stock', 's': 'SPCX'},
-    'SNDK': {'t': 'stock', 's': 'SNDK'}
+    # 3. 美股龍頭 (Binance 20x)
+    'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0},
+    'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0},
+    'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0},
+    'MSFT': {'t': 'stock',   's': 'MSFT',     'lev': 20.0},
+    'AAPL': {'t': 'stock',   's': 'AAPL',     'lev': 20.0},
+    'GOOGL':{'t': 'stock',   's': 'GOOGL',    'lev': 20.0},
+    'AMZN': {'t': 'stock',   's': 'AMZN',     'lev': 20.0},
+    'META': {'t': 'stock',   's': 'META',     'lev': 20.0},
+    'TSLA': {'t': 'stock',   's': 'TSLA',     'lev': 20.0},
+    'MU':   {'t': 'stock',   's': 'MU',       'lev': 20.0},
+    'GLW':  {'t': 'stock',   's': 'GLW',      'lev': 20.0},
+    'SPCX': {'t': 'stock',   's': 'SPCX',     'lev': 20.0},
+    'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
 }
 
 def send_discord(msg):
@@ -50,10 +49,9 @@ def send_discord(msg):
         print("Webhook Error:", e)
 
 def get_binance_1mo_data(symbol):
-    """分頁抓取近 30 天 15m K 線 (含時間戳轉 UTC+8)"""
+    """分頁抓取近 30 天 15m K 線 (約 2880 根)"""
     all_rows = []
     end_time = int(time.time() * 1000)
-    
     for _ in range(3):
         url = "https://data-api.binance.vision/api/v3/klines?symbol=" + symbol + "&interval=15m&limit=1000&endTime=" + str(end_time)
         try:
@@ -74,11 +72,7 @@ def get_binance_1mo_data(symbol):
     df = pd.DataFrame(all_rows, columns=cols).drop_duplicates(subset=['t']).sort_values('t')
     for col in ['o', 'h', 'l', 'c', 'v']:
         df[col] = df[col].astype(float)
-    
-    # 轉換為台灣時間 (UTC+8)
-    dt_utc = pd.to_datetime(df['t'], unit='ms', utc=True)
-    df['tw_hour'] = dt_utc.dt.tz_convert('Asia/Taipei').dt.hour
-    return df[['tw_hour', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+    return df[['o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
 
 def get_data(cfg):
     try:
@@ -90,20 +84,11 @@ def get_data(cfg):
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
-                
                 req_cols = ['open', 'high', 'low', 'close', 'volume']
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    
-                    # 轉換 Index 時間為台灣時間
-                    idx = df.index
-                    if idx.tz is None:
-                        dt_tw = idx.tz_localize('UTC').tz_convert('Asia/Taipei')
-                    else:
-                        dt_tw = idx.tz_convert('Asia/Taipei')
-                    res_df['tw_hour'] = dt_tw.hour
-                    return res_df[['tw_hour', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+                    return res_df.reset_index(drop=True)
     except Exception as e:
         print("Error loading " + str(cfg['s']) + ": " + str(e))
     return None
@@ -130,14 +115,6 @@ def backtest():
 
         i = 40
         while i < len(df) - 1:
-            bar = df.iloc[i]
-            tw_hour = bar['tw_hour']
-
-            # ⏰ 時段過濾：僅允許台灣時間 08:00 ～ 23:59 (即 8 <= tw_hour < 24) 開倉
-            if not (8 <= tw_hour <= 23):
-                i += 1
-                continue
-
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
@@ -146,6 +123,7 @@ def backtest():
                 i += 1
                 continue
 
+            bar = df.iloc[i]
             prev_bar = df.iloc[i-1]
             entry_price = bar['c']
 
@@ -185,7 +163,7 @@ def backtest():
                     sl_pct = 0.002
                 
                 pos_value = RISK_PER_TRADE / sl_pct
-                margin_used = pos_value / LEVERAGE
+                margin_used = pos_value / cfg['lev']
 
                 r_profit = 0.0
                 step = 1
@@ -218,6 +196,7 @@ def backtest():
 
                 all_trades.append({
                     'sym': sym,
+                    'lev': int(cfg['lev']),
                     'r': r_profit,
                     'usd': r_profit * RISK_PER_TRADE,
                     'margin': margin_used
@@ -227,7 +206,7 @@ def backtest():
                 i += 1
 
     if not all_trades:
-        send_discord("⚠️ 近 30 天無符合時段之交易。")
+        send_discord("⚠️ 近 30 天無觸發交易。")
         return
 
     res = pd.DataFrame(all_trades)
@@ -242,25 +221,26 @@ def backtest():
     grp = res.groupby('sym').agg({
         'r': ['count', lambda x: (x > 0).sum()],
         'usd': 'sum',
-        'margin': 'mean'
+        'margin': 'mean',
+        'lev': 'first'
     })
-    grp.columns = ['cnt', 'wins', 'usd', 'avg_margin']
+    grp.columns = ['cnt', 'wins', 'usd', 'avg_margin', 'lev']
     
     rows = []
     for s, r in grp.iterrows():
-        row_line = "%-5s | %2d筆 (勝%2d) | 10x均保證金 $%4.0f | %+8.1f USD" % (
-            s, int(r['cnt']), int(r['wins']), float(r['avg_margin']), float(r['usd'])
+        row_line = "%-5s | %2d筆 (勝%2d) | %3dx均保證金 $%4.1f | %+7.1f USD" % (
+            s, int(r['cnt']), int(r['wins']), int(r['lev']), float(r['avg_margin']), float(r['usd'])
         )
         rows.append(row_line)
     
     table_str = "\n".join(rows)
-    line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%d USDT (1%%)" % (int(ACCOUNT_BALANCE), int(RISK_PER_TRADE))
-    line2 = "回測週期: 近 30 天 | 交易時段: 台灣時間 08:00 - 24:00 (移除夜間)"
+    line1 = "帳戶規模: $\%d USDT \vert{} 單筆固定風險: $%.1f USDT (1%%)" % (int(ACCOUNT_BALANCE), RISK_PER_TRADE)
+    line2 = "幣安槓桿: 加密/商品 100x 槓桿 | 美股合約 20x 槓桿"
     line3 = "交易統計: 共 %d 筆 (勝 %d / 負 %d) | 勝率: %.1f%%" % (total, win, loss, winrate)
     line4 = "累計績效: %+.1f R | 淨利潤: %+.1f USD (ROI: %+.1f%%)" % (total_r, total_usd, roi)
 
     report = (
-        "📊 **[BACKTEST REPORT] 日間黃金時段回測 (台時 08:00-24:00)**\n"
+        "📊 **[BACKTEST REPORT] 幣安永續合約波段回測 (100U本金 / 30天)**\n"
         "```text\n"
         + line1 + "\n"
         + line2 + "\n"
@@ -271,7 +251,7 @@ def backtest():
         "```"
     )
     send_discord(report)
-    print("=== 時段過濾回測完成 ===")
+    print("=== 100U 帳戶 30 天回測完成 ===")
 
 if __name__ == '__main__':
     backtest()
