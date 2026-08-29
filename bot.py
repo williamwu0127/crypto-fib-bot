@@ -34,7 +34,7 @@ STOCK_PERP_SYMBOLS = [
     'MSTR/USDT:USDT'    # 微策略
 ]
 
-TIMEFRAME = '1h'  # K 線週期：1 小時
+TIMEFRAME = '15m'  # K 線週期：1 小時
 
 def send_discord_alert(content):
     """發送 Discord 訊息"""
