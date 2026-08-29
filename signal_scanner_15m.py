@@ -14,18 +14,13 @@ RISK_PERCENT = 0.01      # 動態 1% 風控
 DEFAULT_BALANCE = 100.0  # 無 API Key 時之預設參考本金
 
 SYMBOLS = {
-    # 1. 加密貨幣 (100x 槓桿 / 實盤全自動下單)
     'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'ccxt_s': 'BTC/USDT:USDT',  'lev': 100.0, 'trade': True},
     'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'ccxt_s': 'ETH/USDT:USDT',  'lev': 100.0, 'trade': True},
     'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'ccxt_s': 'SOL/USDT:USDT',  'lev': 100.0, 'trade': True},
     'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'ccxt_s': 'BNB/USDT:USDT',  'lev': 100.0, 'trade': True},
     'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'ccxt_s': 'DOGE/USDT:USDT', 'lev': 100.0, 'trade': True},
-    
-    # 2. 大宗商品 & 貴金屬 (100x 槓桿 / 僅推播)
     'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'ccxt_s': 'PAXG/USDT:USDT', 'lev': 100.0, 'trade': False},
     'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0, 'trade': False},
-    
-    # 3. 美股龍頭 (20x 槓桿 / 僅推播)
     'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0,  'trade': False},
     'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0,  'trade': False},
     'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0,  'trade': False},
@@ -310,39 +305,39 @@ def main():
             tp1_str = f"{s['tp1']:.4f}" if s['tp1'] < 1 else f"{s['tp1']:.2f}"
             tp2_str = f"{s['tp2']:.4f}" if s['tp2'] < 1 else f"{s['tp2']:.2f}"
 
-            lines = [
-                f"{side_tag} **{s['sym']}** (15m 趨勢觸發)",
-                "```text",
-                f"進場時間 : {s['time']} (台灣時間)",
-                f"現價     : ${entry_str} USDT",
-                f"停損價格 : ${sl_str} USDT (-{s['sl_pct']:.2f}% | 100% 止損)",
-                f"第一止盈 : ${tp1_str} USDT (Fib 0.382 | 50% 倉位)",
-                f"第二止盈 : ${tp2_str} USDT (前波極值 | 50% 倉位)",
-                "----------------------------------------------------",
-                f"合約錢包 : ${wallet_balance:.2f} USDT | 動態風控 1%: ${current_risk:.2f} USDT",
-                "各槓桿所需倉位保證金與損耗比:",
-                f"• 10x  : 倉位 ${m10:5.2f} USDT | 損耗保證金 {loss10:5.1f}%",
-                f"• 20x  : 倉位 ${m20:5.2f} USDT | 損耗保證金 {loss20:5.1f}%",
-                f"• 50x  : 倉位 ${m50:5.2f} USDT | 損耗保證金 {loss50:5.1f}%",
-                f"• 100x : 倉位 ${m100:5.2f} USDT | 損耗保證金 {loss100:5.1f}%",
-                "----------------------------------------------------",
-                f"實盤執行 : {s['order_status']}",
-                f"指標數據 : RSI(14) = {s['rsi']:.1f}",
+            msg = (
+                f"{side_tag} **{s['sym']}** (15m 趨勢觸發)\n"
+                "```text\n"
+                f"進場時間 : {s['time']} (台灣時間)\n"
+                f"現價     : ${entry_str} USDT\n"
+                f"停損價格 : ${sl_str} USDT (-{s['sl_pct']:.2f}% | 100% 止損)\n"
+                f"第一止盈 : ${tp1_str} USDT (Fib 0.382 | 50% 倉位)\n"
+                f"第二止盈 : ${tp2_str} USDT (前波極值 | 50% 倉位)\n"
+                "----------------------------------------------------\n"
+                f"合約錢包 : ${wallet_balance:.2f} USDT | 動態風控 1%: ${current_risk:.2f} USDT\n"
+                "各槓桿所需倉位保證金與損耗比:\n"
+                f"• 10x  : 倉位 ${m10:5.2f} USDT | 損耗保證金 {loss10:5.1f}%\n"
+                f"• 20x  : 倉位 ${m20:5.2f} USDT | 損耗保證金 {loss20:5.1f}%\n"
+                f"• 50x  : 倉位 ${m50:5.2f} USDT | 損耗保證金 {loss50:5.1f}%\n"
+                f"• 100x : 倉位 ${m100:5.2f} USDT | 損耗保證金 {loss100:5.1f}%\n"
+                "----------------------------------------------------\n"
+                f"實盤執行 : {s['order_status']}\n"
+                f"指標數據 : RSI(14) = {s['rsi']:.1f}\n"
                 "```"
-            ]
-            send_discord("\n".join(lines))
+            )
+            send_discord(msg)
     else:
         status_table = "\n".join(market_status)
-        lines = [
-            "📡 **[15m 掃描完成] 目前無觸發訊號**",
-            "```text",
-            f"掃描時間: {tw_now.strftime('%H:%M')} (台灣時間) | 標的數: 20 檔",
-            f"合約錢包: ${wallet_balance:.2f} USDT \vert{} 動態風控: 1\% (${current_risk:.2f} USDT)",
-            "----------------------------------------------------",
-            status_table,
+        heartbeat_msg = (
+            "📡 **[15m 掃描完成] 目前無觸發訊號**\n"
+            "```text\n"
+            f"掃描時間: {tw_now.strftime('%H:%M')} (台灣時間) | 標的數: 20 檔\n"
+            f"合約錢包: ${wallet_balance:.2f} USDT \vert{} 動態風控: 1\% (${current_risk:.2f} USDT)\n"
+            "----------------------------------------------------\n"
+            f"{status_table}\n"
             "```"
-        ]
-        send_discord("\n".join(lines))
+        )
+        send_discord(heartbeat_msg)
 
 if __name__ == '__main__':
     main()
