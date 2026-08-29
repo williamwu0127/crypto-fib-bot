@@ -39,8 +39,8 @@ def get_historical_data(cfg):
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                # 統一時間格式為 datetime
-                df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
+                # 統一轉為 datetime 並移除時區以避免衝突
+                df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
         else:
             df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
@@ -52,7 +52,8 @@ def get_historical_data(cfg):
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    res_df['timestamp'] = df.index
+                    # 統一轉為 datetime 並移除時區以避免衝突
+                    res_df['timestamp'] = pd.to_datetime(df.index).dt.tz_localize(None)
                     return res_df.reset_index(drop=True)
     except Exception:
         pass
@@ -62,7 +63,6 @@ def run_backtest():
     all_trades = []
     symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in SYMBOLS.keys()}
 
-    # 1. 收集所有標的的符合條件交易訊號
     for sym, cfg in SYMBOLS.items():
         df = get_historical_data(cfg)
         if df is None or len(df) < 100:
@@ -96,7 +96,6 @@ def run_backtest():
                 sl = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1 = entry_price + abs(entry_price - sl)
                 
-                # 尋找未來 10 根 K 線內的結果
                 outcome = None
                 exit_idx = i
                 for j in range(1, 11):
@@ -118,17 +117,16 @@ def run_backtest():
                         'outcome': outcome
                     })
 
-    # 2. 嚴格依照時間順序（Timeline）排列所有交易
+    # 嚴格依照時間順序排列
     all_trades = sorted(all_trades, key=lambda x: x['time'])
 
-    # 3. 依序跑複利滾動模擬
     initial_balance = 100.0
     balance = initial_balance
     total_trades = 0
     total_wins = 0
 
     for trade in all_trades:
-        current_risk = balance * 0.01  # 當下最新結餘的 1% 風控
+        current_risk = balance * 0.01
         total_trades += 1
         symbol_stats[trade['sym']]['trades'] += 1
 
@@ -139,7 +137,6 @@ def run_backtest():
         else:
             balance -= current_risk
 
-    # 4. 組合報告
     symbol_reports = []
     for sym, stats in symbol_stats.items():
         t_cnt = stats['trades']
