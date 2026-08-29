@@ -6,7 +6,6 @@ import yfinance as yf
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "你的Discord網址")
 
-# 完整的 20 檔多市場標的設定
 SYMBOLS = {
     'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
     'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
@@ -33,7 +32,6 @@ SYMBOLS = {
 def get_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            # 抓取幣安 15m 歷史數據
             url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=1000"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 100:
@@ -43,7 +41,6 @@ def get_historical_data(cfg):
                     df[col] = df[col].astype(float)
                 return df[['o', 'h', 'l', 'c', 'v']]
         else:
-            # 透過 yfinance 抓取美股/期貨 15m 數據 (yfinance 15m 最多抓 60 天)
             df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
             if df is not None and not df.empty and len(df) >= 100:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -70,7 +67,6 @@ def run_backtest():
         if df is None or len(df) < 100:
             continue
 
-        # 計算技術指標
         df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
         tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -85,7 +81,7 @@ def run_backtest():
         sym_wins = 0
 
         for i in range(50, len(df) - 1):
-            current_risk = balance * 0.01  # 1% 動態風控
+            current_risk = balance * 0.01
             bar = df.iloc[i]
             
             sub = df.iloc[i-25:i+1]
@@ -98,7 +94,6 @@ def run_backtest():
             fib_0618_l = h - (wave * 0.618)
             entry_price = bar['c']
             
-            # 多頭進場條件
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002)
             
             if cond_long:
