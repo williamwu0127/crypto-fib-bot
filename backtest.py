@@ -76,28 +76,40 @@ def run_backtest():
         gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+        df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
+        is_stock = (cfg['t'] == 'stock' and sym != 'XAU')
         sym_trades = 0
         sym_wins = 0
 
         for i in range(50, len(df) - 15):
             current_risk = balance * 0.01
             bar = df.iloc[i]
+            prev_bar = df.iloc[i-1]
             
             sub = df.iloc[i-25:i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
             
-            if wave <= 0 or (wave / l) < 0.005:
+            # 【優化】美股拉高波段振幅要求 (從 0.5% 提高到 0.8%)，過濾小震盪雜訊
+            min_wave_ratio = 0.008 if is_stock else 0.005
+            if wave <= 0 or (wave / l) < min_wave_ratio:
                 continue
                 
             fib_0618_l = h - (wave * 0.618)
             entry_price = bar['c']
             
+            # 基礎趨勢與 Fib 條件
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002)
             
+            # 【優化】為美股加入更嚴格的 RSI 動能過濾
+            if is_stock:
+                rsi_strong = (bar['rsi'] >= 50) and (bar['rsi'] >= bar['rsi_ema'])
+                cond_long = cond_long and rsi_strong
+
             if cond_long:
-                sl = min(l, entry_price - (bar['atr'] * 1.5))
+                atr_mult = 1.3 if is_stock else 1.5
+                sl = min(l, entry_price - (bar['atr'] * atr_mult))
                 tp1 = entry_price + abs(entry_price - sl)
                 
                 trade_won = False
@@ -129,7 +141,7 @@ def run_backtest():
     profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
     report = [
-        "📊 **[20檔標的 15m 綜合回測報告]**",
+        "📊 **[美股動能門檻優化 15m 回測報告]**",
         "```text",
         "初始資金: $" + str(round(initial_balance, 2)) + " USDT",
         "最終結餘: $" + str(round(balance, 2)) + " USDT (" + str(round(profit_loss_pct, 2)) + "%)",
