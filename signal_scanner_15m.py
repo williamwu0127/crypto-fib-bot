@@ -63,7 +63,7 @@ def get_wallet_balance(exchange):
         return DEFAULT_BALANCE
 
 def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, tp2_price, risk_amount):
-    """市價開倉並掛上 SL (100%)、TP1 (50%)、TP2 (50%)，附帶詳細錯誤捕獲"""
+    """市價開倉並掛上 SL (100%)、TP1 (50%)、TP2 (50%)"""
     if not cfg.get('trade', False):
         return "未開單: 該標的未開啟實盤功能 (僅推播)"
     
@@ -80,7 +80,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
         try:
             exchange.set_leverage(int(cfg['lev']), market_sym)
         except Exception as lev_err:
-            return "開單失敗 [設定槓桿錯誤]: %s" % str(lev_err)
+            return "開單失敗 [設定槓桿錯誤]: " + str(lev_err)
 
         # 2. 計算動態名義開倉數量
         sl_pct = abs(entry_price - sl_price) / entry_price
@@ -88,12 +88,11 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
         pos_notional = risk_amount / sl_pct
         raw_qty = pos_notional / entry_price
         
-        # 數量精度對齊
         qty = float(exchange.amount_to_precision(market_sym, raw_qty))
         
-        # 幣安最小名義下單價值防護 (通常需 >= 5 USDT)
+        # 幣安最小名義金額防護 (需 >= 5 USDT)
         if qty * entry_price < 5.0:
-            return "未開單: 開倉價值 ($%.2f USDT) 低於幣安 5 USDT 最低下單門檻" % (qty * entry_price)
+            return "未開單: 開倉價值 ($%.2f USDT) 低於幣安 5 USDT 限制" % (qty * entry_price)
 
         # 3. 市價開倉
         order_side = 'buy' if side == 'LONG' else 'sell'
@@ -103,11 +102,11 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
             entry_res = exchange.create_order(symbol=market_sym, type='market', side=order_side, amount=qty)
             order_id = entry_res.get('id', 'N/A')
         except ccxt.InsufficientFunds as e:
-            return "開單失敗 [合約保證金不足]: %s" % str(e)
+            return "開單失敗 [合約保證金不足]: " + str(e)
         except ccxt.ExchangeError as e:
-            return "開單失敗 [交易所拒絕]: %s" % str(e)
+            return "開單失敗 [交易所拒絕]: " + str(e)
         except Exception as e:
-            return "開單失敗 [市價下單異常]: %s" % str(e)
+            return "開單失敗 [市價下單異常]: " + str(e)
 
         # 4. 掛全倉 SL 條件止損單 (Stop-Market / 100% 倉位)
         sl_err_note = ""
@@ -121,7 +120,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
                 params={'stopPrice': sl_p_str, 'reduceOnly': True}
             )
         except Exception as e:
-            sl_err_note = " (SL掛單失敗: %s)" % str(e)
+            sl_err_note = " (SL掛單失敗: " + str(e) + ")"
 
         # 5. 掛 TP1 條件止盈單 (Take-Profit-Market / 50% 倉位)
         tp1_qty = float(exchange.amount_to_precision(market_sym, qty * 0.5))
@@ -137,7 +136,7 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
                     params={'stopPrice': tp1_p_str, 'reduceOnly': True}
                 )
             except Exception as e:
-                tp_err_note += " (TP1掛單失敗: %s)" % str(e)
+                tp_err_note += " (TP1掛單失敗: " + str(e) + ")"
 
         # 6. 掛 TP2 條件止盈單 (Take-Profit-Market / 剩餘 50% 倉位)
         tp2_qty = float(exchange.amount_to_precision(market_sym, qty - tp1_qty))
@@ -152,11 +151,11 @@ def execute_binance_order(sym_key, cfg, side, entry_price, sl_price, tp1_price, 
                     params={'stopPrice': tp2_p_str, 'reduceOnly': True}
                 )
             except Exception as e:
-                tp_err_note += " (TP2掛單失敗: %s)" % str(e)
+                tp_err_note += " (TP2掛單失敗: " + str(e) + ")"
 
         return "✅ 開倉成功 (ID: %s) | SL/TP1/TP2 條件單已全數部署%s%s" % (str(order_id), sl_err_note, tp_err_note)
     except Exception as e:
-        return "開單失敗 [底層異常]: %s" % str(e)
+        return "開單失敗 [底層異常]: " + str(e)
 
 def send_discord(content):
     if not DISCORD_WEBHOOK_URL:
@@ -228,7 +227,7 @@ def scan_symbol(sym, cfg, current_risk):
 
     trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
     market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
-    status_summary = "%-5s | 現價: %8.2f USDT| EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
+    status_summary = "%-5s | 現價: %8.2f USDT | EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
 
     if wave <= 0 or (wave / l) < 0.005:
         return None, status_summary
@@ -270,7 +269,6 @@ def scan_symbol(sym, cfg, current_risk):
         lev = cfg['lev']
         margin_req = pos_val / lev
 
-        # 🚀 執行幣安自動下單並獲取詳細狀態
         order_status = execute_binance_order(sym, cfg, side, entry_price, sl, tp1, tp2, current_risk)
 
         return {
@@ -295,7 +293,6 @@ def scan_symbol(sym, cfg, current_risk):
 def main():
     tw_now = pd.to_datetime('now', utc=True).tz_convert('Asia/Taipei')
     
-    # 1. 查詢幣安合約錢包即時可用餘額，動態計算 1% 風控金額
     exchange = get_binance_client()
     wallet_balance = get_wallet_balance(exchange) if exchange else DEFAULT_BALANCE
     current_risk = wallet_balance * RISK_PERCENT
@@ -327,10 +324,10 @@ def main():
                 "%s **%s** (15m 趨勢觸發)\n"
                 "```text\n"
                 "進場時間 : %s (台灣時間)\n"
-                "進場價格 : $%s\n"
-                "停損價格 : $%s (-%.2f%% | 100%% 止損)\n"
-                "第一止盈目標 : $%s (Fib 0.382 | 50%% 止盈)\n"
-                "第二止盈目標 : $%s (前波極值 | 50%% 止盈)\n"
+                "進場價格 : $%s USDT\n"
+                "停損價格 : $%s USDT (-%.2f%% | 100%% 止損)\n"
+                "第一目標 : $%s USDT (Fib 0.382 | 50%% 止盈)\n"
+                "終極目標 : $%s USDT (前波極值 | 50%% 止盈)\n"
                 "----------------------------------------------------\n"
                 "合約錢包 : $%.2f USDT | 單筆動態風控 1%%: $%.2f USDT\n"
                 "各槓桿所需保證金與損耗比:\n"
