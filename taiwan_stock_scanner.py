@@ -1,10 +1,9 @@
 import os
-import time
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
@@ -15,76 +14,71 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-def get_twse_tpex_daily():
-    """向證交所及櫃買中心官方抓取當日量價與三大法人買賣超"""
-    today_str = datetime.now().strftime("%Y%m%d")
+def get_latest_trading_data():
+    """自動尋找最近一個有效交易日並抓取 TWSE 量價與法人資料"""
     stock_dict = {}
+    target_date = datetime.now()
 
-    # 1. 抓取上市 (TWSE) 當日收盤行情
-    try:
-        url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={today_str}&type=ALLBUT0999&response=json"
-        res = requests.get(url_twse, headers=HEADERS, timeout=15).json()
-        if res.get("stat") == "OK":
-            # 找到包含股票代號、收盤價、成交金額的表格
-            tables = res.get("tables", [])
-            for table in tables:
-                fields = table.get("fields", [])
-                if "證券代號" in fields and "收盤價" in fields:
-                    idx_id = fields.index("證券代號")
-                    idx_name = fields.index("證券名稱")
-                    idx_close = fields.index("收盤價")
-                    idx_vol = fields.index("成交股數")
-                    idx_money = fields.index("成交金額")
-                    idx_open = fields.index("開盤價")
-                    idx_high = fields.index("最高價")
-                    idx_low = fields.index("最低價")
+    for _ in range(7):  # 最多往前找 7 天
+        date_str = target_date.strftime("%Y%m%d")
+        url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json"
+        
+        try:
+            print(f"嘗試抓取交易日 {date_str} 的證交所數據...")
+            res = requests.get(url_twse, headers=HEADERS, timeout=15).json()
+            if res.get("stat") == "OK":
+                print(f"成功取得 {date_str} 交易日資料！")
+                tables = res.get("tables", [])
+                for table in tables:
+                    fields = table.get("fields", [])
+                    if "證券代號" in fields and "收盤價" in fields:
+                        idx_id = fields.index("證券代號")
+                        idx_name = fields.index("證券名稱")
+                        idx_close = fields.index("收盤價")
+                        idx_vol = fields.index("成交股數")
+                        idx_money = fields.index("成交金額")
+                        idx_open = fields.index("開盤價")
+                        idx_high = fields.index("最高價")
+                        idx_low = fields.index("最低價")
 
-                    for row in table.get("data", []):
-                        sid = row[idx_id].strip()
-                        if len(sid) == 4 and sid.isdigit():
+                        for row in table.get("data", []):
+                            sid = row[idx_id].strip()
+                            if len(sid) == 4 and sid.isdigit():
+                                try:
+                                    stock_dict[sid] = {
+                                        "name": row[idx_name].strip(),
+                                        "close": float(row[idx_close].replace(",", "")),
+                                        "open": float(row[idx_open].replace(",", "")),
+                                        "high": float(row[idx_high].replace(",", "")),
+                                        "low": float(row[idx_low].replace(",", "")),
+                                        "turnover": float(row[idx_money].replace(",", "")),
+                                        "volume": float(row[idx_vol].replace(",", "")),
+                                        "foreign_buy": 0,
+                                        "it_buy": 0,
+                                        "date": date_str
+                                    }
+                                except ValueError:
+                                    continue
+                
+                # 抓取三大法人買賣超
+                url_inst = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json"
+                res_inst = requests.get(url_inst, headers=HEADERS, timeout=15).json()
+                if res_inst.get("stat") == "OK":
+                    for row in res_inst.get("data", []):
+                        sid = row[0].strip()
+                        if sid in stock_dict:
                             try:
-                                close_p = float(row[idx_close].replace(",", ""))
-                                money = float(row[idx_money].replace(",", ""))
-                                open_p = float(row[idx_open].replace(",", ""))
-                                high_p = float(row[idx_high].replace(",", ""))
-                                low_p = float(row[idx_low].replace(",", ""))
-                                vol = float(row[idx_vol].replace(",", ""))
-                                stock_dict[sid] = {
-                                    "name": row[idx_name].strip(),
-                                    "close": close_p,
-                                    "open": open_p,
-                                    "high": high_p,
-                                    "low": low_p,
-                                    "turnover": money,
-                                    "volume": vol,
-                                    "market": "TW",
-                                    "it_buy": 0,
-                                    "foreign_buy": 0
-                                }
-                            except ValueError:
+                                stock_dict[sid]["foreign_buy"] = float(row[4].replace(",", ""))
+                                stock_dict[sid]["it_buy"] = float(row[10].replace(",", ""))
+                            except (ValueError, IndexError):
                                 continue
-    except Exception as e:
-        print(f"TWSE 量價獲取異常: {e}")
+                return stock_dict, date_str
+        except Exception as e:
+            print(f"{date_str} 抓取失敗: {e}")
+        
+        target_date -= timedelta(days=1)
 
-    # 2. 抓取上市三大法人買賣超
-    try:
-        url_inst = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={today_str}&selectType=ALLBUT0999&response=json"
-        res_inst = requests.get(url_inst, headers=HEADERS, timeout=15).json()
-        if res_inst.get("stat") == "OK":
-            for row in res_inst.get("data", []):
-                sid = row[0].strip()
-                if sid in stock_dict:
-                    try:
-                        foreign_diff = float(row[4].replace(",", ""))
-                        it_diff = float(row[10].replace(",", ""))
-                        stock_dict[sid]["foreign_buy"] = foreign_diff
-                        stock_dict[sid]["it_buy"] = it_diff
-                    except (ValueError, IndexError):
-                        continue
-    except Exception as e:
-        print(f"TWSE 法人買賣超獲取異常: {e}")
-
-    return stock_dict
+    return {}, None
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -102,18 +96,17 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     return dif, dea, hist
 
 def process_and_score(stock_dict):
-    # 第一階段：硬性篩選（成交金額 >= 5000 萬）
+    # 第一階段：硬性門檻（成交金額 >= 5000 萬）
     filtered_stocks = {k: v for k, v in stock_dict.items() if v["turnover"] >= 50_000_000}
-    print(f"通過流動性門檻（成交金額 >= 5000 萬）標的數：{len(filtered_stocks)} 檔")
+    print(f"通過流動性門檻標的數：{len(filtered_stocks)} 檔")
 
     if not filtered_stocks:
         return []
 
-    # 準備批次抓取 Yahoo Finance 的代號
     tickers = [f"{sid}.TW" for sid in filtered_stocks.keys()]
-    print("正在抓取歷史 K 線數據計算均線與動能指標...")
+    print("正在抓取 Yahoo Finance 歷史 K 線數據進行指標評分...")
     
-    # 批次下載歷史資料
+    # 批次下載歷史 K 線
     df_history = yf.download(tickers, period="3mo", interval="1d", group_by="ticker", progress=False)
 
     scored_results = []
@@ -210,9 +203,20 @@ def process_and_score(stock_dict):
 
     return scored_results
 
-def send_discord(results):
+def send_discord(results, trade_date):
     if not results:
-        print("今日盤後無符合門檻之個股。")
+        # 當無標的時發送狀態通知
+        payload = {
+            "username": "台股量化選股機器人",
+            "avatar_url": "https://cdn-icons-png.flaticon.com/512/3314/3314547.png",
+            "embeds": [{
+                "title": f"📊 台股策略掃描報告 ({trade_date})",
+                "description": "今日盤後掃描完成，目前暫無符合高分多頭門檻之標的。",
+                "color": 8421504
+            }]
+        }
+        requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        print("已發送無標的狀態至 Discord。")
         return
 
     # 依照總分排序，取前 5 檔
@@ -228,11 +232,11 @@ def send_discord(results):
         })
 
     payload = {
-        "username": "台股量化選股機器人 (官方開源版)",
+        "username": "台股量化選股機器人",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/3314/3314547.png",
         "embeds": [{
-            "title": "📊 每日台股高勝率篩選報告",
-            "description": f"掃描時間：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n篩選來源：**證交所官方盤後數據**（成交額 $\ge 5,000$ 萬 & 多頭排列）：",
+            "title": f"📊 台股高勝率篩選報告 ({trade_date})",
+            "description": f"掃描時間：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n篩選來源：**證交所官方盤後數據**（成交額 $\ge 5,000$ 萬 & 站上月線）：",
             "color": 15158332 if top_picks[0]["score"] >= 80 else 3066993,
             "fields": fields,
             "footer": {
@@ -248,15 +252,15 @@ def send_discord(results):
         print(f"推播失敗: {resp.status_code} - {resp.text}")
 
 def main():
-    print("開始執行全市場盤後掃描（證交所開源直連）...")
-    stock_dict = get_twse_tpex_daily()
+    print("開始執行全市場盤後掃描...")
+    stock_dict, trade_date = get_latest_trading_data()
     if not stock_dict:
-        print("無法取得當日證交所資料（可能尚未開盤、非交易日或證交所維護中）。")
+        print("無法取得證交所歷史交易資料。")
         return
 
     print(f"成功載入台股共 {len(stock_dict)} 檔市場數據。")
     results = process_and_score(stock_dict)
-    send_discord(results)
+    send_discord(results, trade_date)
 
 if __name__ == "__main__":
     main()
