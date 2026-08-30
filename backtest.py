@@ -4,7 +4,7 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
@@ -71,17 +71,20 @@ def fetch_1year_historical_data(cfg):
                 df = df.drop_duplicates(subset=['t'])
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                # 統一轉為 UTC 時區
-                df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True)
+                # 統一轉成 tz-naive (無時區) 時間戳
+                df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
             df = yf.download(cfg['s'], period="1y", interval="1d", progress=False)
-            if df is not None and not df.empty and len(df) > 50:
+            if df is not None and not df.empty and len(df) > 30:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
-                # 統一轉為 UTC 時區，徹底解決 tz-naive 與 tz-aware 衝突
-                df['time'] = pd.to_datetime(df.index, utc=True)
+                # 統一轉成 tz-naive (無時區) 時間戳
+                t_idx = pd.to_datetime(df.index)
+                if t_idx.tz is not None:
+                    t_idx = t_idx.tz_localize(None)
+                df['time'] = t_idx
                 req_cols = ['open', 'high', 'low', 'close', 'volume']
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
@@ -117,11 +120,11 @@ def run_backtest():
     for sym, cfg in SYMBOLS.items():
         print(f"拉取數據: {sym.ljust(5)} ({cfg['interval']}) ...", end=" ")
         df = fetch_1year_historical_data(cfg)
-        if df is not None and len(df) > 50:
+        if df is not None and len(df) > 30:
             df = prepare_indicators(df)
             dfs[sym] = df
-            s_date = df.iloc[30]['time'].strftime("%Y-%m-%d")
-            e_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
+            s_date = pd.to_datetime(df.iloc[25]['time']).strftime("%Y-%m-%d")
+            e_date = pd.to_datetime(df.iloc[-1]['time']).strftime("%Y-%m-%d")
             if earliest_start is None or s_date < earliest_start:
                 earliest_start = s_date
             if latest_end is None or e_date > latest_end:
@@ -134,7 +137,7 @@ def run_backtest():
         print("無可用數據。")
         return
 
-    # 全域統一時間戳集合（皆為 UTC）
+    # 全域統一時間戳集合（皆為 tz-naive）
     all_timestamps = sorted(list(set([t for df in dfs.values() for t in df['time']])))
     current_wallet = INITIAL_WALLET
     positions = {}
@@ -149,7 +152,7 @@ def run_backtest():
             if match_row.empty:
                 continue
             idx = match_row.index[0]
-            if idx < 30:
+            if idx < 25:
                 continue
             
             bar = match_row.iloc[0]
