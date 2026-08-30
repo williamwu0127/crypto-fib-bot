@@ -7,49 +7,32 @@ import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
 TZ_TW = timezone(timedelta(hours=8))
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT'},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT'},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT'},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT'},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT'},
-    'CLU':   {'t': 'stock',   's': 'CL=F'},
-    'TSM':   {'t': 'stock',   's': 'TSM'},
-    'NVDA':  {'t': 'stock',   's': 'NVDA'},
-    'AMD':   {'t': 'stock',   's': 'AMD'},
-    'MSFT':  {'t': 'stock',   's': 'MSFT'},
-    'AAPL':  {'t': 'stock',   's': 'AAPL'},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL'},
-    'AMZN':  {'t': 'stock',   's': 'AMZN'},
-    'META':  {'t': 'stock',   's': 'META'},
-    'TSLA':  {'t': 'stock',   's': 'TSLA'},
-    'MU':    {'t': 'stock',   's': 'MU'},
-    'GLW':   {'t': 'stock',   's': 'GLW'},
-    'SPCX':  {'t': 'stock',   's': 'SPCX'},
-    'SNDK':  {'t': 'stock',   's': 'SNDK'}
+    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
+    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
+    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0},
+    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0},
+    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0},
+    'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0},
+    'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0},
+    'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0},
+    'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0},
+    'MSFT': {'t': 'stock',   's': 'MSFT',     'lev': 20.0},
+    'AAPL': {'t': 'stock',   's': 'AAPL',     'lev': 20.0},
+    'GOOGL':{'t': 'stock',   's': 'GOOGL',    'lev': 20.0},
+    'AMZN': {'t': 'stock',   's': 'AMZN',     'lev': 20.0},
+    'META': {'t': 'stock',   's': 'META',     'lev': 20.0},
+    'TSLA': {'t': 'stock',   's': 'TSLA',     'lev': 20.0},
+    'MU':   {'t': 'stock',   's': 'MU',       'lev': 20.0},
+    'GLW':  {'t': 'stock',   's': 'GLW',      'lev': 20.0},
+    'SPCX': {'t': 'stock',   's': 'SPCX',     'lev': 20.0},
+    'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
 }
 
-START_BALANCE = 100.0  # 初始本金 USDT
-RISK_PCT = 0.01        # 單筆動態風控 1%
-
-def send_discord_safe(content):
-    if not DISCORD_WEBHOOK_URL:
-        return
-    try:
-        if len(content) <= 1900:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
-        else:
-            parts = [content[i:i+1800] for i in range(0, len(content), 1800)]
-            for p in parts:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": p}, timeout=8)
-                time.sleep(0.5)
-    except Exception:
-        pass
-
-def fetch_1year_historical_data(cfg):
+def get_1year_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
             now_ms = int(time.time() * 1000)
@@ -76,230 +59,121 @@ def fetch_1year_historical_data(cfg):
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
             df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) > 100:
+            if df is not None and not df.empty and len(df) >= 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
                 df['time'] = df.index.tz_convert('Asia/Taipei') if df.index.tz else df.index
-                res_df = df[['time', 'open', 'high', 'low', 'close', 'volume']].copy()
-                res_df.columns = ['time', 'o', 'h', 'l', 'c', 'v']
-                return res_df.reset_index(drop=True)
+                req_cols = ['open', 'high', 'low', 'close', 'volume']
+                if all(c in df.columns for c in req_cols):
+                    res_df = df[req_cols].copy()
+                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    res_df['time'] = df['time'].values
+                    return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
 
-def prepare_market_indicators(df):
-    df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
-    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
-    tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
-    df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
+def run_backtest_1year():
+    initial_balance = 100.0
+    balance = initial_balance
+    total_trades = 0
+    total_wins = 0
+    symbol_reports = []
 
-    delta = df['c'].diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-    df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
-    return df
-
-def run_unified_backtest():
-    print("==================================================")
-    print(">>> 啟動【多空雙向 + 保本移動止損 + 全局複利】1 年歷史回測")
-    print(f">>> 初始本金: ${START_BALANCE:.2f} USDT | 風控: 1.0%")
-    print("==================================================\n")
-
-    dfs = {}
-    earliest_start, latest_end = None, None
+    print(">>> 開始執行原始邏輯 1 年期回測...")
 
     for sym, cfg in SYMBOLS.items():
-        print(f"正在拉取數據: {sym.ljust(5)} ...", end=" ")
-        df = fetch_1year_historical_data(cfg)
-        if df is not None and len(df) > 100:
-            df = prepare_market_indicators(df)
-            dfs[sym] = df
-            s_date = df.iloc[60]['time'].strftime("%Y-%m-%d")
-            e_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
-            if earliest_start is None or s_date < earliest_start:
-                earliest_start = s_date
-            if latest_end is None or e_date > latest_end:
-                latest_end = e_date
-            print(f"成功 ({len(df)} 根 K 線)")
-        else:
+        print(f"正在分析標的: {sym.ljust(5)} ...", end=" ")
+        df = get_1year_historical_data(cfg)
+        if df is None or len(df) < 50:
             print("資料不足略過")
+            continue
 
-    if not dfs:
-        print("無可用數據。")
-        return
+        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+        tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
+        df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
 
-    # 模擬逐根 K 線時間推進（全局統一時間軸）
-    # 建立持倉狀態與統一錢包
-    current_wallet = START_BALANCE
-    positions = {}  # {sym: {side, entry, sl, tp1, tp2, tp1_hit, qty, risk_cash}}
-    completed_trades = []
+        delta = df['c'].diff()
+        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
 
-    # 彙整所有時間點
-    all_timestamps = sorted(list(set([t for df in dfs.values() for t in df['time']])))
+        sym_trades = 0
+        sym_wins = 0
 
-    print("\n>>> 正在進行全域時間軸撮合與複利滾動運算...")
-
-    for curr_time in all_timestamps:
-        for sym, df in dfs.items():
-            match_row = df[df['time'] == curr_time]
-            if match_row.empty:
-                continue
-            idx = match_row.index[0]
-            if idx < 60:
-                continue
+        # 保留原本 10 根 K 線結算邏輯
+        for i in range(50, len(df) - 15):
+            current_risk = balance * 0.01
+            bar = df.iloc[i]
             
-            bar = match_row.iloc[0]
-            prev_bar = df.iloc[idx - 1]
+            sub = df.iloc[i-25:i+1]
+            h, l = sub['h'].max(), sub['l'].min()
+            wave = h - l
+            
+            if wave <= 0 or (wave / l) < 0.005:
+                continue
+                
+            fib_0618_l = h - (wave * 0.618)
+            entry_price = bar['c']
+            
+            cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002)
+            
+            if cond_long:
+                sl = min(l, entry_price - (bar['atr'] * 1.5))
+                tp1 = entry_price + abs(entry_price - sl)
+                
+                trade_won = False
+                hit_target = False
+                for j in range(1, 11):
+                    future_bar = df.iloc[i + j]
+                    if future_bar['l'] <= sl:
+                        balance -= current_risk
+                        hit_target = True
+                        break
+                    elif future_bar['h'] >= tp1:
+                        balance += current_risk * 1.5
+                        trade_won = True
+                        hit_target = True
+                        break
+                
+                if hit_target:
+                    total_trades += 1
+                    sym_trades += 1
+                    if trade_won:
+                        total_wins += 1
+                        sym_wins += 1
 
-            # 1. 檢查持倉出場
-            if sym in positions:
-                pos = positions[sym]
-                side = pos['side']
-                entry = pos['entry']
-                sl = pos['sl']
-                tp1 = pos['tp1']
-                tp2 = pos['tp2']
-                qty = pos['qty']
-                tp1_hit = pos['tp1_hit']
+        win_rate = (sym_wins / sym_trades * 100) if sym_trades > 0 else 0
+        if sym_trades > 0:
+            symbol_reports.append(f"{sym.ljust(5)} | 交易: {str(sym_trades).rjust(4)}次 | 勝率: {win_rate:5.1f}%")
+        print(f"完成 ({sym_trades} 次交易 | 勝率 {win_rate:.1f}%)")
 
-                if side == 'LONG':
-                    # 觸發 SL / BE_SL
-                    if bar['l'] <= sl:
-                        rem_qty = qty * 0.5 if tp1_hit else qty
-                        pnl = rem_qty * (sl - entry)
-                        current_wallet += pnl
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'BE_SL' if tp1_hit else 'SL', 'time': curr_time})
-                        del positions[sym]
-                        continue
-                    # 觸發 TP1
-                    if not tp1_hit and bar['h'] >= tp1:
-                        pos['tp1_hit'] = True
-                        pnl_tp1 = (qty * 0.5) * (tp1 - entry)
-                        current_wallet += pnl_tp1
-                        pos['sl'] = entry  # 保本移動止損！
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    # 觸發 TP2
-                    if pos['tp1_hit'] and bar['h'] >= tp2:
-                        pnl_tp2 = (qty * 0.5) * (tp2 - entry)
-                        current_wallet += pnl_tp2
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
-                        del positions[sym]
-                        continue
+    overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+    profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
 
-                elif side == 'SHORT':
-                    # 觸發 SL / BE_SL
-                    if bar['h'] >= sl:
-                        rem_qty = qty * 0.5 if tp1_hit else qty
-                        pnl = rem_qty * (entry - sl)
-                        current_wallet += pnl
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'BE_SL' if tp1_hit else 'SL', 'time': curr_time})
-                        del positions[sym]
-                        continue
-                    # 觸發 TP1
-                    if not tp1_hit and bar['l'] <= tp1:
-                        pos['tp1_hit'] = True
-                        pnl_tp1 = (qty * 0.5) * (entry - tp1)
-                        current_wallet += pnl_tp1
-                        pos['sl'] = entry  # 保本移動止損！
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    # 觸發 TP2
-                    if pos['tp1_hit'] and bar['l'] <= tp2:
-                        pnl_tp2 = (qty * 0.5) * (entry - tp2)
-                        current_wallet += pnl_tp2
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
-                        del positions[sym]
-                        continue
-
-            # 2. 開倉信號掃描 (波段 Swing 斐波 + 多空雙向)
-            if sym not in positions and current_wallet > 10.0:
-                sub = df.iloc[max(0, idx-60):idx+1]
-                h, l = sub['h'].max(), sub['l'].min()
-                wave = h - l
-                if wave <= 0 or (wave / l) < 0.008:
-                    continue
-
-                fib_0618_l = h - (wave * 0.618)
-                fib_0618_s = l + (wave * 0.618)
-
-                # 做多條件
-                rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-                cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-
-                # 做空條件
-                rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
-                cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
-
-                if cond_long:
-                    entry = bar['c']
-                    sl = min(l, entry - (bar['atr'] * 1.5))
-                    tp1 = h if h > entry else entry + abs(entry - sl)
-                    tp2 = h + (wave * 0.618)
-                    if tp2 <= tp1:
-                        tp2 = tp1 + (abs(entry - sl) * 2.0)
-                    
-                    price_diff = abs(entry - sl)
-                    if price_diff > 0:
-                        risk_amount = current_wallet * RISK_PCT
-                        qty = risk_amount / price_diff
-                        positions[sym] = {
-                            'side': 'LONG', 'entry': entry, 'sl': sl,
-                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
-                        }
-
-                elif cond_short:
-                    entry = bar['c']
-                    sl = max(h, entry + (bar['atr'] * 1.5))
-                    tp1 = l if l < entry else entry - abs(sl - entry)
-                    tp2 = l - (wave * 0.618)
-                    if tp2 >= tp1:
-                        tp2 = tp1 - (abs(sl - entry) * 2.0)
-                    
-                    price_diff = abs(sl - entry)
-                    if price_diff > 0:
-                        risk_amount = current_wallet * RISK_PCT
-                        qty = risk_amount / price_diff
-                        positions[sym] = {
-                            'side': 'SHORT', 'entry': entry, 'sl': sl,
-                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
-                        }
-
-    if not completed_trades:
-        print("無成交紀錄。")
-        return
-
-    df_res = pd.DataFrame(completed_trades)
-    total_trades = len(df_res)
-    win_trades = len(df_res[df_res['pnl'] > 0])
-    overall_win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0.0
-    roi_pct = ((current_wallet - START_BALANCE) / START_BALANCE) * 100
-
-    symbol_lines = []
-    for sym in SYMBOLS.keys():
-        sub = df_res[df_res['symbol'] == sym]
-        c = len(sub)
-        w = len(sub[sub['pnl'] > 0])
-        wr = (w / c * 100) if c > 0 else 0.0
-        pnl = sub['pnl'].sum() if c > 0 else 0.0
-        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.1f}% | 收益貢獻: {pnl:+9.2f}")
-
-    report_text = (
-        "```text\n"
-        "判定邏輯: 15m K線 | 多空雙向 + Swing Fib0.618 + 保本全域複利 (1年期回測)\n"
-        f"回測區間: {earliest_start} ~ {latest_end}\n"
-        f"初始資金: ${START_BALANCE:.1f} USDT\n"
-        f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
-        f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.1f}%\n"
-        "----------------------------------------------------\n"
-        + "\n".join(symbol_lines) + "\n"
+    report = [
+        "📊 **[20檔標的 15m 原始複利回測報告 (1年期)]**",
+        "```text",
+        f"初始資金: ${initial_balance:.2f} USDT",
+        f"最終結餘: ${balance:.2f} USDT ({profit_loss_pct:+.2f}%)",
+        f"總交易次數: {total_trades} 次",
+        f"綜合勝率: {overall_win_rate:.1f}%",
+        "----------------------------------------------------",
+        "\n".join(symbol_reports),
         "```"
-    )
+    ]
+    
+    msg = "\n".join(report)
+    
+    if DISCORD_WEBHOOK_URL and DISCORD_WEBHOOK_URL != "你的Discord網址":
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=8)
+        except Exception:
+            pass
 
-    print("\n" + report_text)
-    print(">>> 正在發送至 Discord...")
-    send_discord_safe(report_text)
-    print(">>> Discord 推播完成！")
+    print("\n" + msg)
 
 if __name__ == '__main__':
-    run_unified_backtest()
+    run_backtest_1year()
