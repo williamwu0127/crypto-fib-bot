@@ -40,11 +40,8 @@ def fetch_latest_financial_news():
     """動態抓取 Yahoo Finance 的即時財經新聞 RSS 作為參考"""
     news_list = []
     try:
-        # Yahoo Finance 總經與市場新聞 RSS
         rss_url = "https://finance.yahoo.com/news/rssindex"
         feed = feedparser.parse(rss_url)
-        
-        # 取前 5 則最新新聞
         for entry in feed.entries[:5]:
             title = entry.get('title', '無標題')
             link = entry.get('link', '#')
@@ -82,7 +79,6 @@ def main():
                 "inline": True
             })
 
-    # 動態爬取最新財經新聞
     latest_news = fetch_latest_financial_news()
     news_text = "\n".join([f"> {item}" for item in latest_news])
     
