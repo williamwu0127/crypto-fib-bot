@@ -37,8 +37,8 @@ def get_weekly_performance(ticker_symbol):
         return None, None, None
 
 def fetch_latest_financial_news():
-    """動態抓取 Google News 財經與總經即時 RSS，並轉為超連結格式"""
-    news_list = []
+    """動態抓取 Google News 財經即時 RSS，確保長度安全並轉為超連結"""
+    news_items = []
     try:
         rss_url = "https://news.google.com/rss/search?q=stock+market+economy+Fed+interest+rate&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(rss_url)
@@ -46,24 +46,22 @@ def fetch_latest_financial_news():
             title = entry.get('title', '無標題')
             link = entry.get('link', '#')
             
-            # 清理標題中可能破壞 Markdown 格式的特殊字元
+            # 清理特殊字元
             title = title.replace('[', '').replace(']', '').replace('(', '').replace(')', '')
-            
-            # 限制標題長度，避免過長
-            if len(title) > 90:
-                title = title[:87] + "..."
+            if len(title) > 75:
+                title = title[:72] + "..."
                 
-            news_list.append(f"• [{title}]({link})")
+            news_items.append(f"• [{title}]({link})")
     except Exception as e:
         print(f"動態抓取新聞失敗: {e}")
         
-    if not news_list:
-        news_list.append("> 目前無法取得即時新聞，請透過各大財經平台關注本週最新動態。")
+    if not news_items:
+        news_items.append("> 目前無法取得即時新聞，請透過各大財經平台關注本週最新動態。")
         
-    return news_list
+    return news_items
 
 def main():
-    print("【一週全球市場資訊】開始分析美股, 亞股, 台股, 加密貨幣與即時新聞...")
+    print("【一週全球市場資訊】開始分析美股、亞股、台股、加密貨幣與即時新聞...")
     
     targets = {
         "🇺🇸 那斯達克 (^IXIC)": "^IXIC",
@@ -100,9 +98,17 @@ def main():
     print("發送第一則訊息 (市場行情)...")
     send_msg(payload_market)
 
-    # --- 第二則訊息：即時財經新聞超連結快訊 ---
+    # --- 第二則訊息：即時財經新聞（安全控制字元長度） ---
     latest_news = fetch_latest_financial_news()
-    news_text = "\n".join([f"{item}" for item in latest_news])
+    news_fields = []
+    
+    # 每則新聞獨立成為一個小 field，確保絕對不會超過 1024 字元限制
+    for idx, item in enumerate(latest_news, 1):
+        news_fields.append({
+            "name": f"焦點新聞 {idx}",
+            "value": item,
+            "inline": False
+        })
     
     payload_news = {
         "username": "一週全球市場資訊雷達",
@@ -110,14 +116,10 @@ def main():
             "title": f"📰 即時全球財經新聞與事件快訊 ({datetime.now().strftime('%Y-%m-%d')})",
             "description": "本週自動抓取的最新財經動態與焦點新聞（點擊標題即可查看原文）：",
             "color": 3447003,
-            "fields": [{
-                "name": "───────── 焦點新聞超連結 ─────────",
-                "value": news_text,
-                "inline": False
-            }]
+            "fields": news_fields
         }]
     }
-    print("發送第二則訊息 (即時新聞超連結)...")
+    print("發送第二則訊息 (即時新聞多欄位)...")
     send_msg(payload_news)
 
 if __name__ == "__main__":
