@@ -9,32 +9,31 @@ from datetime import datetime, timezone, timedelta
 TZ_TW = timezone(timedelta(hours=8))
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 
-# 回測標的清單（與實盤配置一致）
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0},
-    'CLU':   {'t': 'stock',   's': 'CL=F',     'lev': 100.0},
-    'TSM':   {'t': 'stock',   's': 'TSM',      'lev': 20.0},
-    'NVDA':  {'t': 'stock',   's': 'NVDA',     'lev': 20.0},
-    'AMD':   {'t': 'stock',   's': 'AMD',      'lev': 20.0},
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'lev': 20.0},
-    'AAPL':  {'t': 'stock',   's': 'AAPL',     'lev': 20.0},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'lev': 20.0},
-    'AMZN':  {'t': 'stock',   's': 'AMZN',     'lev': 20.0},
-    'META':  {'t': 'stock',   's': 'META',     'lev': 20.0},
-    'TSLA':  {'t': 'stock',   's': 'TSLA',     'lev': 20.0},
-    'MU':    {'t': 'stock',   's': 'MU',       'lev': 20.0},
-    'GLW':   {'t': 'stock',   's': 'GLW',      'lev': 20.0},
-    'SPCX':  {'t': 'stock',   's': 'SPCX',     'lev': 20.0},
-    'SNDK':  {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT'},
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT'},
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT'},
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT'},
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT'},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT'},
+    'CLU':   {'t': 'stock',   's': 'CL=F'},
+    'TSM':   {'t': 'stock',   's': 'TSM'},
+    'NVDA':  {'t': 'stock',   's': 'NVDA'},
+    'AMD':   {'t': 'stock',   's': 'AMD'},
+    'MSFT':  {'t': 'stock',   's': 'MSFT'},
+    'AAPL':  {'t': 'stock',   's': 'AAPL'},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL'},
+    'AMZN':  {'t': 'stock',   's': 'AMZN'},
+    'META':  {'t': 'stock',   's': 'META'},
+    'TSLA':  {'t': 'stock',   's': 'TSLA'},
+    'MU':    {'t': 'stock',   's': 'MU'},
+    'GLW':   {'t': 'stock',   's': 'GLW'},
+    'SPCX':  {'t': 'stock',   's': 'SPCX'},
+    'SNDK':  {'t': 'stock',   's': 'SNDK'}
 }
 
-START_BALANCE = 100.0  # 初始本金 (USDT)
-RISK_PCT = 0.01        # 單筆風控 1%
+START_BALANCE = 100.0
+RISK_PCT = 0.01
 
 def send_discord_safe(content):
     if not DISCORD_WEBHOOK_URL:
@@ -51,7 +50,6 @@ def send_discord_safe(content):
         pass
 
 def fetch_historical_data(cfg):
-    """取得過去 30 天 15m K 線數據"""
     try:
         if cfg['t'] == 'binance':
             url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=1000"
@@ -80,9 +78,8 @@ def fetch_historical_data(cfg):
 def backtest_single_symbol(sym, cfg):
     df = fetch_historical_data(cfg)
     if df is None or len(df) < 100:
-        return []
+        return [], None, None
 
-    # 計算技術指標
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -93,6 +90,9 @@ def backtest_single_symbol(sym, cfg):
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
+
+    start_date = df.iloc[50]['time'].strftime("%Y-%m-%d")
+    end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
 
     trades = []
     in_position = False
@@ -105,7 +105,6 @@ def backtest_single_symbol(sym, cfg):
         bar = df.iloc[i]
         prev_bar = df.iloc[i - 1]
 
-        # 1. 持倉狀態管理 (檢查 SL 與 分批 TP)
         if in_position:
             if bar['l'] <= sl_price:
                 exit_price = sl_price
@@ -136,7 +135,6 @@ def backtest_single_symbol(sym, cfg):
                 in_position = False
                 continue
 
-        # 2. 開倉信號掃描
         if not in_position:
             sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
@@ -163,70 +161,53 @@ def backtest_single_symbol(sym, cfg):
                     tp1_hit = False
                     entry_time = bar['time']
 
-    return trades
+    return trades, start_date, end_date
 
 def run_full_backtest():
-    print("==================================================")
-    print(">>> 啟動 1 個月歷史回測 (15m Timeframe / 20 檔標的)")
-    print(f">>> 初始本金: ${START_BALANCE:.2f} USDT | 單筆風控: {RISK_PCT*100:.1f}%")
-    print("==================================================\n")
-
     all_trades = []
+    earliest_start, latest_end = None, None
+
     for sym, cfg in SYMBOLS.items():
-        print(f"正在回測: {sym.ljust(5)} ...", end=" ")
-        t_list = backtest_single_symbol(sym, cfg)
-        print(f"完成 (產生 {len(t_list)} 筆成交)")
+        t_list, s_date, e_date = backtest_single_symbol(sym, cfg)
+        if s_date and (earliest_start is None or s_date < earliest_start):
+            earliest_start = s_date
+        if e_date and (latest_end is None or e_date > latest_end):
+            latest_end = e_date
         all_trades.extend(t_list)
 
     if not all_trades:
-        msg = "📈 **[1個月策略回測報告]**\n回測期間內無觸發交易。"
-        print(f"\n{msg}")
-        send_discord_safe(msg)
         return
 
     df_res = pd.DataFrame(all_trades)
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0])
-    loss_trades = len(df_res[df_res['pnl'] < 0])
-    win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
+    overall_win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
     total_pnl = df_res['pnl'].sum()
     final_balance = START_BALANCE + total_pnl
-    roi = (total_pnl / START_BALANCE) * 100
+    roi_pct = (total_pnl / START_BALANCE) * 100
 
-    summary_by_sym = df_res.groupby('symbol').agg(
-        trades=('pnl', 'count'),
-        wins=('pnl', lambda x: (x > 0).sum()),
-        pnl=('pnl', 'sum')
-    )
-    summary_by_sym['win_rate'] = (summary_by_sym['wins'] / summary_by_sym['trades']) * 100
-    table_str = summary_by_sym[['trades', 'wins', 'win_rate', 'pnl']].to_string()
+    symbol_lines = []
+    for sym in SYMBOLS.keys():
+        sub = df_res[df_res['symbol'] == sym]
+        c = len(sub)
+        w = len(sub[sub['pnl'] > 0])
+        wr = (w / c * 100) if c > 0 else 0.0
+        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(3)}次 | 勝率: {wr:5.1f}%")
 
-    print("\n================== [回測綜合統計] ==================")
-    print(f"總平倉次數 : {total_trades} 次")
-    print(f"勝率 (Win Rate)  : {win_rate:.2f}% (勝: {win_trades} / 負: {loss_trades})")
-    print(f"總淨盈虧 (PnL)   : {total_pnl:+.2f} USDT")
-    print(f"最終資金餘額     : ${final_balance:.2f} USDT (報酬率: {roi:+.2f}%)")
-    print("====================================================\n")
-    print("各標的詳細表現:")
-    print(table_str)
-
-    # 彙整推播至 Discord
-    dc_report = (
-        "📈 **[15m 策略 1 個月歷史回測報告]**\n"
+    report_text = (
         "```text\n"
-        f"初始本金: ${START_BALANCE:.2f} USDT | 單筆風控: {RISK_PCT*100:.1f}%\n"
-        f"總交易次數: {total_trades} 次 (勝: {win_trades} / 負: {loss_trades})\n"
-        f"策略勝率: {win_rate:.2f}%\n"
-        f"總淨盈虧: {total_pnl:+.2f} USDT\n"
-        f"最終餘額: ${final_balance:.2f} USDT (總報酬率: {roi:+.2f}%)\n"
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
+        f"回測區間: {earliest_start} ~ {latest_end}\n"
+        f"初始資金: ${START_BALANCE:.1f} USDT\n"
+        f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:+.2f}%)\n"
+        f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.1f}%\n"
         "----------------------------------------------------\n"
-        f"{table_str}\n"
-        "----------------------------------------------------\n"
+        + "\n".join(symbol_lines) + "\n"
         "```"
     )
-    print("\n>>> 正在發送回測報告至 Discord...")
-    send_discord_safe(dc_report)
-    print(">>> Discord 推播完成！")
+
+    print(report_text)
+    send_discord_safe(report_text)
 
 if __name__ == '__main__':
     run_full_backtest()
