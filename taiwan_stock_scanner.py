@@ -15,7 +15,7 @@ def send_msg(payload):
         print(f"發送失敗: {e}")
 
 def get_dynamic_all_stocks():
-    """動態向台灣證交所官方 ISIN 系統抓取全部現存上市與上櫃普通股"""
+    """動態向台灣證交所官方 ISIN 系統抓取全部現存上市與上櫃普通股及所屬產業"""
     stock_dict = {}
     urls = [
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "TW"),
@@ -34,14 +34,20 @@ def get_dynamic_all_stocks():
             df.columns = df.iloc[0]
             df = df.iloc[1:]
             
-            for item in df["有價證券代號及名稱"].dropna():
+            for _, row in df.iterrows():
+                item = row.get("有價證券代號及名稱", None)
+                industry = row.get("產業別", "其他")
+                if pd.isna(item):
+                    continue
                 parts = str(item).split("\u3000")
                 if len(parts) >= 2:
                     sid = parts[0].strip()
                     name = parts[1].strip()
                     if len(sid) == 4 and sid.isdigit():
                         ticker = f"{sid}.{market}"
-                        stock_dict[ticker] = (sid, name)
+                        # 簡化產業名稱
+                        ind_str = str(industry).strip() if not pd.isna(industry) else "其他"
+                        stock_dict[ticker] = (sid, name, ind_str)
         except Exception as e:
             print(f"動態獲取 {market} 股票名冊異常: {e}")
             
@@ -63,7 +69,7 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     return dif, dea, hist
 
 def main():
-    print("【步驟 1】即時動態向證交所抓取台股全市場名單...")
+    print("【步驟 1】即時動態向證交所抓取台股全市場名單與產業別...")
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     print(f"成功取得台股上市櫃全市場共 {len(all_tickers)} 檔股票。")
@@ -91,7 +97,7 @@ def main():
                     continue
 
                 latest_trade_date = df.index[-1].strftime("%Y-%m-%d")
-                sid, name = stock_dict[ticker]
+                sid, name, industry = stock_dict[ticker]
 
                 close_s = df['Close']
                 high_s = df['High']
@@ -167,6 +173,7 @@ def main():
                 scored_results.append({
                     "sid": sid,
                     "name": name,
+                    "industry": industry,
                     "close": f"{today_close:.2f}",
                     "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
                     "tp": f"{tp_price:.2f}",
@@ -179,14 +186,32 @@ def main():
             print(f"處理批次出錯: {e}")
             continue
 
-    print(f"【步驟 3】掃描完成，符合條件標的共 {len(scored_results)} 檔。")
-    top_picks = sorted(scored_results, key=lambda x: x["score"], reverse=True)[:10]
+    # 【步驟 4】產業權重去重篩選：同產業最多取前 2 高分標的
+    print("【步驟 4】執行產業分散與分級過濾...")
+    sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
+    
+    industry_count = {}
+    top_picks = []
+    
+    for item in sorted_all:
+        ind = item["industry"]
+        if ind not in industry_count:
+            industry_count[ind] = 0
+            
+        # 每個產業最多取 2 檔
+        if industry_count[ind] < 2:
+            industry_count[ind] += 1
+            top_picks.append(item)
+            
+        if len(top_picks) >= 10:
+            break
 
     fields = []
     for i, item in enumerate(top_picks):
         fields.append({
             "name": f"📌 {item['sid']} {item['name']}  現價 : {item['close']}",
             "value": (
+                f"> **產業**: `{item['industry']}`\n"
                 f"> **進場**: `{item['entry']}`\n"
                 f"> **止盈 (TP)**: `{item['tp']}`\n"
                 f"> **止損 (SL)**: `{item['sl']}`\n"
@@ -208,7 +233,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股{session_title} Top 10 ({latest_trade_date})",
-            "description": f"已完成全台股動態掃描，精選綜合評分最高 10 檔：",
+            "description": f"已完成全台股動態掃描與產業分散（同產業上限 2 檔），精選 Top 10：",
             "color": 3447003,
             "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
