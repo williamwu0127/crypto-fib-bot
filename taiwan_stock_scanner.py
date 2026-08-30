@@ -5,7 +5,6 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-# 固定使用指定新 Webhook（避免被 GitHub 舊 Secrets 覆蓋）
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 STOCK_POOL = [
@@ -96,7 +95,7 @@ def main():
                 reasons.append("均線多頭")
 
             # 2. 突破 20 日高 (+20)
-            high_20d = float(close_s.iloc[-21:-1].max())
+            high_20d = float(high_s.iloc[-21:-1].max())
             if today_close > high_20d:
                 score += 20
                 reasons.append("突破20日高")
@@ -123,19 +122,36 @@ def main():
             if k_range > 0 and (today_high - today_close) / k_range > 0.4:
                 score -= 15
 
-            # 價位計算
-            entry_low = round(min(ma5, today_close * 0.985), 1)
-            entry_high = round(today_close * 1.005, 1)
-            sl_price = round(max(ma20 * 0.985, today_close * 0.94), 1)
-            risk = today_close - sl_price
-            tp1 = round(today_close + (risk * 1.5), 1)
-            tp2 = round(today_close + (risk * 2.5), 1)
+            # ================= 結構型價位推算 (Price Action) =================
+            # 1. 結構性止損 (SL)：取近 5 日波段最低點或今日起漲低點下方作為結構破位防守
+            low_5d = float(low_s.iloc[-5:].min())
+            sl_price = round(min(low_5d, today_low) * 0.99, 1)
+
+            # 2. 進場區間 (Entry)：回踩 5MA / 突破點 ~ 現價平盤（若 5MA 低於 SL 則用保護性緩衝）
+            entry_low = round(max(ma5, today_close * 0.985), 1)
+            entry_high = round(today_close * 1.003, 1)
+            # 確保 SL 必定在進場區間下方
+            if sl_price >= entry_low:
+                sl_price = round(entry_low * 0.97, 1)
+
+            # 3. 結構性止盈 (TP)：
+            # 回溯近 60 日歷史波段高點（排除今日）
+            past_60d_high = float(high_s.iloc[-60:-1].max()) if len(high_s) >= 60 else float(high_s.iloc[:-1].max())
+
+            if past_60d_high > today_close * 1.02:
+                # 情況 A：上方有明確的前波高點壓力位 -> 以歷史前高作為止盈目標
+                tp_price = round(past_60d_high, 1)
+            else:
+                # 情況 B：已突破近季新高（上方無套牢賣壓） -> 採用等距箱體對稱測幅
+                low_20d = float(low_s.iloc[-20:].min())
+                box_height = today_close - low_20d
+                tp_price = round(today_close + box_height, 1)
 
             scored_results.append({
                 "sid": sid,
                 "name": name,
                 "entry": f"{entry_low} ~ {entry_high}",
-                "tp": f"{tp1} / {tp2}",
+                "tp": tp_price,
                 "sl": sl_price,
                 "score": score,
                 "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
