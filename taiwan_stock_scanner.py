@@ -5,20 +5,29 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-# 優先讀取環境變數，若無則使用指定 Webhook
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 if not WEBHOOK_URL or not WEBHOOK_URL.startswith("http"):
     WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 STOCK_POOL = [
-    ("2330", "台積電"), ("2454", "聯發科"), ("2317", "鴻海"), ("2382", "廣達"), ("3231", "緯創"),
-    ("6669", "緯穎"), ("2376", "技嘉"), ("2357", "華碩"), ("2308", "台達電"), ("2303", "聯電"),
-    ("3711", "日月光投控"), ("3034", "聯詠"), ("2408", "南亞科"), ("3443", "創意"), ("3661", "世芯-KY"),
-    ("3037", "欣興"), ("8046", "南電"), ("3035", "智原"), ("2345", "智邦"), ("2379", "瑞昱"),
-    ("3017", "奇鋐"), ("3324", "雙鴻"), ("3529", "力旺"), ("6415", "矽力*-KY"), ("5269", "祥碩"),
-    ("1519", "華城"), ("1513", "中興電"), ("1504", "東元"), ("1503", "士電"), ("1609", "大亞"),
-    ("2603", "長榮"), ("2609", "陽明"), ("2615", "萬海"), ("2618", "長榮航"), ("2610", "華航"),
-    ("2881", "富邦金"), ("2882", "國泰金"), ("2891", "中信金"), ("2886", "兆豐金"), ("2884", "玉山金")
+    # 半導體 / 電子代工 / AI 概念
+    ("2330", "台積電", "TW"), ("2454", "聯發科", "TW"), ("2317", "鴻海", "TW"), 
+    ("2382", "廣達", "TW"), ("3231", "緯創", "TW"), ("6669", "緯穎", "TW"), 
+    ("2376", "技嘉", "TW"), ("2357", "華碩", "TW"), ("2308", "台達電", "TW"), 
+    ("2303", "聯電", "TW"), ("3711", "日月光投控", "TW"), ("3034", "聯詠", "TW"), 
+    ("2408", "南亞科", "TW"), ("3443", "創意", "TW"), ("3661", "世芯-KY", "TW"),
+    ("3037", "欣興", "TW"), ("8046", "南電", "TW"), ("3035", "智原", "TW"), 
+    ("2345", "智邦", "TW"), ("2379", "瑞昱", "TW"), ("3017", "奇鋐", "TW"), 
+    ("3324", "雙鴻", "TWO"), ("3529", "力旺", "TWO"), ("6415", "矽力*-KY", "TW"), 
+    ("5269", "祥碩", "TW"),
+    # 重電 / 綠能 / 航運
+    ("1519", "華城", "TW"), ("1513", "中興電", "TW"), ("1504", "東元", "TW"), 
+    ("1503", "士電", "TW"), ("1609", "大亞", "TW"), ("2603", "長榮", "TW"), 
+    ("2609", "陽明", "TW"), ("2615", "萬海", "TW"), ("2618", "長榮航", "TW"), 
+    ("2610", "華航", "TW"),
+    # 金融 / 傳產
+    ("2881", "富邦金", "TW"), ("2882", "國泰金", "TW"), ("2891", "中信金", "TW"), 
+    ("2886", "兆豐金", "TW"), ("2884", "玉山金", "TW")
 ]
 
 def send_msg(payload):
@@ -26,7 +35,7 @@ def send_msg(payload):
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Discord 狀態碼: {r.status_code}")
         if r.status_code not in [200, 204]:
-            print(f"推播錯誤詳情: {r.text}")
+            print(f"推播錯誤: {r.text}")
     except Exception as e:
         print(f"發送 Discord 異常: {e}")
 
@@ -47,12 +56,11 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
 
 def main():
     print(f"目標 Webhook: {WEBHOOK_URL[:45]}...")
-    
     scored_results = []
     latest_trade_date = datetime.now().strftime("%Y-%m-%d")
 
-    for sid, name in STOCK_POOL:
-        ticker_str = f"{sid}.TW"
+    for sid, name, market in STOCK_POOL:
+        ticker_str = f"{sid}.{market}"
         try:
             stock = yf.Ticker(ticker_str)
             df = stock.history(period="3mo", interval="1d")
@@ -81,52 +89,65 @@ def main():
 
             est_money_mil = (today_close * today_vol) / 100_000_000
 
-            # 基礎門檻
+            # 門檻：站上月線
             if today_close < ma20:
                 continue
 
             score = 0
             reasons = []
 
-            # 均線多頭 (+25)
+            # 1. 均線多頭 (+25)
             if today_close > ma5 > ma10 > ma20 and ma20_slope > 0:
                 score += 25
-                reasons.append("均線多頭 (20MA向上)")
+                reasons.append("均線多頭排列")
 
-            # 突破20日高 (+20)
+            # 2. 突破 20 日高 (+20)
             high_20d = float(close_s.iloc[-21:-1].max())
             if today_close > high_20d:
                 score += 20
-                reasons.append("突破20日新高")
+                reasons.append("突破近20日新高")
 
-            # 爆量表態 (+20)
+            # 3. 帶量表態 (+20)
             if vol_ma5 > 0 and (today_vol / vol_ma5) >= 1.2:
                 score += 20
                 reasons.append(f"帶量表態 (量比 {round(today_vol/vol_ma5, 1)}x)")
 
-            # 實體紅K (+15)
+            # 4. 實體紅 K (+15)
             k_range = today_high - today_low
             if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
                 score += 15
                 reasons.append("實體紅K收高")
 
-            # RSI & MACD (+20)
+            # 5. RSI & MACD (+20)
             rsi = float(calculate_rsi(close_s).iloc[-1])
             _, _, hist = calculate_macd(close_s)
             if 50 <= rsi <= 75 and hist.iloc[-1] > 0:
                 score += 20
                 reasons.append("MACD偏多 / RSI強勢區")
 
-            # 上影線扣分
+            # 扣分機制
             if k_range > 0 and (today_high - today_close) / k_range > 0.4:
                 score -= 15
-                reasons.append("上影線偏長 (-15)")
+                reasons.append("上影線偏長")
+
+            # 計算進出場建議價位
+            entry_low = round(min(ma5, today_close * 0.985), 2)
+            entry_high = round(today_close * 1.005, 2)
+            
+            # 止損設為月線 (20MA) 稍微下緣或 4% 防守
+            sl_price = round(max(ma20 * 0.985, today_close * 0.94), 2)
+            
+            # 止盈依據風險報酬比 1:1.5 與 1:2.5
+            risk_unit = today_close - sl_price
+            tp1_price = round(today_close + (risk_unit * 1.5), 2)
+            tp2_price = round(today_close + (risk_unit * 2.5), 2)
 
             scored_results.append({
                 "sid": sid,
                 "name": name,
-                "close": round(today_close, 2),
-                "ma20": round(ma20, 2),
+                "entry_range": f"{entry_low} ~ {entry_high}",
+                "tp_str": f"{tp1_price} / {tp2_price}",
+                "sl_price": sl_price,
                 "turnover_mil": round(est_money_mil, 2),
                 "score": score,
                 "reasons": reasons
@@ -135,15 +156,20 @@ def main():
         except Exception as e:
             print(f"分析 {sid} 出錯: {e}")
 
-    # 排序取前 5 檔
     top_picks = sorted(scored_results, key=lambda x: x["score"], reverse=True)[:5]
     
     fields = []
     for item in top_picks:
-        reasons_str = "、".join(item["reasons"]) if item["reasons"] else "符合多頭支撐"
+        reasons_str = "、".join(item["reasons"]) if item["reasons"] else "多頭結構完整"
         fields.append({
-            "name": f"🎯 【{item['sid']} {item['name']}】 綜合評分: {item['score']} 分",
-            "value": f"• **收盤價**: `{item['close']}` 元 (防守月線: `{item['ma20']}`)\n• **預估成交額**: `{item['turnover_mil']}` 億元\n• **型態特徵**: {reasons_str}",
+            "name": f"🎯 【{item['sid']} {item['name']}】",
+            "value": (
+                f"• 🟢 **建議進場區間**: `{item['entry_range']}` 元\n"
+                f"• 🎯 **建議止盈價位**: `{item['tp_str']}` 元 (TP1 / TP2)\n"
+                f"• 🛑 **建議止損價位**: `{item['sl_price']}` 元\n"
+                f"• 📊 **預估成交額**: `{item['turnover_mil']}` 億元\n"
+                f"• 🔍 **形態特徵**: {reasons_str}"
+            ),
             "inline": False
         })
 
@@ -151,11 +177,10 @@ def main():
         "username": "台股量化選股機器人",
         "avatar_url": "https://cdn-icons-png.flaticon.com/512/3314/3314547.png",
         "embeds": [{
-            "title": f"📊 台股高勝率篩選報告 ({latest_trade_date})",
-            "description": f"✅ **掃描執行完畢**\n共篩選 {len(STOCK_POOL)} 檔權值主流股，精選前 5 名多頭標的：",
-            "color": 3066993 if (top_picks and top_picks[0]["score"] >= 60) else 8421504,
-            "fields": fields if fields else [{"name": "提示", "value": "目前暫無符合門檻個股"}],
-            "footer": {"text": "量化指標篩選 • 僅供策略參考"}
+            "title": f"📊 台股策略選股通知 ({latest_trade_date})",
+            "description": f"已完成主流標的形態結構分析，篩選出最佳進場標的：",
+            "color": 3066993,
+            "fields": fields if fields else [{"name": "提示", "value": "目前暫無符合形態門檻個股"}]
         }]
     }
 
