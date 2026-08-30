@@ -189,7 +189,7 @@ def main():
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # ----------------- 妖股獵人判斷 (放大 TP 目標，捕捉狂飆利潤) -----------------
+                # ----------------- 妖股獵人判斷 -----------------
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -203,9 +203,12 @@ def main():
                     m_entry_high = round(today_close * 1.003, 2)
                     m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
                     
-                    # 🚀 妖股專屬放大 TP：以箱體震幅的 3.0 倍計算，或至少距離現價 +20% 以上作為飆股目標價
                     box_height = recent_high_20d - recent_low_20d
                     m_tp = round(max(today_close + box_height * 3.0, today_close * 1.22), 2)
+
+                    # 計算預估損益趴數
+                    m_tp_pct = round(((m_tp - today_close) / today_close) * 100, 2)
+                    m_sl_pct = round(((m_sl - today_close) / today_close) * 100, 2)
 
                     monster_stocks.append({
                         "sid": sid,
@@ -214,8 +217,8 @@ def main():
                         "close": f"{today_close:.2f}",
                         "vol_ratio": round(today_vol / vol_ma5, 1),
                         "entry": f"{m_entry_low} ~ {m_entry_high}",
-                        "tp": m_tp,
-                        "sl": m_sl
+                        "tp": f"{m_tp} (+{m_tp_pct}%)",
+                        "sl": f"{m_sl} ({m_sl_pct}%)"
                     })
 
                 # ----------------- 常規強勢股判斷 -----------------
@@ -266,14 +269,18 @@ def main():
                     swing_range = today_close - float(low_s.iloc[-15:].min())
                     tp_price = round(today_close + max(swing_range, (entry_high - sl_price) * 1.8), 2)
 
+                # 計算常規股預估損益趴數
+                tp_pct = round(((tp_price - today_close) / today_close) * 100, 2)
+                sl_pct = round(((sl_price - today_close) / today_close) * 100, 2)
+
                 scored_results.append({
                     "sid": sid,
                     "name": name,
                     "industry": industry,
                     "close": f"{today_close:.2f}",
                     "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
-                    "tp": tp_price,
-                    "sl": sl_price,
+                    "tp": f"{tp_price} (+{tp_pct}%)",
+                    "sl": f"{sl_price} ({sl_pct}%)",
                     "score": score,
                     "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
                 })
@@ -341,7 +348,7 @@ def main():
                 "inline": False
             })
 
-    # 3. 妖股獵人區塊 (置底，TP 目標已大幅放寬以捕捉飆股行情)
+    # 3. 妖股獵人區塊 (置底，無多餘圖示，帶有完整損益趴數)
     if monster_stocks:
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
         fields.append({
@@ -355,8 +362,8 @@ def main():
                 "value": (
                     f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
                     f"> **進場**: `{m['entry']}`\n"
-                    f"> **止盈 (TP)**: `{m['tp']}` 🚀\n"
-                    f"> **止損 (SL)**: `{m['sl']}` 🛡️"
+                    f"> **止盈 (TP)**: `{m['tp']}`\n"
+                    f"> **止損 (SL)**: `{m['sl']}`"
                 ),
                 "inline": True
             })
@@ -368,7 +375,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股全方位{session_title}報告 ({latest_trade_date})",
-            "description": "已完成",
+            "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
             "color": 3447003,
             "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
