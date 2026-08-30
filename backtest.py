@@ -7,8 +7,9 @@ import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
 TZ_TW = timezone(timedelta(hours=8))
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 
-# 回測標的清單（與實盤配置 100% 一致）
+# 回測標的清單（與實盤配置一致）
 SYMBOLS = {
     'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
     'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
@@ -34,6 +35,20 @@ SYMBOLS = {
 
 START_BALANCE = 100.0  # 初始本金 (USDT)
 RISK_PCT = 0.01        # 單筆風控 1%
+
+def send_discord_safe(content):
+    if not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        if len(content) <= 1900:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
+        else:
+            parts = [content[i:i+1800] for i in range(0, len(content), 1800)]
+            for p in parts:
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": p}, timeout=8)
+                time.sleep(0.5)
+    except Exception:
+        pass
 
 def fetch_historical_data(cfg):
     """取得過去 30 天 15m K 線數據"""
@@ -92,7 +107,6 @@ def backtest_single_symbol(sym, cfg):
 
         # 1. 持倉狀態管理 (檢查 SL 與 分批 TP)
         if in_position:
-            # 觸發止損
             if bar['l'] <= sl_price:
                 exit_price = sl_price
                 loss_per_unit = exit_price - entry_price
@@ -105,7 +119,6 @@ def backtest_single_symbol(sym, cfg):
                 in_position = False
                 continue
 
-            # 觸發 TP1 (平倉 50%)
             if not tp1_hit and bar['h'] >= tp1_price:
                 tp1_hit = True
                 gain_per_unit = tp1_price - entry_price
@@ -114,7 +127,6 @@ def backtest_single_symbol(sym, cfg):
                     'entry': entry_price, 'exit': tp1_price, 'pnl': (qty * 0.5) * gain_per_unit, 'type': 'TP1'
                 })
 
-            # 觸發 TP2 (平倉剩餘 50%)
             if tp1_hit and bar['h'] >= tp2_price:
                 gain_per_unit = tp2_price - entry_price
                 trades.append({
@@ -124,7 +136,7 @@ def backtest_single_symbol(sym, cfg):
                 in_position = False
                 continue
 
-        # 2. 開倉信號掃描 (無持倉時)
+        # 2. 開倉信號掃描
         if not in_position:
             sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
@@ -146,7 +158,7 @@ def backtest_single_symbol(sym, cfg):
 
                 price_diff = abs(entry_price - sl_price)
                 if price_diff > 0:
-                    qty = (START_BALANCE * RISK_PCT) / price_diff  # 1% 動態風控倉位
+                    qty = (START_BALANCE * RISK_PCT) / price_diff
                     in_position = True
                     tp1_hit = False
                     entry_time = bar['time']
@@ -167,7 +179,9 @@ def run_full_backtest():
         all_trades.extend(t_list)
 
     if not all_trades:
-        print("\n回測期間內無觸發交易。")
+        msg = "📈 **[1個月策略回測報告]**\n回測期間內無觸發交易。"
+        print(f"\n{msg}")
+        send_discord_safe(msg)
         return
 
     df_res = pd.DataFrame(all_trades)
@@ -179,21 +193,40 @@ def run_full_backtest():
     final_balance = START_BALANCE + total_pnl
     roi = (total_pnl / START_BALANCE) * 100
 
-    print("\n================== [回測綜合統計] ==================")
-    print(f"總平倉次數 : {total_trades} 次")
-    print(f"勝率 (Win Rate)  : {win_rate:.2f}% (勝: {win_trades} / 負: {loss_trades})")
-    print(f"總淨盈虧 (PnL)   : {total_pnl:+.2f} USDT")
-    print(f"最終資金餘額     : ${final_balance:.2f} USDT (報酬率: {roi:+.2f}%)")
-    print("====================================================\n")
-
-    print("各標的詳細表現:")
     summary_by_sym = df_res.groupby('symbol').agg(
         trades=('pnl', 'count'),
         wins=('pnl', lambda x: (x > 0).sum()),
         pnl=('pnl', 'sum')
     )
     summary_by_sym['win_rate'] = (summary_by_sym['wins'] / summary_by_sym['trades']) * 100
-    print(summary_by_sym[['trades', 'wins', 'win_rate', 'pnl']].to_string())
+    table_str = summary_by_sym[['trades', 'wins', 'win_rate', 'pnl']].to_string()
+
+    print("\n================== [回測綜合統計] ==================")
+    print(f"總平倉次數 : {total_trades} 次")
+    print(f"勝率 (Win Rate)  : {win_rate:.2f}% (勝: {win_trades} / 負: {loss_trades})")
+    print(f"總淨盈虧 (PnL)   : {total_pnl:+.2f} USDT")
+    print(f"最終資金餘額     : ${final_balance:.2f} USDT (報酬率: {roi:+.2f}%)")
+    print("====================================================\n")
+    print("各標的詳細表現:")
+    print(table_str)
+
+    # 彙整推播至 Discord
+    dc_report = (
+        "📈 **[15m 策略 1 個月歷史回測報告]**\n"
+        "```text\n"
+        f"初始本金: ${START_BALANCE:.2f} USDT | 單筆風控: {RISK_PCT*100:.1f}%\n"
+        f"總交易次數: {total_trades} 次 (勝: {win_trades} / 負: {loss_trades})\n"
+        f"策略勝率: {win_rate:.2f}%\n"
+        f"總淨盈虧: {total_pnl:+.2f} USDT\n"
+        f"最終餘額: ${final_balance:.2f} USDT (總報酬率: {roi:+.2f}%)\n"
+        "----------------------------------------------------\n"
+        f"{table_str}\n"
+        "----------------------------------------------------\n"
+        "```"
+    )
+    print("\n>>> 正在發送回測報告至 Discord...")
+    send_discord_safe(dc_report)
+    print(">>> Discord 推播完成！")
 
 if __name__ == '__main__':
     run_full_backtest()
