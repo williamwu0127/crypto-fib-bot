@@ -1,3 +1,10 @@
+"""
+Quantitative Backtest Engine: Hybrid Multi-Asset Strategy
+- Crypto & Gold (15m): Trend-Following Fibonacci Retracement + Trailing SL
+- US Stocks (1h): EMA Pullback Trend Following
+- Risk Management: 1% Dynamic Risk Dynamic Compounding
+"""
+
 import os
 import time
 import requests
@@ -7,17 +14,20 @@ import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
 # ==================== 1. Webhook 設定 ====================
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
+DISCORD_WEBHOOK_URL = os.getenv(
+    "DISCORD_WEBHOOK_URL",
+    "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
+)
 
-# ==================== 2. 標的配置 ====================
+# ==================== 2. 標的與策略配置 ====================
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_opt'},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
-    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'stock_pullback'},
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_opt'},        # BTC 專屬防雜訊優化 (1.2R / 2.5R)
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},     # ETH 標準斐波順勢 (前高低點 / 1.272擴展)
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},     # SOL 標準斐波順勢
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},     # BNB 標準斐波順勢
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},     # DOGE 標準斐波順勢
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'mode': 'crypto_fib'},     # 黃金標準斐波順勢
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'stock_pullback'}, # 美股 1h 均線回踩 (1.5R / 3.0R)
     'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1h',  'mode': 'stock_pullback'},
     'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1h',  'mode': 'stock_pullback'},
     'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'stock_pullback'},
@@ -32,8 +42,8 @@ SYMBOLS = {
     'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1h',  'mode': 'stock_pullback'}
 }
 
-INITIAL_WALLET = 100.0
-RISK_PCT = 0.01
+INITIAL_WALLET = 100.0  # 初始本金 ($100 USDT)
+RISK_PCT = 0.01        # 1% 動態風控
 
 def format_full_num(val, max_dec=8):
     try:
@@ -57,12 +67,12 @@ def send_discord_safe(content):
     except Exception as e:
         print(f"⚠️ Discord 推播失敗: {e}", flush=True)
 
-# ==================== 3. 歷史數據抓取 ====================
+# ==================== 3. 數據抓取與指標計算 ====================
 def fetch_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
             now_ms = int(time.time() * 1000)
-            start_ms = now_ms - (365 * 24 * 60 * 60 * 1000)  # 加密貨幣抓取 1 年
+            start_ms = now_ms - (365 * 24 * 60 * 60 * 1000)  # 加密貨幣抓取 1 年 (365 天)
             all_klines = []
             curr_start = start_ms
             
@@ -84,7 +94,7 @@ def fetch_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            # 美股抓取 60 天 1h 數據
+            # 美股抓取 60 天 1h
             df = yf.download(cfg['s'], period="60d", interval="1h", progress=False)
             if df is not None and not df.empty and len(df) > 30:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -118,10 +128,10 @@ def prepare_indicators(df):
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
     return df
 
-# ==================== 4. 回測撮合與複利滾動 ====================
+# ==================== 4. 回測撮合與複利滾動引擎 ====================
 def run_backtest():
     print("=" * 60, flush=True)
-    print(f"啟動【實盤對齊回測】加密1年 (365d) + 美股60天 (60d) 全域高精度複利", flush=True)
+    print("啟動【實盤對齊回測】加密1年 (365d) + 美股60天 (60d) 全域高精度複利", flush=True)
     print(f"初始本金: ${format_full_num(INITIAL_WALLET)} USDT | 風控: 1.0%", flush=True)
     print("=" * 60 + "\n", flush=True)
 
@@ -273,7 +283,7 @@ def run_backtest():
 
                 # B. BTC 15m 盈虧比優化 (btc_opt: 1.2R / 2.5R)
                 elif mode == 'btc_opt':
-                    sub = df.iloc[max(0, idx-25):idx+1]
+                    sub = df.iloc[-25:]
                     h, l = sub['h'].max(), sub['l'].min()
                     wave = h - l
                     if wave > 0 and (wave / l) >= 0.008:
@@ -302,7 +312,7 @@ def run_backtest():
 
                 # C. 主流幣 & 黃金 15m 斐波順勢 (crypto_fib)
                 else:
-                    sub = df.iloc[max(0, idx-25):idx+1]
+                    sub = df.iloc[-25:]
                     h, l = sub['h'].max(), sub['l'].min()
                     wave = h - l
                     if wave > 0 and (wave / l) >= 0.005:
