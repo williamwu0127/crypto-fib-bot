@@ -6,13 +6,15 @@ import numpy as np
 import yfinance as yf
 import hmac
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
+# Binance API Setup
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 BASE_URL = "https://fapi.binance.com"
+TZ_TW = timezone(timedelta(hours=8))
 
 SYMBOLS = {
     'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0, 'trade': True},
@@ -157,7 +159,8 @@ def get_market_data(cfg):
 def scan_signals():
     wallet_balance = get_wallet_balance()
     risk_amount = wallet_balance * 0.01
-    now_str = datetime.now().strftime("%H:%M")
+    now_tw = datetime.now(TZ_TW)
+    now_str = now_tw.strftime("%H:%M")
     
     summary_lines = []
     trade_signals = []
@@ -182,7 +185,7 @@ def scan_signals():
         bar = df.iloc[-1]
         prev_bar = df.iloc[-2]
         ema_status = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
-        market_status = " (休市)" if (cfg['t'] == 'stock' and (datetime.now().weekday() >= 5)) else ""
+        market_status = " (休市)" if (cfg['t'] == 'stock' and (now_tw.weekday() >= 5)) else ""
         summary_lines.append(f"{sym.ljust(5)} | 現價: {bar['c']:>9.2f} USDT | EMA: {ema_status} | RSI: {bar['rsi']:.1f}{market_status}")
 
         sub = df.iloc[-25:]
