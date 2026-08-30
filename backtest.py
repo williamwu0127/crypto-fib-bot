@@ -32,8 +32,8 @@ SYMBOLS = {
     'SNDK':  {'t': 'stock',   's': 'SNDK'}
 }
 
-START_BALANCE = 100.0
-RISK_PCT = 0.01
+START_BALANCE = 100.0  # 初始本金 USDT
+RISK_PCT = 0.01        # 單筆動態風控 1%
 
 def send_discord_safe(content):
     if not DISCORD_WEBHOOK_URL:
@@ -52,9 +52,9 @@ def send_discord_safe(content):
 def fetch_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=1h&limit=750"
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=1000"
             res = requests.get(url, timeout=10).json()
-            if isinstance(res, list) and len(res) > 100:
+            if isinstance(res, list) and len(res) > 200:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
@@ -62,8 +62,8 @@ def fetch_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="1mo", interval="1h", progress=False)
-            if df is not None and not df.empty and len(df) > 50:
+            df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
+            if df is not None and not df.empty and len(df) > 100:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -77,9 +77,10 @@ def fetch_historical_data(cfg):
 
 def backtest_single_symbol(sym, cfg):
     df = fetch_historical_data(cfg)
-    if df is None or len(df) < 60:
+    if df is None or len(df) < 100:
         return [], None, None
 
+    # 技術指標運算
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -99,47 +100,36 @@ def backtest_single_symbol(sym, cfg):
     entry_price, sl_price, tp1_price, tp2_price = 0, 0, 0, 0
     tp1_hit = False
     qty = 0
-    entry_time = None
 
     for i in range(50, len(df)):
         bar = df.iloc[i]
         prev_bar = df.iloc[i - 1]
 
+        # 持倉處理 (SL / TP1 / TP2)
         if in_position:
             if bar['l'] <= sl_price:
                 exit_price = sl_price
-                loss_per_unit = exit_price - entry_price
                 remaining_qty = qty * 0.5 if tp1_hit else qty
-                pnl = remaining_qty * loss_per_unit
-                trades.append({
-                    'symbol': sym, 'entry_time': entry_time, 'exit_time': bar['time'],
-                    'entry': entry_price, 'exit': exit_price, 'pnl': pnl, 'type': 'SL'
-                })
+                pnl = remaining_qty * (exit_price - entry_price)
+                trades.append({'symbol': sym, 'pnl': pnl, 'type': 'SL'})
                 in_position = False
                 continue
 
             if not tp1_hit and bar['h'] >= tp1_price:
                 tp1_hit = True
-                gain_per_unit = tp1_price - entry_price
-                trades.append({
-                    'symbol': sym, 'entry_time': entry_time, 'exit_time': bar['time'],
-                    'entry': entry_price, 'exit': tp1_price, 'pnl': (qty * 0.5) * gain_per_unit, 'type': 'TP1'
-                })
+                trades.append({'symbol': sym, 'pnl': (qty * 0.5) * (tp1_price - entry_price), 'type': 'TP1'})
 
             if tp1_hit and bar['h'] >= tp2_price:
-                gain_per_unit = tp2_price - entry_price
-                trades.append({
-                    'symbol': sym, 'entry_time': entry_time, 'exit_time': bar['time'],
-                    'entry': entry_price, 'exit': tp2_price, 'pnl': (qty * 0.5) * gain_per_unit, 'type': 'TP2'
-                })
+                trades.append({'symbol': sym, 'pnl': (qty * 0.5) * (tp2_price - entry_price), 'type': 'TP2'})
                 in_position = False
                 continue
 
+        # 開倉判定 (EMA多頭 + Fib 0.618回撤 + RSI回升)
         if not in_position:
-            sub = df.iloc[max(0, i-35):i+1]
+            sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
-            if wave <= 0 or (wave / l) < 0.01:
+            if wave <= 0 or (wave / l) < 0.005:
                 continue
 
             fib_0618_l = h - (wave * 0.618)
@@ -150,7 +140,7 @@ def backtest_single_symbol(sym, cfg):
                 entry_price = bar['c']
                 sl_price = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1_price = h if h > entry_price else entry_price + abs(entry_price - sl_price)
-                tp2_price = h + (wave * 0.382)
+                tp2_price = h + (wave * 0.272)
                 if tp2_price <= tp1_price:
                     tp2_price = tp1_price + abs(entry_price - sl_price)
 
@@ -159,15 +149,16 @@ def backtest_single_symbol(sym, cfg):
                     qty = (START_BALANCE * RISK_PCT) / price_diff
                     in_position = True
                     tp1_hit = False
-                    entry_time = bar['time']
 
     return trades, start_date, end_date
 
 def run_full_backtest():
+    print(">>> 正在進行 20 檔標的 1 個月 15m 策略回測...")
     all_trades = []
     earliest_start, latest_end = None, None
 
     for sym, cfg in SYMBOLS.items():
+        print(f"回測計算中: {sym.ljust(5)} ...")
         t_list, s_date, e_date = backtest_single_symbol(sym, cfg)
         if s_date and (earliest_start is None or s_date < earliest_start):
             earliest_start = s_date
@@ -176,15 +167,16 @@ def run_full_backtest():
         all_trades.extend(t_list)
 
     if not all_trades:
+        print("回測期間內無交易產生。")
         return
 
     df_res = pd.DataFrame(all_trades)
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0])
-    overall_win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
+    overall_win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0.0
     total_pnl = df_res['pnl'].sum()
     final_balance = START_BALANCE + total_pnl
-    roi_pct = (total_pnl / START_BALANCE) * 100
+    roi_pct = ((final_balance - START_BALANCE) / START_BALANCE) * 100
 
     symbol_lines = []
     for sym in SYMBOLS.keys():
@@ -196,18 +188,20 @@ def run_full_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 1hr K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${START_BALANCE:.1f} USDT\n"
-        f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:+.2f}%)\n"
+        f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:.2f}%)\n"
         f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.1f}%\n"
         "----------------------------------------------------\n"
         + "\n".join(symbol_lines) + "\n"
         "```"
     )
 
-    print(report_text)
+    print("\n" + report_text)
+    print(">>> 正在發送至 Discord...")
     send_discord_safe(report_text)
+    print(">>> 完成推播！")
 
 if __name__ == '__main__':
     run_full_backtest()
