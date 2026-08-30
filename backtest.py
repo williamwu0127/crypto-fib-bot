@@ -6,7 +6,6 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
-TZ_TW = timezone(timedelta(hours=8))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
@@ -72,7 +71,8 @@ def fetch_1year_historical_data(cfg):
                 df = df.drop_duplicates(subset=['t'])
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
+                # 統一轉為 UTC 時區
+                df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
             df = yf.download(cfg['s'], period="1y", interval="1d", progress=False)
@@ -80,10 +80,14 @@ def fetch_1year_historical_data(cfg):
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
-                df['time'] = df.index.tz_convert('Asia/Taipei') if df.index.tz else df.index
-                res_df = df[['time', 'open', 'high', 'low', 'close', 'volume']].copy()
-                res_df.columns = ['time', 'o', 'h', 'l', 'c', 'v']
-                return res_df.reset_index(drop=True)
+                # 統一轉為 UTC 時區，徹底解決 tz-naive 與 tz-aware 衝突
+                df['time'] = pd.to_datetime(df.index, utc=True)
+                req_cols = ['open', 'high', 'low', 'close', 'volume']
+                if all(c in df.columns for c in req_cols):
+                    res_df = df[req_cols].copy()
+                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    res_df['time'] = df['time'].values
+                    return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
@@ -130,13 +134,14 @@ def run_backtest():
         print("無可用數據。")
         return
 
+    # 全域統一時間戳集合（皆為 UTC）
     all_timestamps = sorted(list(set([t for df in dfs.values() for t in df['time']])))
     current_wallet = INITIAL_WALLET
     positions = {}
     completed_trades = []
     symbol_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in SYMBOLS.keys()}
 
-    print(f"\n>>> 共有 {len(all_timestamps)} 個時間點，開始全域時間軸撮合與複利滾動...")
+    print(f"\n>>> 共有 {len(all_timestamps)} 個統一時間節點，開始撮合與複利滾動...")
 
     for curr_time in all_timestamps:
         for sym, df in dfs.items():
