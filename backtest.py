@@ -1,217 +1,199 @@
 import os
+import time
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from datetime import datetime, timezone, timedelta
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "你的Discord網址")
+TZ_TW = timezone(timedelta(hours=8))
 
-CRYPTO_SYMBOLS = {
-    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
-    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
-    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0},
-    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0},
-    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0},
-    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0}
+# 回測標的清單（與實盤配置 100% 一致）
+SYMBOLS = {
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0},
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0},
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0},
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0},
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0},
+    'CLU':   {'t': 'stock',   's': 'CL=F',     'lev': 100.0},
+    'TSM':   {'t': 'stock',   's': 'TSM',      'lev': 20.0},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'lev': 20.0},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'lev': 20.0},
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'lev': 20.0},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'lev': 20.0},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'lev': 20.0},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'lev': 20.0},
+    'META':  {'t': 'stock',   's': 'META',     'lev': 20.0},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'lev': 20.0},
+    'MU':    {'t': 'stock',   's': 'MU',       'lev': 20.0},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'lev': 20.0},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'lev': 20.0},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
 }
 
-STOCK_SYMBOLS = {
-    'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0},
-    'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0},
-    'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0},
-    'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0},
-    'MSFT': {'t': 'stock',   's': 'MSFT',     'lev': 20.0},
-    'AAPL': {'t': 'stock',   's': 'AAPL',     'lev': 20.0},
-    'GOOGL':{'t': 'stock',   's': 'GOOGL',    'lev': 20.0},
-    'AMZN': {'t': 'stock',   's': 'AMZN',     'lev': 20.0},
-    'META': {'t': 'stock',   's': 'META',     'lev': 20.0},
-    'TSLA': {'t': 'stock',   's': 'TSLA',     'lev': 20.0},
-    'MU':   {'t': 'stock',   's': 'MU',       'lev': 20.0},
-    'GLW':  {'t': 'stock',   's': 'GLW',      'lev': 20.0},
-    'SPCX': {'t': 'stock',   's': 'SPCX',     'lev': 20.0},
-    'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0}
-}
+START_BALANCE = 100.0  # 初始本金 (USDT)
+RISK_PCT = 0.01        # 單筆風控 1%
 
-def get_crypto_data(cfg):
+def fetch_historical_data(cfg):
+    """取得過去 30 天 15m K 線數據"""
     try:
-        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=1000"
-        res = requests.get(url, timeout=10).json()
-        if isinstance(res, list) and len(res) >= 100:
-            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-            df = pd.DataFrame(res, columns=cols)
-            for col in ['o', 'h', 'l', 'c', 'v']:
-                df[col] = df[col].astype(float)
-            df['timestamp'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
-            return df[['timestamp', 'o', 'h', 'l', 'c', 'v']]
+        if cfg['t'] == 'binance':
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=1000"
+            res = requests.get(url, timeout=10).json()
+            if isinstance(res, list) and len(res) > 200:
+                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+                df = pd.DataFrame(res, columns=cols)
+                for col in ['o', 'h', 'l', 'c', 'v']:
+                    df[col] = df[col].astype(float)
+                df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
+                return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+        else:
+            df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
+            if df is not None and not df.empty and len(df) > 100:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.rename(columns=str.lower)
+                df['time'] = df.index.tz_convert('Asia/Taipei') if df.index.tz else df.index
+                res_df = df[['time', 'open', 'high', 'low', 'close', 'volume']].copy()
+                res_df.columns = ['time', 'o', 'h', 'l', 'c', 'v']
+                return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
 
-def get_stock_data(cfg):
-    try:
-        df = yf.download(cfg['s'], period="59d", interval="15m", progress=False)
-        if df is not None and not df.empty and len(df) >= 50:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df = df.reset_index()
-            cols_lower = [str(c).lower() for c in df.columns]
-            df.columns = cols_lower
-            time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
-            res_df = pd.DataFrame()
-            res_df['timestamp'] = pd.to_datetime(df[time_col]).dt.tz_localize(None)
-            for target, candidates in [('o', ['open']), ('h', ['high']), ('l', ['low']), ('c', ['close']), ('v', ['volume'])]:
-                found = False
-                for cand in candidates:
-                    if cand in df.columns:
-                        res_df[target] = df[cand].astype(float)
-                        found = True
-                        break
-                if not found:
-                    return None
-            res_df = res_df.dropna().reset_index(drop=True)
-            if len(res_df) >= 50:
-                return res_df
-    except Exception:
-        pass
-    return None
+def backtest_single_symbol(sym, cfg):
+    df = fetch_historical_data(cfg)
+    if df is None or len(df) < 100:
+        return []
 
-def run_group_backtest(symbols_dict, data_fetch_func):
-    all_trades = []
-    symbol_stats = {sym: {'trades': 0, 'wins': 0} for sym in symbols_dict.keys()}
-    min_time = None
-    max_time = None
+    # 計算技術指標
+    df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+    tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
+    df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
 
-    for sym, cfg in symbols_dict.items():
-        df = data_fetch_func(cfg)
-        if df is None or len(df) < 50:
-            continue
+    delta = df['c'].diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+    df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
-        t_min = df['timestamp'].min()
-        t_max = df['timestamp'].max()
-        if min_time is None or t_min < min_time:
-            min_time = t_min
-        if max_time is None or t_max > max_time:
-            max_time = t_max
+    trades = []
+    in_position = False
+    entry_price, sl_price, tp1_price, tp2_price = 0, 0, 0, 0
+    tp1_hit = False
+    qty = 0
+    entry_time = None
 
-        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
-        df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
-        tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
-        df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
+    for i in range(50, len(df)):
+        bar = df.iloc[i]
+        prev_bar = df.iloc[i - 1]
 
-        delta = df['c'].diff()
-        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-        df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
+        # 1. 持倉狀態管理 (檢查 SL 與 分批 TP)
+        if in_position:
+            # 觸發止損
+            if bar['l'] <= sl_price:
+                exit_price = sl_price
+                loss_per_unit = exit_price - entry_price
+                remaining_qty = qty * 0.5 if tp1_hit else qty
+                pnl = remaining_qty * loss_per_unit
+                trades.append({
+                    'symbol': sym, 'entry_time': entry_time, 'exit_time': bar['time'],
+                    'entry': entry_price, 'exit': exit_price, 'pnl': pnl, 'type': 'SL'
+                })
+                in_position = False
+                continue
 
-        for i in range(50, len(df) - 15):
-            bar = df.iloc[i]
-            prev_bar = df.iloc[i-1]
-            sub = df.iloc[i-25:i+1]
+            # 觸發 TP1 (平倉 50%)
+            if not tp1_hit and bar['h'] >= tp1_price:
+                tp1_hit = True
+                gain_per_unit = tp1_price - entry_price
+                trades.append({
+                    'symbol': sym, 'entry_time': entry_time, 'exit_time': bar['time'],
+                    'entry': entry_price, 'exit': tp1_price, 'pnl': (qty * 0.5) * gain_per_unit, 'type': 'TP1'
+                })
+
+            # 觸發 TP2 (平倉剩餘 50%)
+            if tp1_hit and bar['h'] >= tp2_price:
+                gain_per_unit = tp2_price - entry_price
+                trades.append({
+                    'symbol': sym, 'entry_time': entry_time, 'exit_time': bar['time'],
+                    'entry': entry_price, 'exit': tp2_price, 'pnl': (qty * 0.5) * gain_per_unit, 'type': 'TP2'
+                })
+                in_position = False
+                continue
+
+        # 2. 開倉信號掃描 (無持倉時)
+        if not in_position:
+            sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
             wave = h - l
             if wave <= 0 or (wave / l) < 0.005:
                 continue
+
             fib_0618_l = h - (wave * 0.618)
-            entry_price = bar['c']
             rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
             cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
 
             if cond_long:
-                sl = min(l, entry_price - (bar['atr'] * 1.5))
-                tp1 = entry_price + abs(entry_price - sl)
-                outcome = None
-                exit_idx = i
-                for j in range(1, 11):
-                    future_bar = df.iloc[i + j]
-                    if future_bar['l'] <= sl:
-                        outcome = 'LOSS'
-                        exit_idx = i + j
-                        break
-                    elif future_bar['h'] >= tp1:
-                        outcome = 'WIN'
-                        exit_idx = i + j
-                        break
-                if outcome:
-                    all_trades.append({
-                        'sym': sym,
-                        'time': bar['timestamp'],
-                        'outcome': outcome
-                    })
+                entry_price = bar['c']
+                sl_price = min(l, entry_price - (bar['atr'] * 1.5))
+                tp1_price = h if h > entry_price else entry_price + abs(entry_price - sl_price)
+                tp2_price = h + (wave * 0.272)
+                if tp2_price <= tp1_price:
+                    tp2_price = tp1_price + abs(entry_price - sl_price)
 
-    all_trades = sorted(all_trades, key=lambda x: x['time'])
-    initial_balance = 100.0
-    balance = initial_balance
-    total_trades = 0
-    total_wins = 0
+                price_diff = abs(entry_price - sl_price)
+                if price_diff > 0:
+                    qty = (START_BALANCE * RISK_PCT) / price_diff  # 1% 動態風控倉位
+                    in_position = True
+                    tp1_hit = False
+                    entry_time = bar['time']
 
-    for trade in all_trades:
-        current_risk = balance * 0.01
-        total_trades += 1
-        symbol_stats[trade['sym']]['trades'] += 1
-        if trade['outcome'] == 'WIN':
-            balance += current_risk * 1.5
-            total_wins += 1
-            symbol_stats[trade['sym']]['wins'] += 1
-        else:
-            balance -= current_risk
+    return trades
 
-    reports = []
-    for sym, stats in symbol_stats.items():
-        t_cnt = stats['trades']
-        w_cnt = stats['wins']
-        w_rate = (w_cnt / t_cnt * 100) if t_cnt > 0 else 0
-        if t_cnt > 0:
-            reports.append(f"{sym} | 交易: {t_cnt}次 | 勝率: {round(w_rate, 1)}%")
+def run_full_backtest():
+    print("==================================================")
+    print(">>> 啟動 1 個月歷史回測 (15m Timeframe / 20 檔標的)")
+    print(f">>> 初始本金: ${START_BALANCE:.2f} USDT | 單筆風控: {RISK_PCT*100:.1f}%")
+    print("==================================================\n")
 
-    overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
-    profit_loss_pct = ((balance - initial_balance) / initial_balance) * 100
-    time_range_str = f"{str(min_time).split()[0]} ~ {str(max_time).split()[0]}" if min_time and max_time else "N/A"
+    all_trades = []
+    for sym, cfg in SYMBOLS.items():
+        print(f"正在回測: {sym.ljust(5)} ...", end=" ")
+        t_list = backtest_single_symbol(sym, cfg)
+        print(f"完成 (產生 {len(t_list)} 筆成交)")
+        all_trades.extend(t_list)
 
-    return time_range_str, initial_balance, balance, profit_loss_pct, total_trades, overall_win_rate, reports
+    if not all_trades:
+        print("\n回測期間內無觸發交易。")
+        return
 
-def run_backtest():
-    crypto_range, c_init, c_bal, c_pl, c_trades, c_win_rate, crypto_reports = run_group_backtest(CRYPTO_SYMBOLS, get_crypto_data)
-    stock_range, s_init, s_bal, s_pl, s_trades, s_win_rate, stock_reports = run_group_backtest(STOCK_SYMBOLS, get_stock_data)
+    df_res = pd.DataFrame(all_trades)
+    total_trades = len(df_res)
+    win_trades = len(df_res[df_res['pnl'] > 0])
+    loss_trades = len(df_res[df_res['pnl'] < 0])
+    win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
+    total_pnl = df_res['pnl'].sum()
+    final_balance = START_BALANCE + total_pnl
+    roi = (total_pnl / START_BALANCE) * 100
 
-    crypto_text = "\n".join(crypto_reports)
-    stock_text = "\n".join(stock_reports)
+    print("\n================== [回測綜合統計] ==================")
+    print(f"總平倉次數 : {total_trades} 次")
+    print(f"勝率 (Win Rate)  : {win_rate:.2f}% (勝: {win_trades} / 負: {loss_trades})")
+    print(f"總淨盈虧 (PnL)   : {total_pnl:+.2f} USDT")
+    print(f"最終資金餘額     : ${final_balance:.2f} USDT (報酬率: {roi:+.2f}%)")
+    print("====================================================\n")
 
-    msg1 = (
-        "📊 **[加密貨幣專區 - 15m 複利回測]**\n"
-        "```text\n"
-        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
-        "回測區間: " + crypto_range + "\n"
-        "初始資金: $" + str(round(c_init, 2)) + " USDT\n"
-        "最終結餘: $" + str(round(c_bal, 2)) + " USDT (" + str(round(c_pl, 2)) + "%)\n"
-        "總交易次數: " + str(c_trades) + " 次 | 綜合勝率: " + str(round(c_win_rate, 1)) + "%\n"
-        "----------------------------------------------------\n"
-        + crypto_text + "\n"
-        "```"
+    print("各標的詳細表現:")
+    summary_by_sym = df_res.groupby('symbol').agg(
+        trades=('pnl', 'count'),
+        wins=('pnl', lambda x: (x > 0).sum()),
+        pnl=('pnl', 'sum')
     )
-
-    msg2 = (
-        "📊 **[美股與商品專區 - 15m 複利回測]**\n"
-        "```text\n"
-        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
-        "回測區間: " + stock_range + "\n"
-        "初始資金: $" + str(round(s_init, 2)) + " USDT\n"
-        "最終結餘: $" + str(round(s_bal, 2)) + " USDT (" + str(round(s_pl, 2)) + "%)\n"
-        "總交易次數: " + str(s_trades) + " 次 | 綜合勝率: " + str(round(s_win_rate, 1)) + "%\n"
-        "----------------------------------------------------\n"
-        + stock_text + "\n"
-        "```"
-    )
-
-    if DISCORD_WEBHOOK_URL and DISCORD_WEBHOOK_URL != "你的Discord網址":
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg1}, timeout=8)
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg2}, timeout=8)
-        except Exception:
-            pass
-
-    print(msg1)
-    print(msg2)
+    summary_by_sym['win_rate'] = (summary_by_sym['wins'] / summary_by_sym['trades']) * 100
+    print(summary_by_sym[['trades', 'wins', 'win_rate', 'pnl']].to_string())
 
 if __name__ == '__main__':
-    run_backtest()
+    run_full_backtest()
