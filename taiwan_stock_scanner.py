@@ -100,8 +100,45 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     hist = (dif - dea) * 2
     return dif, dea, hist
 
+def get_market_analysis():
+    """獲取台股加權指數 (^TWII) 大盤資訊"""
+    try:
+        twii = yf.Ticker("^TWII")
+        df = twii.history(period="1mo", interval="1d")
+        if df.empty or len(df) < 20:
+            return None
+            
+        c_close = float(df['Close'].iloc[-1])
+        p_close = float(df['Close'].iloc[-2])
+        change_pts = c_close - p_close
+        change_pct = (change_pts / p_close) * 100
+        
+        c_vol_bn = float(df['Volume'].iloc[-1]) / 100_000_000 if float(df['Volume'].iloc[-1]) > 0 else 0
+        
+        ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
+        ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+        
+        trend = "🟢 多頭控盤" if c_close > ma20 and ma5 > ma20 else "🔴 空頭弱勢" if c_close < ma20 else "🟡 震盪整理"
+        emoji = "📈" if change_pts > 0 else "📉"
+        
+        return {
+            "close": round(c_close, 2),
+            "change_pts": round(change_pts, 2),
+            "change_pct": round(change_pct, 2),
+            "vol_bn": round(c_vol_bn, 2) if c_vol_bn > 0 else "無資料",
+            "ma20": round(ma20, 2),
+            "trend": trend,
+            "emoji": emoji
+        }
+    except Exception as e:
+        print(f"大盤資料獲取失敗: {e}")
+        return None
+
 def main():
-    print("【步驟 1】即時動態向證交所抓取台股全市場名單與智慧產業別...")
+    print("【步驟 1】獲取大盤行情...")
+    market_data = get_market_analysis()
+
+    print("【步驟 2】即時動態向證交所抓取台股全市場名單與智慧產業別...")
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
@@ -109,7 +146,7 @@ def main():
         print("未獲取到股票清單，結束執行。")
         return
 
-    print("【步驟 2】批次下載全市場歷史量價進行快篩...")
+    print("【步驟 3】批次下載全市場歷史量價進行快篩...")
     chunk_size = 200
     scored_results = []
     monster_stocks = []
@@ -162,12 +199,21 @@ def main():
                 is_breakout_edge = today_close >= recent_high_20d * 0.98
                 
                 if est_money_mil >= 0.8 and is_accumulating_box and is_pre_monster_vol and is_breakout_edge:
+                    # 妖股專屬風控價位（因為爆發力強，止損設在箱體底部下方，約 5%~6% 防守）
+                    m_entry_low = round(today_close * 0.99, 2)
+                    m_entry_high = round(today_close * 1.003, 2)
+                    m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
+                    m_tp = round(today_close + (recent_high_20d - recent_low_20d) * 1.5, 2)
+
                     monster_stocks.append({
                         "sid": sid,
                         "name": name,
                         "industry": industry,
                         "close": f"{today_close:.2f}",
-                        "vol_ratio": round(today_vol / vol_ma5, 1)
+                        "vol_ratio": round(today_vol / vol_ma5, 1),
+                        "entry": f"{m_entry_low} ~ {m_entry_high}",
+                        "tp": m_tp,
+                        "sl": m_sl
                     })
 
                 # ----------------- 常規強勢股判斷 -----------------
@@ -224,8 +270,8 @@ def main():
                     "industry": industry,
                     "close": f"{today_close:.2f}",
                     "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
-                    "tp": f"{tp_price:.2f}",
-                    "sl": f"{sl_price:.2f}",
+                    "tp": tp_price,
+                    "sl": sl_price,
                     "score": score,
                     "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
                 })
@@ -234,7 +280,7 @@ def main():
             print(f"處理批次出錯: {e}")
             continue
 
-    print("【步驟 3】執行產業分散與過濾...")
+    print("【步驟 4】執行產業分散與過濾...")
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
     
     industry_count = {}
@@ -254,7 +300,20 @@ def main():
 
     fields = []
     
-    # 1. 常規 Top 10 區塊 (置頂)
+    # 1. 大盤分析區塊 (置頂)
+    if market_data:
+        sign = "+" if market_data['change_pts'] > 0 else ""
+        fields.append({
+            "name": f"📊 加權指數大盤解析 ({market_data['trend']})",
+            "value": (
+                f"> **收盤點位**: `{market_data['close']}`\n"
+                f"> **單日漲跌**: `{sign}{market_data['change_pts']}` ({sign}{market_data['change_pct']}%) {market_data['emoji']}\n"
+                f"> **防守月線**: `{market_data['ma20']}`"
+            ),
+            "inline": False
+        })
+    
+    # 2. 常規 Top 10 區塊
     fields.append({
         "name": "───────── 🎯 盤後精選 Top 10 ─────────",
         "value": "\u200b",
@@ -280,18 +339,25 @@ def main():
                 "inline": False
             })
 
-    # 2. 妖股獵人區塊 (置底)
+    # 3. 妖股獵人區塊 (置底，加入完整進場、TP、SL 與爆量倍數)
     if monster_stocks:
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
-        monster_lines = []
-        for m in top_monsters:
-            monster_lines.append(f"🔥 **{m['sid']} {m['name']}** ({m['close']}) | {m['industry']} | 爆量 `{m['vol_ratio']}x`")
-        
         fields.append({
-            "name": "───────── 🚨 妖股獵人 ─────────",
-            "value": "> " + "\n> ".join(monster_lines),
+            "name": "───────── 🚨 妖股獵人 (起漲爆量預警) ─────────",
+            "value": "\u200b",
             "inline": False
         })
+        for m in top_monsters:
+            fields.append({
+                "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
+                "value": (
+                    f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
+                    f"> **進場**: `{m['entry']}`\n"
+                    f"> **止盈 (TP)**: `{m['tp']}`\n"
+                    f"> **止損 (SL)**: `{m['sl']}`"
+                ),
+                "inline": True
+            })
 
     hour_utc = datetime.utcnow().hour
     session_title = "盤前掃描" if hour_utc < 5 else "盤後分析"
@@ -300,7 +366,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股全方位{session_title}報告 ({latest_trade_date})",
-            "description": "已完成全市場動態掃描、智慧產業分類與潛伏妖股預警：",
+            "description": "已完成大盤結構判定、全市場動態掃描與潛伏妖股預警：",
             "color": 3447003,
             "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
