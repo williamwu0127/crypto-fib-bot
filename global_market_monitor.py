@@ -1,5 +1,6 @@
 import os
 import requests
+import feedparser
 import yfinance as yf
 from datetime import datetime
 
@@ -24,7 +25,6 @@ def get_weekly_performance(ticker_symbol):
             return None, None, None
             
         latest_close = float(df['Close'].iloc[-1])
-        # 取大約 5 個交易日前（上一週收盤）的價格來計算週漲跌
         prev_week_close = float(df['Close'].iloc[-6])
         weekly_change_pct = round(((latest_close - prev_week_close) / prev_week_close) * 100, 2)
         
@@ -36,8 +36,29 @@ def get_weekly_performance(ticker_symbol):
         print(f"獲取 {ticker_symbol} 失敗: {e}")
         return None, None, None
 
+def fetch_latest_financial_news():
+    """動態抓取 Yahoo Finance 的即時財經新聞 RSS 作為參考"""
+    news_list = []
+    try:
+        # Yahoo Finance 總經與市場新聞 RSS
+        rss_url = "https://finance.yahoo.com/news/rssindex"
+        feed = feedparser.parse(rss_url)
+        
+        # 取前 5 則最新新聞
+        for entry in feed.entries[:5]:
+            title = entry.get('title', '無標題')
+            link = entry.get('link', '#')
+            news_list.append(f"📌 [{title}]({link})")
+    except Exception as e:
+        print(f"動態抓取新聞失敗: {e}")
+        
+    if not news_list:
+        news_list.append("> 目前無法取得即時新聞，請透過各大財經平台關注本週聯準會動向與總經數據。")
+        
+    return news_list
+
 def main():
-    print("【全球宏觀】開始分析美股、亞股與台股上週趨勢...")
+    print("【一週全球市場資訊】開始分析美股、亞股、台股、加密貨幣與即時新聞...")
     
     targets = {
         "🇺🇸 那斯達克 (^IXIC)": "^IXIC",
@@ -45,7 +66,9 @@ def main():
         "🇺🇸 標普 500 (^GSPC)": "^GSPC",
         "🇯🇵 日本日經 225 (^N225)": "^N225",
         "🇰🇷 韓國綜合 (^KS11)": "^KS11",
-        "🇹🇼 台股加權指數 (^TWII)": "^TWII"
+        "🇹🇼 台股加權指數 (^TWII)": "^TWII",
+        "₿ 比特幣 (BTC-USD)": "BTC-USD",
+        "Ξ 以太幣 (ETH-USD)": "ETH-USD"
     }
     
     fields = []
@@ -59,13 +82,23 @@ def main():
                 "inline": True
             })
 
+    # 動態爬取最新財經新聞
+    latest_news = fetch_latest_financial_news()
+    news_text = "\n".join([f"> {item}" for item in latest_news])
+    
+    fields.append({
+        "name": "───────── 📰 即時全球財經新聞快訊 ─────────",
+        "value": news_text,
+        "inline": False
+    })
+
     payload = {
-        "username": "全球市場宏觀雷達",
+        "username": "一週全球市場資訊雷達",
         "embeds": [{
-            "title": f"🌍 跨市場宏觀週報與趨勢預測 ({datetime.now().strftime('%Y-%m-%d')})",
-            "description": "早安！本週全球資金風向與主要指數上週表現總結如下，請作為本週操作規劃之參考：",
+            "title": f"🌍 一週全球市場資訊與宏觀週報 ({datetime.now().strftime('%Y-%m-%d')})",
+            "description": "早安！本週全球資金風向、主要指數、加密貨幣表現以及自動抓取的最新市場動態如下：",
             "color": 15844367,
-            "fields": fields if fields else [{"name": "提示", "value": "暫無數據"}]
+            "fields": fields
         }]
     }
 
