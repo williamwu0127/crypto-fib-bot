@@ -291,7 +291,7 @@ def main():
 
     fields = []
     
-    # 1. 大盤分析區塊
+    # 1. 大盤分析區塊 (置頂)
     if market_data:
         sign = "+" if market_data['change_pts'] > 0 else ""
         fields.append({
@@ -304,20 +304,7 @@ def main():
             "inline": False
         })
     
-    # 2. 妖股獵人區塊
-    if monster_stocks:
-        top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
-        monster_lines = []
-        for m in top_monsters:
-            monster_lines.append(f"🔥 **{m['sid']} {m['name']}** ({m['close']}) | {m['industry']} | 爆量 `{m['vol_ratio']}x`")
-        
-        fields.append({
-            "name": "🚨 妖股獵人 (起漲前夕蓄勢爆量)",
-            "value": "> " + "\n> ".join(monster_lines),
-            "inline": False
-        })
-
-    # 3. 常規 Top 10 區塊
+    # 2. 常規 Top 10 區塊
     fields.append({
         "name": "───────── 🎯 盤後精選 Top 10 ─────────",
         "value": "\u200b",
@@ -342,6 +329,19 @@ def main():
                 "value": "\u200b",
                 "inline": False
             })
+
+    # 3. 妖股獵人區塊 (移至最底部)
+    if monster_stocks:
+        top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
+        monster_lines = []
+        for m in top_monsters:
+            monster_lines.append(f"🔥 **{m['sid']} {m['name']}** ({m['close']}) | {m['industry']} | 爆量 `{m['vol_ratio']}x`")
+        
+        fields.append({
+            "name": "───────── 🚨 妖股獵人 ─────────",
+            "value": "> " + "\n> ".join(monster_lines),
+            "inline": False
+        })
 
     hour_utc = datetime.utcnow().hour
     session_title = "盤前掃描" if hour_utc < 5 else "盤後分析"
