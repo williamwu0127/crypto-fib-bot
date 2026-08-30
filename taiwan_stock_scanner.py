@@ -368,7 +368,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股全方位{session_title}報告 ({latest_trade_date})",
-            "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
+            "description": "已完成",
             "color": 3447003,
             "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
