@@ -8,27 +8,25 @@ from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
+# 精選標的配置：加密高頻主力 + 美股強勢龍頭
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'min_wave': 0.01},
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'min_wave': 0.015}, # BTC提高波幅門檻至1.5%
     'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'min_wave': 0.005},
     'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'min_wave': 0.005},
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'min_wave': 0.005},
     'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'min_wave': 0.005},
     'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'min_wave': 0.005},
-    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '4h',  'min_wave': 0.015},
-    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '4h',  'min_wave': 0.015},
-    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '4h',  'min_wave': 0.015},
-    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '4h',  'min_wave': 0.015},
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '4h',  'min_wave': 0.015},
-    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '4h',  'min_wave': 0.015},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '4h',  'min_wave': 0.015},
-    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '4h',  'min_wave': 0.015},
-    'META':  {'t': 'stock',   's': 'META',     'interval': '4h',  'min_wave': 0.015},
-    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '4h',  'min_wave': 0.015},
-    'MU':    {'t': 'stock',   's': 'MU',       'interval': '4h',  'min_wave': 0.015},
-    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '4h',  'min_wave': 0.015},
-    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '4h',  'min_wave': 0.015},
-    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '4h',  'min_wave': 0.015}
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '4h',  'min_wave': 0.02},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '4h',  'min_wave': 0.02},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '4h',  'min_wave': 0.02},
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '4h',  'min_wave': 0.02},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '4h',  'min_wave': 0.02},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '4h',  'min_wave': 0.02},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '4h',  'min_wave': 0.02},
+    'META':  {'t': 'stock',   's': 'META',     'interval': '4h',  'min_wave': 0.02},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '4h',  'min_wave': 0.02},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '4h',  'min_wave': 0.02},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '4h',  'min_wave': 0.02}
 }
 
 INITIAL_WALLET = 100.0
@@ -112,7 +110,7 @@ def prepare_indicators(df):
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【全標的統一斐波那契 0.618 判多模型 + 全域複利】1 年期回測")
+    print(">>> 啟動【BTC波段優化 + 美股強勢龍頭 + 全域複利】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET:.2f} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -187,7 +185,7 @@ def run_backtest():
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (tp1 - entry)
                         current_wallet += pnl_tp1
-                        pos['sl'] = tp1  # 鎖死利潤
+                        pos['sl'] = tp1
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
@@ -218,7 +216,7 @@ def run_backtest():
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (entry - tp1)
                         current_wallet += pnl_tp1
-                        pos['sl'] = tp1  # 鎖死利潤
+                        pos['sl'] = tp1
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
@@ -299,7 +297,7 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 全標的統一斐波0.618回踩(BTC/美股濾網) + TP1鎖利 + 全域複利 (1年期回測)\n"
+        "判定邏輯: BTC(1.5%波幅) + 美股4h強勢龍頭 + 加密15m斐波 + 全域複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET:.1f} USDT\n"
         f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
