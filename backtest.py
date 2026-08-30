@@ -9,26 +9,26 @@ from datetime import datetime, timedelta
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m'},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m'},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m'},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m'},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m'},
-    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '1d'},
-    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1d'},
-    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1d'},
-    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1d'},
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1d'},
-    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1d'},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1d'},
-    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1d'},
-    'META':  {'t': 'stock',   's': 'META',     'interval': '1d'},
-    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1d'},
-    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1d'},
-    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1d'},
-    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1d'},
-    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1d'}
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_sfp'},
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
+    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '4h',  'mode': 'stock_breakout'},
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '4h',  'mode': 'stock_breakout'},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '4h',  'mode': 'stock_breakout'},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '4h',  'mode': 'stock_breakout'},
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '4h',  'mode': 'stock_breakout'},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '4h',  'mode': 'stock_breakout'},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '4h',  'mode': 'stock_breakout'},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '4h',  'mode': 'stock_breakout'},
+    'META':  {'t': 'stock',   's': 'META',     'interval': '4h',  'mode': 'stock_breakout'},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '4h',  'mode': 'stock_breakout'},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '4h',  'mode': 'stock_breakout'},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '4h',  'mode': 'stock_breakout'},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '4h',  'mode': 'stock_breakout'},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '4h',  'mode': 'stock_breakout'}
 }
 
 INITIAL_WALLET = 100.0
@@ -71,16 +71,14 @@ def fetch_1year_historical_data(cfg):
                 df = df.drop_duplicates(subset=['t'])
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                # 統一轉成 tz-naive (無時區) 時間戳
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="1y", interval="1d", progress=False)
-            if df is not None and not df.empty and len(df) > 30:
+            df = yf.download(cfg['s'], period="1y", interval="1h", progress=False)
+            if df is not None and not df.empty and len(df) > 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
-                # 統一轉成 tz-naive (無時區) 時間戳
                 t_idx = pd.to_datetime(df.index)
                 if t_idx.tz is not None:
                     t_idx = t_idx.tz_localize(None)
@@ -90,12 +88,18 @@ def fetch_1year_historical_data(cfg):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
                     res_df['time'] = df['time'].values
-                    return res_df.reset_index(drop=True)
+                    # 合成 4h K 線
+                    res_df = res_df.set_index('time')
+                    res_df_4h = res_df.resample('4h').agg({
+                        'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
+                    }).dropna().reset_index()
+                    return res_df_4h
     except Exception:
         pass
     return None
 
 def prepare_indicators(df):
+    df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -106,11 +110,18 @@ def prepare_indicators(df):
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
+    df['vol_ma20'] = df['v'].rolling(20).mean().fillna(df['v'])
+    
+    # 布林帶
+    df['bb_mid'] = df['c'].rolling(20).mean()
+    df['bb_std'] = df['c'].rolling(20).std().fillna(0)
+    df['bb_upper'] = df['bb_mid'] + (2 * df['bb_std'])
+    df['bb_lower'] = df['bb_mid'] - (2 * df['bb_std'])
     return df
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【美股1D日線 + BTC波幅過濾 + 總倉位全域複利】1 年期回測")
+    print(">>> 啟動【美股4h突破 + BTC SFP獵殺 + 加密Fib全域複利】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET:.2f} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -137,14 +148,13 @@ def run_backtest():
         print("無可用數據。")
         return
 
-    # 全域統一時間戳集合（皆為 tz-naive）
     all_timestamps = sorted(list(set([t for df in dfs.values() for t in df['time']])))
     current_wallet = INITIAL_WALLET
     positions = {}
     completed_trades = []
     symbol_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in SYMBOLS.keys()}
 
-    print(f"\n>>> 共有 {len(all_timestamps)} 個統一時間節點，開始撮合與複利滾動...")
+    print(f"\n>>> 共有 {len(all_timestamps)} 個時間切片，開始逐時間撮合與複利滾動...")
 
     for curr_time in all_timestamps:
         for sym, df in dfs.items():
@@ -152,13 +162,14 @@ def run_backtest():
             if match_row.empty:
                 continue
             idx = match_row.index[0]
-            if idx < 25:
+            if idx < 40:
                 continue
             
             bar = match_row.iloc[0]
             prev_bar = df.iloc[idx - 1]
+            mode = SYMBOLS[sym]['mode']
 
-            # 1. 持倉處理 (多空雙向 + TP1 達成後 SL 移動於此)
+            # 1. 持倉處理
             if sym in positions:
                 pos = positions[sym]
                 side = pos['side']
@@ -170,6 +181,7 @@ def run_backtest():
                 tp1_hit = pos['tp1_hit']
 
                 if side == 'LONG':
+                    # SL 停損
                     if bar['l'] <= sl:
                         rem_qty = qty * 0.5 if tp1_hit else qty
                         pnl = rem_qty * (sl - entry)
@@ -178,18 +190,20 @@ def run_backtest():
                         symbol_stats[sym]['pnl'] += pnl
                         if pnl > 0:
                             symbol_stats[sym]['wins'] += 1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'SL_OUT', 'time': curr_time})
                         del positions[sym]
                         continue
+                    # TP1 觸發
                     if not tp1_hit and bar['h'] >= tp1:
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (tp1 - entry)
                         current_wallet += pnl_tp1
-                        pos['sl'] = tp1  # SL 移動於此
+                        pos['sl'] = entry if mode == 'btc_sfp' else tp1
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
                         completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                    # TP2 觸發
                     if pos['tp1_hit'] and bar['h'] >= tp2:
                         pnl_tp2 = (qty * 0.5) * (tp2 - entry)
                         current_wallet += pnl_tp2
@@ -201,6 +215,7 @@ def run_backtest():
                         continue
 
                 elif side == 'SHORT':
+                    # SL 停損
                     if bar['h'] >= sl:
                         rem_qty = qty * 0.5 if tp1_hit else qty
                         pnl = rem_qty * (entry - sl)
@@ -209,18 +224,20 @@ def run_backtest():
                         symbol_stats[sym]['pnl'] += pnl
                         if pnl > 0:
                             symbol_stats[sym]['wins'] += 1
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'SL_OUT', 'time': curr_time})
                         del positions[sym]
                         continue
+                    # TP1 觸發
                     if not tp1_hit and bar['l'] <= tp1:
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (entry - tp1)
                         current_wallet += pnl_tp1
-                        pos['sl'] = tp1  # SL 移動於此
+                        pos['sl'] = entry if mode == 'btc_sfp' else tp1
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
                         completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                    # TP2 觸發
                     if pos['tp1_hit'] and bar['l'] <= tp2:
                         pnl_tp2 = (qty * 0.5) * (entry - tp2)
                         current_wallet += pnl_tp2
@@ -233,54 +250,89 @@ def run_backtest():
 
             # 2. 開倉信號判定 (全域複利)
             if sym not in positions and current_wallet > 5.0:
-                sub = df.iloc[max(0, idx-25):idx+1]
-                h, l = sub['h'].max(), sub['l'].min()
-                wave = h - l
-                
-                min_wave_ratio = 0.01 if sym == 'BTC' else 0.005
-                if wave <= 0 or (wave / l) < min_wave_ratio:
-                    continue
+                sig_side = None
+                entry, sl, tp1, tp2 = 0, 0, 0, 0
 
-                fib_0618_l = h - (wave * 0.618)
-                fib_0618_s = l + (wave * 0.618)
+                # 模式 A: BTC 專屬 SFP 流動性獵殺 (15m)
+                if mode == 'btc_sfp':
+                    sub = df.iloc[max(0, idx-40):idx]
+                    h, l = sub['h'].max(), sub['l'].min()
+                    vol_surge = bar['v'] >= (bar['vol_ma20'] * 1.3)
+                    
+                    # 獵殺前低回收 (做多)
+                    if (bar['l'] < l) and (bar['c'] > l) and vol_surge:
+                        sig_side = 'LONG'
+                        entry = bar['c']
+                        sl = bar['l'] - (bar['atr'] * 0.2)
+                        tp1 = (h + l) / 2.0
+                        tp2 = h
+                    # 獵殺前高回落 (做空)
+                    elif (bar['h'] > h) and (bar['c'] < h) and vol_surge:
+                        sig_side = 'SHORT'
+                        entry = bar['c']
+                        sl = bar['h'] + (bar['atr'] * 0.2)
+                        tp1 = (h + l) / 2.0
+                        tp2 = l
 
-                rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-                cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+                # 模式 B: 美股 4h 趨勢突破 (4h)
+                elif mode == 'stock_breakout':
+                    trend_bull = (bar['ema20'] > bar['ema50']) and (bar['c'] > bar['ema200'])
+                    trend_bear = (bar['ema20'] < bar['ema50']) and (bar['c'] < bar['ema200'])
+                    breakout_up = (bar['c'] > bar['bb_upper']) and (bar['v'] > bar['vol_ma20'])
+                    breakout_down = (bar['c'] < bar['bb_lower']) and (bar['v'] > bar['vol_ma20'])
 
-                rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
-                cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+                    if trend_bull and breakout_up:
+                        sig_side = 'LONG'
+                        entry = bar['c']
+                        sl = entry - (bar['atr'] * 1.5)
+                        tp1 = entry + (abs(entry - sl) * 1.5)
+                        tp2 = entry + (abs(entry - sl) * 3.0)
+                    elif trend_bear and breakout_down:
+                        sig_side = 'SHORT'
+                        entry = bar['c']
+                        sl = entry + (bar['atr'] * 1.5)
+                        tp1 = entry - (abs(sl - entry) * 1.5)
+                        tp2 = entry - (abs(sl - entry) * 3.0)
 
-                if cond_long:
-                    entry = bar['c']
-                    sl = min(l, entry - (bar['atr'] * 1.5))
-                    tp1 = h if h > entry else entry + abs(entry - sl)
-                    tp2 = h + (wave * 0.272)
-                    if tp2 <= tp1:
-                        tp2 = tp1 + abs(entry - sl)
+                # 模式 C: 加密貨幣 & 黃金 15m 斐波那契回撤 (15m)
+                else:
+                    sub = df.iloc[max(0, idx-25):idx+1]
+                    h, l = sub['h'].max(), sub['l'].min()
+                    wave = h - l
+                    if wave > 0 and (wave / l) >= 0.005:
+                        fib_0618_l = h - (wave * 0.618)
+                        fib_0618_s = l + (wave * 0.618)
+                        rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+                        rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
 
+                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+
+                        if cond_long:
+                            sig_side = 'LONG'
+                            entry = bar['c']
+                            sl = min(l, entry - (bar['atr'] * 1.5))
+                            tp1 = h if h > entry else entry + abs(entry - sl)
+                            tp2 = h + (wave * 0.272)
+                            if tp2 <= tp1:
+                                tp2 = tp1 + abs(entry - sl)
+                        elif cond_short:
+                            sig_side = 'SHORT'
+                            entry = bar['c']
+                            sl = max(h, entry + (bar['atr'] * 1.5))
+                            tp1 = l if l < entry else entry - abs(sl - entry)
+                            tp2 = l - (wave * 0.272)
+                            if tp2 >= tp1:
+                                tp2 = tp1 - abs(sl - entry)
+
+                # 建立持倉
+                if sig_side:
                     price_diff = abs(entry - sl)
                     if price_diff > 0:
                         dynamic_risk = current_wallet * RISK_PCT
                         qty = dynamic_risk / price_diff
                         positions[sym] = {
-                            'side': 'LONG', 'entry': entry, 'sl': sl,
-                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
-                        }
-
-                elif cond_short:
-                    entry = bar['c']
-                    sl = max(h, entry + (bar['atr'] * 1.5))
-                    tp1 = l if l < entry else entry - abs(sl - entry)
-                    tp2 = l - (wave * 0.272)
-                    if tp2 >= tp1:
-                        tp2 = tp1 - abs(sl - entry)
-
-                    price_diff = abs(sl - entry)
-                    if price_diff > 0:
-                        dynamic_risk = current_wallet * RISK_PCT
-                        qty = dynamic_risk / price_diff
-                        positions[sym] = {
-                            'side': 'SHORT', 'entry': entry, 'sl': sl,
+                            'side': sig_side, 'entry': entry, 'sl': sl,
                             'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
                         }
 
@@ -303,7 +355,7 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 多空雙向 + (觸發後 SL 移動於此) + 美股1D/加密15m 全域複利 (1年期回測)\n"
+        "判定邏輯: 美股4h突破 + BTC SFP獵殺 + 加密15m斐波 + 全域複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET:.1f} USDT\n"
         f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
