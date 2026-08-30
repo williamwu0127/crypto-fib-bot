@@ -9,26 +9,26 @@ from datetime import datetime, timedelta
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'min_wave': 0.01},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'min_wave': 0.005},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'min_wave': 0.005},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'min_wave': 0.005},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'min_wave': 0.005},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'min_wave': 0.005},
-    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '4h',  'min_wave': 0.015},
-    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '4h',  'min_wave': 0.015},
-    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '4h',  'min_wave': 0.015},
-    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '4h',  'min_wave': 0.015},
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '4h',  'min_wave': 0.015},
-    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '4h',  'min_wave': 0.015},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '4h',  'min_wave': 0.015},
-    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '4h',  'min_wave': 0.015},
-    'META':  {'t': 'stock',   's': 'META',     'interval': '4h',  'min_wave': 0.015},
-    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '4h',  'min_wave': 0.015},
-    'MU':    {'t': 'stock',   's': 'MU',       'interval': '4h',  'min_wave': 0.015},
-    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '4h',  'min_wave': 0.015},
-    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '4h',  'min_wave': 0.015},
-    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '4h',  'min_wave': 0.015}
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.01},
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
+    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'META':  {'t': 'stock',   's': 'META',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03}
 }
 
 INITIAL_WALLET = 100.0
@@ -74,8 +74,8 @@ def fetch_1year_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="1y", interval="1h", progress=False)
-            if df is not None and not df.empty and len(df) > 50:
+            df = yf.download(cfg['s'], period="1y", interval="1d", progress=False)
+            if df is not None and not df.empty and len(df) > 30:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -88,11 +88,7 @@ def fetch_1year_historical_data(cfg):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
                     res_df['time'] = df['time'].values
-                    res_df = res_df.set_index('time')
-                    res_df_4h = res_df.resample('4h').agg({
-                        'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
-                    }).dropna().reset_index()
-                    return res_df_4h
+                    return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
@@ -112,7 +108,7 @@ def prepare_indicators(df):
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【全標的統一斐波那契回踩 + TP1鎖利 + 高精度小數點全域複利】1 年期回測")
+    print(">>> 啟動【美股1D長波段 + 加密15m高頻 + 高精度全域複利】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -145,7 +141,7 @@ def run_backtest():
     completed_trades = []
     symbol_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in SYMBOLS.keys()}
 
-    print(f"\n>>> 共有 {len(all_timestamps)} 個時間切片，開始逐時間撮合與複利滾動...")
+    print(f"\n>>> 共有 {len(all_timestamps)} 個時間節點，開始撮合與高精度複利滾動...")
 
     for curr_time in all_timestamps:
         for sym, df in dfs.items():
@@ -191,14 +187,14 @@ def run_backtest():
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1', 'time': curr_time})
                     if pos['tp1_hit'] and bar['h'] >= tp2:
                         pnl_tp2 = (qty * 0.5) * (tp2 - entry)
                         current_wallet += pnl_tp2
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp2
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP2', 'time': curr_time})
                         del positions[sym]
                         continue
 
@@ -233,9 +229,10 @@ def run_backtest():
                         del positions[sym]
                         continue
 
-            # 2. 開倉信號判定 (全標的統一斐波那契回撤 + 波幅過濾)
+            # 2. 開倉信號判定 (日線 60 根回溯 / 15m 25 根回溯)
             if sym not in positions and current_wallet > 5.0:
-                sub = df.iloc[max(0, idx-25):idx+1]
+                lookback_len = cfg['lookback']
+                sub = df.iloc[max(0, idx - lookback_len):idx + 1]
                 h, l = sub['h'].max(), sub['l'].min()
                 wave = h - l
                 
@@ -295,12 +292,11 @@ def run_backtest():
         c = r['trades']
         w = r['wins']
         wr = (w / c * 100) if c > 0 else 0.0
-        # 小數點抓到底：顯示完整 4~6 位精確浮點數收益
         symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.2f}% | 收益貢獻: {r['pnl']:+12.6f}")
 
     report_text = (
         "```text\n"
-        "判定邏輯: 全標的斐波0.618回踩 + TP1鎖利 + 全域複利 (1年期高精度回測)\n"
+        "判定邏輯: 美股1D(60日波段) + 加密15m斐波 + TP1鎖利 + 全域高精度複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET} USDT\n"
         f"最終結餘: ${current_wallet:.6f} USDT ({roi_pct:+.4f}%)\n"
