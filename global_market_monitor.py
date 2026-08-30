@@ -37,16 +37,17 @@ def get_weekly_performance(ticker_symbol):
         return None, None, None
 
 def fetch_latest_financial_news():
-    """動態抓取 Google News 財經即時 RSS，確保長度安全並轉為超連結"""
+    """動態抓取 Google 新聞的中文財經與總經 RSS，確保標題為中文並附帶超連結"""
     news_items = []
     try:
-        rss_url = "https://news.google.com/rss/search?q=stock+market+economy+Fed+interest+rate&hl=en-US&gl=US&ceid=US:en"
+        # 使用 Google 新聞中文版搜尋全球股市、經濟、聯準會等關鍵字
+        rss_url = "https://news.google.com/rss/search?q=%E8%82%A1%E5%B8%82+%E7%B6%93%E6%BF%9F+%E8%81%AF%E6%BA%96%E6%9C%83&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
         feed = feedparser.parse(rss_url)
         for entry in feed.entries[:5]:
             title = entry.get('title', '無標題')
             link = entry.get('link', '#')
             
-            # 清理特殊字元
+            # 清理可能破壞 Markdown 的特殊字元
             title = title.replace('[', '').replace(']', '').replace('(', '').replace(')', '')
             if len(title) > 75:
                 title = title[:72] + "..."
@@ -61,7 +62,7 @@ def fetch_latest_financial_news():
     return news_items
 
 def main():
-    print("【一週全球市場資訊】開始分析美股、亞股、台股、加密貨幣與即時新聞...")
+    print("【一週全球市場資訊】開始分析美股、亞股、台股、加密貨幣與中文即時新聞...")
     
     targets = {
         "🇺🇸 那斯達克 (^IXIC)": "^IXIC",
@@ -98,11 +99,10 @@ def main():
     print("發送第一則訊息 (市場行情)...")
     send_msg(payload_market)
 
-    # --- 第二則訊息：即時財經新聞（安全控制字元長度） ---
+    # --- 第二則訊息：中文即時財經新聞超連結 ---
     latest_news = fetch_latest_financial_news()
     news_fields = []
     
-    # 每則新聞獨立成為一個小 field，確保絕對不會超過 1024 字元限制
     for idx, item in enumerate(latest_news, 1):
         news_fields.append({
             "name": f"焦點新聞 {idx}",
@@ -114,12 +114,12 @@ def main():
         "username": "一週全球市場資訊雷達",
         "embeds": [{
             "title": f"📰 即時全球財經新聞與事件快訊 ({datetime.now().strftime('%Y-%m-%d')})",
-            "description": "本週自動抓取的最新財經動態與焦點新聞（點擊標題即可查看原文）：",
+            "description": "本週自動抓取的最新中文財經動態與焦點新聞（點擊標題即可查看原文）：",
             "color": 3447003,
             "fields": news_fields
         }]
     }
-    print("發送第二則訊息 (即時新聞多欄位)...")
+    print("發送第二則訊息 (中文即時新聞)...")
     send_msg(payload_news)
 
 if __name__ == "__main__":
