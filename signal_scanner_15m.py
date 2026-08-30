@@ -4,28 +4,24 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import ccxt
+import hmac
+import hashlib
+from datetime import datetime
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-RISK_PERCENT = 0.01      # 動態 1% 風控
-DEFAULT_BALANCE = 100.0  # 無法獲取錢包時之預設參考本金
+BASE_URL = "https://fapi.binance.com"
 
 SYMBOLS = {
-    # 1. 加密貨幣 (100x 槓桿 / 實盤全自動下單)
-    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'ccxt_s': 'BTC/USDT:USDT',  'lev': 100.0, 'trade': True},
-    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'ccxt_s': 'ETH/USDT:USDT',  'lev': 100.0, 'trade': True},
-    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'ccxt_s': 'SOL/USDT:USDT',  'lev': 100.0, 'trade': True},
-    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'ccxt_s': 'BNB/USDT:USDT',  'lev': 100.0, 'trade': True},
-    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'ccxt_s': 'DOGE/USDT:USDT', 'lev': 100.0, 'trade': True},
-    
-    # 2. 大宗商品 & 貴金屬 (100x 槓桿 / 僅推播)
-    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'ccxt_s': 'PAXG/USDT:USDT', 'lev': 100.0, 'trade': False},
+    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'lev': 100.0, 'trade': True},
+    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'lev': 100.0, 'trade': True},
+    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'lev': 100.0, 'trade': True},
+    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'lev': 100.0, 'trade': True},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'lev': 100.0, 'trade': True},
+    'XAU':  {'t': 'binance', 's': 'PAXGUSDT', 'lev': 100.0, 'trade': False},
     'CLU':  {'t': 'stock',   's': 'CL=F',     'lev': 100.0, 'trade': False},
-    
-    # 3. 美股龍頭 (20x 槓桿 / 僅推播)
     'TSM':  {'t': 'stock',   's': 'TSM',      'lev': 20.0,  'trade': False},
     'NVDA': {'t': 'stock',   's': 'NVDA',     'lev': 20.0,  'trade': False},
     'AMD':  {'t': 'stock',   's': 'AMD',      'lev': 20.0,  'trade': False},
@@ -41,172 +37,111 @@ SYMBOLS = {
     'SNDK': {'t': 'stock',   's': 'SNDK',     'lev': 20.0,  'trade': False}
 }
 
-def clean_error_msg(err_str):
-    err_lower = str(err_str).lower()
-    if "restricted location" in err_lower or "451" in err_lower:
-        return "合約API地區受限 (美國節點IP限制)"
-    elif "insufficient" in err_lower or "balance" in err_lower:
-        return "合約帳戶保證金不足"
-    elif "min notional" in err_lower or "5" in err_lower:
-        return "開倉價值低於幣安 5 USDT 門檻"
-    elif "leverage" in err_lower:
-        return "槓桿倍數設定失敗"
-    elif "invalid api-key" in err_lower or "signature" in err_lower:
-        return "API Key 權限或簽章錯誤"
-    else:
-        first_line = str(err_str).split('\n')[0]
-        if len(first_line) > 50:
-            return first_line[:50] + "..."
-        return first_line
+def sign_query(params):
+    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+    signature = hmac.new(BINANCE_API_SECRET.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    return f"{query_string}&signature={signature}"
 
-def get_exchange():
+def get_wallet_balance():
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        return None
-    return ccxt.binance({
-        'apiKey': BINANCE_API_KEY,
-        'secret': BINANCE_API_SECRET,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'future'}
-    })
+        return 100.0
+    try:
+        ts = int(time.time() * 1000)
+        qs = sign_query({'timestamp': ts})
+        headers = {'X-MBX-APIKEY': BINANCE_API_KEY}
+        r = requests.get(f"{BASE_URL}/fapi/v2/account?{qs}", headers=headers, timeout=6).json()
+        for a in r.get('assets', []):
+            if a['asset'] == 'USDT':
+                return float(a['walletBalance'])
+    except Exception:
+        pass
+    return 100.0
 
-def get_wallet_usdt(exchange):
-    if not exchange:
-        return None, "未配置 API Key"
+def set_leverage(symbol, target_leverage=100):
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return target_leverage
+    headers = {'X-MBX-APIKEY': BINANCE_API_KEY}
+    for lev in [target_leverage, 75, 50, 25, 20, 10, 5]:
+        try:
+            ts = int(time.time() * 1000)
+            qs = sign_query({'symbol': symbol, 'leverage': int(lev), 'timestamp': ts})
+            r = requests.post(f"{BASE_URL}/fapi/v1/leverage?{qs}", headers=headers, timeout=6).json()
+            if 'leverage' in r:
+                return int(r['leverage'])
+        except Exception:
+            pass
+    return 20
+
+def place_binance_trade(symbol, side, entry_price, sl_price, wallet_balance):
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return "僅推播 (未設定 API Key)"
     
-    errors = []
+    actual_lev = set_leverage(symbol, 100)
+    risk_amount = wallet_balance * 0.01
+    price_diff = abs(entry_price - sl_price)
+    if price_diff <= 0:
+        return "下單失敗: 止損距離異常"
+    
+    target_qty = risk_amount / price_diff
+    position_value = target_qty * entry_price
+    
+    if position_value < 5.5:
+        target_qty = 5.5 / entry_price
+        position_value = 5.5
+        sl_price = entry_price - (risk_amount / target_qty) if side == 'BUY' else entry_price + (risk_amount / target_qty)
+    
+    headers = {'X-MBX-APIKEY': BINANCE_API_KEY}
     try:
-        bal = exchange.fetch_balance()
-        if 'info' in bal and 'assets' in bal['info']:
-            for asset in bal['info']['assets']:
-                if asset.get('asset') == 'USDT':
-                    free_val = float(asset.get('availableBalance', 0.0))
-                    return free_val, None
+        ei = requests.get(f"{BASE_URL}/fapi/v1/exchangeInfo", timeout=6).json()
+        qty_precision = 2
+        for s in ei.get('symbols', []):
+            if s['symbol'] == symbol:
+                qty_precision = s['quantityPrecision']
+                break
         
-        free_usdt = float(bal['free'].get('USDT', 0.0))
-        return free_usdt, None
+        qty_str = f"{target_qty:.{qty_precision}f}"
+        ts = int(time.time() * 1000)
+        qs = sign_query({
+            'symbol': symbol,
+            'side': side,
+            'type': 'MARKET',
+            'quantity': qty_str,
+            'timestamp': ts
+        })
+        order_res = requests.post(f"{BASE_URL}/fapi/v1/order?{qs}", headers=headers, timeout=6).json()
+        
+        if 'orderId' in order_res:
+            opp_side = 'SELL' if side == 'BUY' else 'BUY'
+            ts_sl = int(time.time() * 1000)
+            qs_sl = sign_query({
+                'symbol': symbol,
+                'side': opp_side,
+                'type': 'STOP_MARKET',
+                'stopPrice': f"{sl_price:.2f}",
+                'closePosition': 'true',
+                'timestamp': ts_sl
+            })
+            requests.post(f"{BASE_URL}/fapi/v1/order?{qs_sl}", headers=headers, timeout=6)
+            return f"實盤開單成功 ({actual_lev}x | 數量: {qty_str} | 風控鎖定 1%)"
+        else:
+            return f"開單失敗: {order_res.get('msg', '未知錯誤')}"
     except Exception as e:
-        errors.append(str(e))
+        return f"開單異常: {str(e)}"
 
-    try:
-        response = exchange.fapiPrivateV2GetAccount()
-        if 'assets' in response:
-            for asset in response['assets']:
-                if asset.get('asset') == 'USDT':
-                    free_val = float(asset.get('availableBalance', 0.0))
-                    return free_val, None
-    except Exception as e:
-        errors.append(str(e))
-
-    return None, clean_error_msg(" | ".join(errors))
-
-def place_order_with_sl_tp(exchange, sym_key, cfg, side, entry_p, sl_p, tp1_p, tp2_p, risk_usd):
-    if not cfg.get('trade', False):
-        return "未開單: 該標的未開啟實盤功能 (僅推播)"
-    if not exchange:
-        return "未開單: 未配置幣安 API Key"
-
-    market_sym = cfg.get('ccxt_s', sym_key + '/USDT:USDT')
-    try:
-        exchange.load_markets()
-        market = exchange.market(market_sym)
-
-        try:
-            exchange.set_leverage(int(cfg['lev']), market_sym)
-        except Exception as err:
-            return "開單失敗: " + clean_error_msg(err)
-
-        sl_pct = max(abs(entry_p - sl_p) / entry_p, 0.002)
-        notional = risk_usd / sl_pct
-        raw_qty = notional / entry_p
-        qty = float(exchange.amount_to_precision(market_sym, raw_qty))
-
-        if qty * entry_p < 5.0:
-            return "未開單: 開倉價值 ($%.2f USDT) 低於 5 USDT 門檻" % (qty * entry_p)
-
-        order_side = 'buy' if side == 'LONG' else 'sell'
-        close_side = 'sell' if side == 'LONG' else 'buy'
-        sl_price_str = float(exchange.price_to_precision(market_sym, sl_p))
-
-        try:
-            order = exchange.create_order(symbol=market_sym, type='market', side=order_side, amount=qty)
-            order_id = str(order.get('id', 'N/A'))
-        except Exception as err:
-            return "開單失敗: " + clean_error_msg(err)
-
-        try:
-            exchange.create_order(
-                symbol=market_sym,
-                type='STOP_MARKET',
-                side=close_side,
-                amount=qty,
-                params={'stopPrice': sl_price_str, 'reduceOnly': True}
-            )
-        except Exception as err:
-            try:
-                exchange.create_order(symbol=market_sym, type='market', side=close_side, amount=qty)
-            except Exception:
-                pass
-            return "開單失敗 (SL掛單失敗，已緊急平倉撤出: " + clean_error_msg(err) + ")"
-
-        tp1_qty = float(exchange.amount_to_precision(market_sym, qty * 0.5))
-        if tp1_qty > 0:
-            try:
-                tp1_price_str = float(exchange.price_to_precision(market_sym, tp1_p))
-                exchange.create_order(
-                    symbol=market_sym,
-                    type='TAKE_PROFIT_MARKET',
-                    side=close_side,
-                    amount=tp1_qty,
-                    params={'stopPrice': tp1_price_str, 'reduceOnly': True}
-                )
-            except Exception:
-                pass
-
-        tp2_qty = float(exchange.amount_to_precision(market_sym, qty - tp1_qty))
-        if tp2_qty > 0:
-            try:
-                tp2_price_str = float(exchange.price_to_precision(market_sym, tp2_p))
-                exchange.create_order(
-                    symbol=market_sym,
-                    type='TAKE_PROFIT_MARKET',
-                    side=close_side,
-                    amount=tp2_qty,
-                    params={'stopPrice': tp2_price_str, 'reduceOnly': True}
-                )
-            except Exception:
-                pass
-
-        return "✅ 開倉成功 (ID: " + order_id + ") | SL/第一止盈/第二止盈已部署"
-    except Exception as err:
-        return "開單失敗: " + clean_error_msg(err)
-
-def send_discord(content):
-    if not DISCORD_WEBHOOK_URL:
-        print("[No Webhook URL]\n", content)
-        return False
-    try:
-        res = requests.post(DISCORD_WEBHOOK_URL, json={"content": content[:1900]}, timeout=8)
-        return res.status_code in [200, 204]
-    except Exception as e:
-        print("Webhook Error:", e)
-        return False
-
-def get_latest_data(cfg):
+def get_market_data(cfg):
     try:
         if cfg['t'] == 'binance':
-            url = "https://data-api.binance.vision/api/v3/klines?symbol=" + cfg['s'] + "&interval=15m&limit=100"
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=120"
             res = requests.get(url, timeout=6).json()
             if isinstance(res, list) and len(res) >= 60:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
                 df = pd.DataFrame(res, columns=cols)
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
-                dt_tw = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
-                df['time'] = dt_tw.dt.strftime('%H:%M')
-                return df[['time', 'o', 'h', 'l', 'c', 'v']]
+                return df[['o', 'h', 'l', 'c', 'v']]
         else:
-            df = yf.download(cfg['s'], period="7d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) >= 60:
+            df = yf.download(cfg['s'], period="5d", interval="15m", progress=False)
+            if df is not None and not df.empty and len(df) >= 30:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -214,167 +149,97 @@ def get_latest_data(cfg):
                 if all(c in df.columns for c in req_cols):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    idx = df.index
-                    dt_tw = idx.tz_localize('UTC').tz_convert('Asia/Taipei') if idx.tz is None else idx.tz_convert('Asia/Taipei')
-                    res_df['time'] = dt_tw.strftime('%H:%M')
-                    return res_df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+                    return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
 
-def scan_symbol(sym, cfg, exchange, current_risk):
-    df = get_latest_data(cfg)
-    if df is None or len(df) < 60:
-        return None, "%-5s | 休市/無數據" % sym
-
-    df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
-    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+def scan_signals():
+    wallet_balance = get_wallet_balance()
+    risk_amount = wallet_balance * 0.01
+    now_str = datetime.now().strftime("%H:%M")
     
-    tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
-    df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
-
-    delta = df['c'].diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-    df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
-
-    idx = len(df) - 2
-    sub = df.iloc[idx-25:idx+1]
-    h, l = sub['h'].max(), sub['l'].min()
-    wave = h - l
-
-    bar = df.iloc[idx]
-    prev_bar = df.iloc[idx-1]
-    entry_price = bar['c']
-
-    trend_label = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
-    market_flag = " (休市)" if (cfg['t'] == 'stock' and pd.to_datetime('now').weekday() in [5, 6]) else ""
-    status_summary = "%-5s | 現價: %8.2f USDT | EMA: %s | RSI: %4.1f%s" % (sym, entry_price, trend_label, bar['rsi'], market_flag)
-
-    if wave <= 0 or (wave / l) < 0.005:
-        return None, status_summary
-
-    fib_0618_l = h - (wave * 0.618)
-    fib_0382_l = h - (wave * 0.382)
-    fib_0618_s = l + (wave * 0.618)
-    fib_0382_s = l + (wave * 0.382)
-
-    body = abs(bar['c'] - bar['o'])
-    lower_wick = min(bar['o'], bar['c']) - bar['l']
-    upper_wick = bar['h'] - max(bar['o'], bar['c'])
-    atr_val = bar['atr']
-
-    side = None
-    sl, tp1, tp2 = 0.0, 0.0, 0.0
-
-    rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-    cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l)
-    
-    rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
-    cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h)
-
-    if cond_long and (lower_wick >= body * 0.5 or bar['c'] > bar['o']) and rsi_bull:
-        side = "LONG"
-        sl = min(l, entry_price - (atr_val * 1.5))
-        tp1 = max(fib_0382_l, entry_price + abs(entry_price - sl), entry_price + atr_val)
-        tp2 = h
-    elif cond_short and (upper_wick >= body * 0.5 or bar['c'] < bar['o']) and rsi_bear:
-        side = "SHORT"
-        sl = max(h, entry_price + (atr_val * 1.5))
-        tp1 = min(fib_0382_s, entry_price - abs(entry_price - sl), entry_price - atr_val)
-        tp2 = l
-
-    if side:
-        sl_pct = max(abs(entry_price - sl) / entry_price, 0.002)
-        pos_val = current_risk / sl_pct
-
-        order_status = place_order_with_sl_tp(exchange, sym, cfg, side, entry_price, sl, tp1, tp2, current_risk)
-
-        return {
-            'sym': sym,
-            'side': side,
-            'time': bar['time'],
-            'entry': entry_price,
-            'sl': sl,
-            'tp1': tp1,
-            'tp2': tp2,
-            'sl_pct': sl_pct * 100,
-            'pos_val': pos_val,
-            'lev': int(cfg['lev']),
-            'order_status': order_status,
-            'rsi': bar['rsi']
-        }, status_summary
-
-    return None, status_summary
-
-def main():
-    tw_now = pd.to_datetime('now', utc=True).tz_convert('Asia/Taipei')
-    
-    exchange = get_exchange()
-    wallet_raw, wallet_err = get_wallet_usdt(exchange)
-    
-    if wallet_raw is not None:
-        wallet_str = "%.2f USDT" % wallet_raw
-        wallet_balance = wallet_raw
-    else:
-        wallet_str = "無法獲取 (" + wallet_err + ")"
-        wallet_balance = DEFAULT_BALANCE
-
-    current_risk = wallet_balance * RISK_PERCENT
-
-    detected_signals = []
-    market_status = []
+    summary_lines = []
+    trade_signals = []
 
     for sym, cfg in SYMBOLS.items():
-        sig, stat = scan_symbol(sym, cfg, exchange, current_risk)
-        if sig:
-            detected_signals.append(sig)
-        market_status.append(stat)
-        time.sleep(0.05)
+        df = get_market_data(cfg)
+        if df is None or len(df) < 50:
+            summary_lines.append(f"{sym.ljust(5)} | 現價: {'N/A':>10} | 資料不足")
+            continue
 
-    status_table = "\n".join(market_status)
+        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+        tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
+        df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
 
-    if detected_signals:
-        for s in detected_signals:
-            side_tag = "🟢 [LONG / 做多]" if s['side'] == 'LONG' else "🔴 [SHORT / 做空]"
-            pos_v = s['pos_val']
-            lev = s['lev']
-            margin_required = pos_v / lev
+        delta = df['c'].diff()
+        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+        df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
 
-            p_fmt = "%.4f" if s['entry'] < 1 else "%.2f"
+        bar = df.iloc[-1]
+        prev_bar = df.iloc[-2]
+        ema_status = "多頭" if bar['ema50'] >= bar['ema200'] else "空頭"
+        market_status = " (休市)" if (cfg['t'] == 'stock' and (datetime.now().weekday() >= 5)) else ""
+        summary_lines.append(f"{sym.ljust(5)} | 現價: {bar['c']:>9.2f} USDT | EMA: {ema_status} | RSI: {bar['rsi']:.1f}{market_status}")
 
-            lines = [
-                "📊 **[15m 綜合掃描報告] 發現觸發訊號**",
-                "```text",
-                "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔",
-                "合約錢包: " + wallet_str + " | 動態風控: 1% ($" + ("%.2f" % current_risk) + " USDT)",
-                "----------------------------------------------------",
-                status_table,
-                "----------------------------------------------------",
-                side_tag + " **" + s['sym'] + "** 交易建議:",
-                "進場時間 : " + s['time'] + " (台灣時間)",
-                "進場價格 : $" + (p_fmt % s['entry']) + " USDT",
-                "停損價格 : $" + (p_fmt % s['sl']) + " USDT (-" + ("%.2f" % s['sl_pct']) + "% 動態止損)",
-                "第一止盈 : $" + (p_fmt % s['tp1']) + " USDT (獲利目標 / 50% 倉位)",
-                "第二止盈 : $" + (p_fmt % s['tp2']) + " USDT (前波極值 / 50% 倉位)",
-                "開倉規劃 : 槓桿 " + str(lev) + "x | 倉位價值 $" + ("%.2f" % pos_v) + " USDT | 應押保證金 $" + ("%.2f" % margin_required) + " USDT",
-                "實盤執行 : " + s['order_status'],
-                "指標數據 : RSI(14) = " + ("%.1f" % s['rsi']),
-                "```"
-            ]
-            send_discord("\n".join(lines))
-    else:
-        lines = [
-            "📡 **[15m 掃描完成] 目前無觸發訊號**",
-            "```text",
-            "掃描時間: " + tw_now.strftime('%H:%M') + " (台灣時間) | 標的數: 20 檔",
-            "合約錢包: " + wallet_str + " | 動態風控: 1% ($" + ("%.2f" % current_risk) + " USDT)",
-            "----------------------------------------------------",
-            status_table,
-            "```"
-        ]
-        send_discord("\n".join(lines))
+        sub = df.iloc[-25:]
+        h, l = sub['h'].max(), sub['l'].min()
+        wave = h - l
+        if wave <= 0 or (wave / l) < 0.005:
+            continue
+
+        fib_0618_l = h - (wave * 0.618)
+        rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+
+        if cond_long:
+            entry = bar['c']
+            sl = min(l, entry - (bar['atr'] * 1.5))
+            tp1 = entry + abs(entry - sl)
+            tp2 = h
+            
+            exec_status = "僅推播 (未開啟自動開單)"
+            if cfg['trade']:
+                exec_status = place_binance_trade(cfg['s'], 'BUY', entry, sl, wallet_balance)
+            
+            trade_signals.append(
+                f"🟢 [LONG / 做多] **{sym}** 交易建議:\n"
+                f"進場時間 : {now_str} (台灣時間)\n"
+                f"進場價格 : ${entry:.2f} USDT\n"
+                f"停損價格 : ${sl:.2f} USDT (動態風控 1% 鎖定)\n"
+                f"第一止盈 : ${tp1:.2f} USDT (獲利目標 / 50% 倉位)\n"
+                f"第二止盈 : ${tp2:.2f} USDT (前波極值 / 50% 倉位)\n"
+                f"實盤執行 : {exec_status}\n"
+                f"指標數據 : RSI(14) = {bar['rsi']:.1f}"
+            )
+
+    report1 = (
+        "📊 **[15m 綜合掃描報告] 發現觸發訊號**\n"
+        "```text\n"
+        f"掃描時間: {now_str} (台灣時間) | 標的數: 20 檔\n"
+        f"合約錢包: {wallet_balance:.2f} USDT | 動態風控: 1% (${risk_amount:.2f} USDT)\n"
+        "----------------------------------------------------\n"
+        + "\n".join(summary_lines[:10]) + "\n"
+        "```"
+    )
+
+    report2 = (
+        "```text\n"
+        + "\n".join(summary_lines[10:]) + "\n"
+        "----------------------------------------------------\n"
+        "```\n"
+        + ("\n\n".join(trade_signals) if trade_signals else "當前無觸發新單。")
+    )
+
+    if DISCORD_WEBHOOK_URL:
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": report1}, timeout=8)
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": report2}, timeout=8)
+        except Exception:
+            pass
 
 if __name__ == '__main__':
-    main()
+    scan_signals()
