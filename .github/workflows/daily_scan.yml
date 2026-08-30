@@ -1,10 +1,10 @@
-name: Daily Taiwan Stock Scanner
+name: Taiwan Stock Free Scanner
 
 on:
   schedule:
-    # 台灣時間週一至週五 16:30 (UTC 08:30) 執行盤後掃描
+    # 台灣時間週一至週五 16:30 (UTC 08:30) 執行
     - cron: '30 8 * * 1-5'
-  workflow_dispatch: # 支援手動一鍵觸發執行
+  workflow_dispatch: # 支援手動按鈕一鍵執行
 
 jobs:
   run-scanner:
@@ -22,11 +22,10 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install requests pandas numpy FinMind
+          pip install requests pandas numpy yfinance
 
-      - name: Run Scanner Script
+      - name: Run Free Scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |
-          python taiwan_stock_scanner.py
+          python taiwan_stock_free_scanner.py
