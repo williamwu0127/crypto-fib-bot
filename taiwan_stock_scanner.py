@@ -7,25 +7,46 @@ from datetime import datetime
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
+# 擴充為台股 100+ 檔流動性權值與熱門飆股大池
 STOCK_POOL = [
-    # 半導體 / 電子代工 / AI 概念
-    ("2330", "台積電", "TW"), ("2454", "聯發科", "TW"), ("2317", "鴻海", "TW"), 
-    ("2382", "廣達", "TW"), ("3231", "緯創", "TW"), ("6669", "緯穎", "TW"), 
-    ("2376", "技嘉", "TW"), ("2357", "華碩", "TW"), ("2308", "台達電", "TW"), 
-    ("2303", "聯電", "TW"), ("3711", "日月光投控", "TW"), ("3034", "聯詠", "TW"), 
-    ("2408", "南亞科", "TW"), ("3443", "創意", "TW"), ("3661", "世芯-KY", "TW"),
-    ("3037", "欣興", "TW"), ("8046", "南電", "TW"), ("3035", "智原", "TW"), 
-    ("2345", "智邦", "TW"), ("2379", "瑞昱", "TW"), ("3017", "奇鋐", "TW"), 
-    ("3324", "雙鴻", "TWO"), ("3529", "力旺", "TWO"), ("6415", "矽力*-KY", "TW"), 
-    ("5269", "祥碩", "TW"),
-    # 重電 / 綠能 / 航運
+    # 半導體 / IC 設計 / 封測 / 矽智財
+    ("2330", "台積電", "TW"), ("2454", "聯發科", "TW"), ("2303", "聯電", "TW"), 
+    ("3711", "日月光投控", "TW"), ("3034", "聯詠", "TW"), ("2408", "南亞科", "TW"), 
+    ("3443", "創意", "TW"), ("3661", "世芯-KY", "TW"), ("3035", "智原", "TW"), 
+    ("3529", "力旺", "TWO"), ("6415", "矽力*-KY", "TW"), ("5269", "祥碩", "TW"),
+    ("6531", "愛普*", "TW"), ("6770", "力積電", "TW"), ("2458", "義隆", "TW"),
+    ("4966", "譜瑞-KY", "TWO"), ("6223", "旺矽", "TWO"), ("3264", "欣銓", "TWO"),
+    
+    # AI 伺服器 / 代工 / 機殼 / 散熱 / 零組件
+    ("2317", "鴻海", "TW"), ("2382", "廣達", "TW"), ("3231", "緯創", "TW"), 
+    ("6669", "緯穎", "TW"), ("2376", "技嘉", "TW"), ("2357", "華碩", "TW"), 
+    ("2308", "台達電", "TW"), ("2345", "智邦", "TW"), ("2379", "瑞昱", "TW"), 
+    ("3017", "奇鋐", "TW"), ("3324", "雙鴻", "TWO"), ("3037", "欣興", "TW"), 
+    ("8046", "南電", "TW"), ("2368", "金像電", "TW"), ("3653", "健策", "TW"),
+    ("2059", "川湖", "TW"), ("2383", "台光電", "TW"), ("6274", "台燿", "TWO"),
+    
+    # 重電 / 綠能 / 能源
     ("1519", "華城", "TW"), ("1513", "中興電", "TW"), ("1504", "東元", "TW"), 
-    ("1503", "士電", "TW"), ("1609", "大亞", "TW"), ("2603", "長榮", "TW"), 
-    ("2609", "陽明", "TW"), ("2615", "萬海", "TW"), ("2618", "長榮航", "TW"), 
-    ("2610", "華航", "TW"),
-    # 金融 / 傳產
+    ("1503", "士電", "TW"), ("1609", "大亞", "TW"), ("6806", "森崴能源", "TW"),
+    ("1514", "亞力", "TW"), ("8996", "高力", "TW"),
+    
+    # 航運 / 航空 / 觀光
+    ("2603", "長榮", "TW"), ("2609", "陽明", "TW"), ("2615", "萬海", "TW"), 
+    ("2618", "長榮航", "TW"), ("2610", "華航", "TW"), ("2637", "慧洋-KY", "TW"),
+    
+    # 機器人 / 自動化 / 工具機
+    ("2359", "所羅門", "TW"), ("4562", "穎漢", "TW"), ("8374", "羅昇", "TW"),
+    ("2464", "盟立", "TW"), ("1590", "亞德客-KY", "TW"),
+    
+    # 金融股
     ("2881", "富邦金", "TW"), ("2882", "國泰金", "TW"), ("2891", "中信金", "TW"), 
-    ("2886", "兆豐金", "TW"), ("2884", "玉山金", "TW")
+    ("2886", "兆豐金", "TW"), ("2884", "玉山金", "TW"), ("2885", "元大金", "TW"),
+    ("2892", "第一金", "TW"), ("5880", "合庫金", "TW"), ("2883", "開發金", "TW"),
+    
+    # 傳產 / 塑化 / 鋼鐵 / 生技
+    ("2002", "中鋼", "TW"), ("1101", "台泥", "TW"), ("1301", "台塑", "TW"), 
+    ("1303", "南亞", "TW"), ("2912", "統一超", "TW"), ("1216", "統一", "TW"),
+    ("6446", "藥華藥", "TWO"), ("1795", "美時", "TW"), ("4743", "合一", "TWO")
 ]
 
 def send_msg(payload):
@@ -54,27 +75,40 @@ def main():
     scored_results = []
     latest_trade_date = datetime.now().strftime("%Y-%m-%d")
 
-    for sid, name, market in STOCK_POOL:
-        ticker_str = f"{sid}.{market}"
+    # 建立代號對應清單
+    ticker_list = [f"{sid}.{mkt}" for sid, _, mkt in STOCK_POOL]
+    meta_dict = {f"{sid}.{mkt}": (sid, name) for sid, name, mkt in STOCK_POOL}
+
+    print(f"【第一階段】批次抓取全市場 {len(ticker_list)} 檔標的近期數據...")
+    
+    # 一次批次下載近 3 個月歷史數據（速度極快）
+    all_data = yf.download(ticker_list, period="3mo", interval="1d", group_by="ticker", progress=False)
+
+    for ticker in ticker_list:
+        sid, name = meta_dict[ticker]
         try:
-            stock = yf.Ticker(ticker_str)
-            df = stock.history(period="3mo", interval="1d")
+            if ticker not in all_data.columns.levels[0]:
+                continue
             
-            if df.empty or len(df) < 25:
+            df = all_data[ticker].dropna()
+            if len(df) < 25:
                 continue
 
             latest_trade_date = df.index[-1].strftime("%Y-%m-%d")
-            
+
             close_s = df['Close']
             high_s = df['High']
             low_s = df['Low']
+            open_s = df['Open']
             vol_s = df['Volume']
 
             today_close = float(close_s.iloc[-1])
             today_high = float(high_s.iloc[-1])
             today_low = float(low_s.iloc[-1])
+            today_open = float(open_s.iloc[-1])
             today_vol = float(vol_s.iloc[-1])
 
+            # 計算均線
             ma5 = float(close_s.rolling(5).mean().iloc[-1])
             ma10 = float(close_s.rolling(10).mean().iloc[-1])
             ma20_s = close_s.rolling(20).mean()
@@ -82,10 +116,11 @@ def main():
             ma20_slope = ma20 - float(ma20_s.iloc[-2])
             vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
 
-            # 站上月線基礎門檻
-            if today_close < ma20:
+            # 【第一階段初篩門檻】：站上月線且不是長黑K
+            if today_close < ma20 or today_close < today_open * 0.99:
                 continue
 
+            # 【第二階段評分】
             score = 0
             reasons = []
 
@@ -105,7 +140,7 @@ def main():
                 score += 20
                 reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
 
-            # 4. 實體紅 K (+15)
+            # 4. 實體紅 K 品質 (+15)
             k_range = today_high - today_low
             if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
                 score += 15
@@ -118,34 +153,33 @@ def main():
                 score += 20
                 reasons.append("MACD偏多")
 
-            # 扣分
+            # 扣分：上影線過長
             if k_range > 0 and (today_high - today_close) / k_range > 0.4:
                 score -= 15
 
-            # ================= 結構型價位推算 (Price Action) =================
-            # 1. 結構性止損 (SL)：取近 5 日波段最低點或今日起漲低點下方作為結構破位防守
-            low_5d = float(low_s.iloc[-5:].min())
-            sl_price = round(min(low_5d, today_low) * 0.99, 1)
-
-            # 2. 進場區間 (Entry)：回踩 5MA / 突破點 ~ 現價平盤（若 5MA 低於 SL 則用保護性緩衝）
-            entry_low = round(max(ma5, today_close * 0.985), 1)
+            # ================= 精準收斂風控價位 (緊密止損) =================
+            # 1. 進場區間：回踩 1.0% ~ 現價平盤小加 0.3%
+            entry_low = round(today_close * 0.99, 1)
             entry_high = round(today_close * 1.003, 1)
-            # 確保 SL 必定在進場區間下方
+
+            # 2. 短線緊密止損 (SL)：
+            # 取 (當日最低點、開盤價、5MA、進場下緣-3.5%) 中最貼近的支撐位
+            raw_sl = min(today_low, today_open * 0.995, ma5 * 0.995)
+            # 強制將止損收斂在進場下緣下方 3.5% ~ 5% 區間（絕不放過遠）
+            sl_price = round(max(raw_sl, entry_low * 0.95), 1)
             if sl_price >= entry_low:
-                sl_price = round(entry_low * 0.97, 1)
+                sl_price = round(entry_low * 0.965, 1)
 
             # 3. 結構性止盈 (TP)：
-            # 回溯近 60 日歷史波段高點（排除今日）
             past_60d_high = float(high_s.iloc[-60:-1].max()) if len(high_s) >= 60 else float(high_s.iloc[:-1].max())
-
-            if past_60d_high > today_close * 1.02:
-                # 情況 A：上方有明確的前波高點壓力位 -> 以歷史前高作為止盈目標
+            
+            if past_60d_high > today_close * 1.03:
+                # 歷史前高壓力
                 tp_price = round(past_60d_high, 1)
             else:
-                # 情況 B：已突破近季新高（上方無套牢賣壓） -> 採用等距箱體對稱測幅
-                low_20d = float(low_s.iloc[-20:].min())
-                box_height = today_close - low_20d
-                tp_price = round(today_close + box_height, 1)
+                # 突破新高對稱測幅（取近 10 日箱體波動）
+                swing_range = today_close - float(low_s.iloc[-10:].min())
+                tp_price = round(today_close + max(swing_range, (entry_high - sl_price) * 1.8), 1)
 
             scored_results.append({
                 "sid": sid,
@@ -160,7 +194,8 @@ def main():
         except Exception:
             continue
 
-    top_picks = sorted(scored_results, key=lambda x: x["score"], reverse=True)[:5]
+    # 取評分前 10 檔
+    top_picks = sorted(scored_results, key=lambda x: x["score"], reverse=True)[:10]
     
     fields = []
     for item in top_picks:
@@ -172,13 +207,13 @@ def main():
                 f"> **止損 (SL)**: `{item['sl']}`\n"
                 f"> **特徵**: `{item['tags']}`"
             ),
-            "inline": False
+            "inline": True  # 設為 True 讓 10 檔標的在 Discord 排版更緊湊工整
         })
 
     payload = {
         "username": "台股量化選股",
         "embeds": [{
-            "title": f"📈 台股盤後精選 ({latest_trade_date})",
+            "title": f"📈 台股盤後精選 Top 10 ({latest_trade_date})",
             "color": 3447003,
             "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
