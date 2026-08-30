@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_sfp'},
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
@@ -88,7 +88,6 @@ def fetch_1year_historical_data(cfg):
                     res_df = df[req_cols].copy()
                     res_df.columns = ['o', 'h', 'l', 'c', 'v']
                     res_df['time'] = df['time'].values
-                    # 合成 4h K 線
                     res_df = res_df.set_index('time')
                     res_df_4h = res_df.resample('4h').agg({
                         'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
@@ -112,7 +111,6 @@ def prepare_indicators(df):
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
     df['vol_ma20'] = df['v'].rolling(20).mean().fillna(df['v'])
     
-    # 布林帶
     df['bb_mid'] = df['c'].rolling(20).mean()
     df['bb_std'] = df['c'].rolling(20).std().fillna(0)
     df['bb_upper'] = df['bb_mid'] + (2 * df['bb_std'])
@@ -121,7 +119,7 @@ def prepare_indicators(df):
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【美股4h突破 + BTC SFP獵殺 + 加密Fib全域複利】1 年期回測")
+    print(">>> 啟動【美股4h突破 + BTC波幅1%斐波 + 加密15m斐波 + 全域複利】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET:.2f} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -162,7 +160,7 @@ def run_backtest():
             if match_row.empty:
                 continue
             idx = match_row.index[0]
-            if idx < 40:
+            if idx < 30:
                 continue
             
             bar = match_row.iloc[0]
@@ -181,7 +179,6 @@ def run_backtest():
                 tp1_hit = pos['tp1_hit']
 
                 if side == 'LONG':
-                    # SL 停損
                     if bar['l'] <= sl:
                         rem_qty = qty * 0.5 if tp1_hit else qty
                         pnl = rem_qty * (sl - entry)
@@ -193,17 +190,15 @@ def run_backtest():
                         completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'SL_OUT', 'time': curr_time})
                         del positions[sym]
                         continue
-                    # TP1 觸發
                     if not tp1_hit and bar['h'] >= tp1:
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (tp1 - entry)
                         current_wallet += pnl_tp1
-                        pos['sl'] = entry if mode == 'btc_sfp' else tp1
+                        pos['sl'] = tp1
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    # TP2 觸發
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1', 'time': curr_time})
                     if pos['tp1_hit'] and bar['h'] >= tp2:
                         pnl_tp2 = (qty * 0.5) * (tp2 - entry)
                         current_wallet += pnl_tp2
@@ -215,7 +210,6 @@ def run_backtest():
                         continue
 
                 elif side == 'SHORT':
-                    # SL 停損
                     if bar['h'] >= sl:
                         rem_qty = qty * 0.5 if tp1_hit else qty
                         pnl = rem_qty * (entry - sl)
@@ -227,17 +221,15 @@ def run_backtest():
                         completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'SL_OUT', 'time': curr_time})
                         del positions[sym]
                         continue
-                    # TP1 觸發
                     if not tp1_hit and bar['l'] <= tp1:
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (entry - tp1)
                         current_wallet += pnl_tp1
-                        pos['sl'] = entry if mode == 'btc_sfp' else tp1
+                        pos['sl'] = tp1
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
                         completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    # TP2 觸發
                     if pos['tp1_hit'] and bar['l'] <= tp2:
                         pnl_tp2 = (qty * 0.5) * (entry - tp2)
                         current_wallet += pnl_tp2
@@ -253,29 +245,8 @@ def run_backtest():
                 sig_side = None
                 entry, sl, tp1, tp2 = 0, 0, 0, 0
 
-                # 模式 A: BTC 專屬 SFP 流動性獵殺 (15m)
-                if mode == 'btc_sfp':
-                    sub = df.iloc[max(0, idx-40):idx]
-                    h, l = sub['h'].max(), sub['l'].min()
-                    vol_surge = bar['v'] >= (bar['vol_ma20'] * 1.3)
-                    
-                    # 獵殺前低回收 (做多)
-                    if (bar['l'] < l) and (bar['c'] > l) and vol_surge:
-                        sig_side = 'LONG'
-                        entry = bar['c']
-                        sl = bar['l'] - (bar['atr'] * 0.2)
-                        tp1 = (h + l) / 2.0
-                        tp2 = h
-                    # 獵殺前高回落 (做空)
-                    elif (bar['h'] > h) and (bar['c'] < h) and vol_surge:
-                        sig_side = 'SHORT'
-                        entry = bar['c']
-                        sl = bar['h'] + (bar['atr'] * 0.2)
-                        tp1 = (h + l) / 2.0
-                        tp2 = l
-
-                # 模式 B: 美股 4h 趨勢突破 (4h)
-                elif mode == 'stock_breakout':
+                # 美股 4h 突破
+                if mode == 'stock_breakout':
                     trend_bull = (bar['ema20'] > bar['ema50']) and (bar['c'] > bar['ema200'])
                     trend_bear = (bar['ema20'] < bar['ema50']) and (bar['c'] < bar['ema200'])
                     breakout_up = (bar['c'] > bar['bb_upper']) and (bar['v'] > bar['vol_ma20'])
@@ -294,12 +265,14 @@ def run_backtest():
                         tp1 = entry - (abs(sl - entry) * 1.5)
                         tp2 = entry - (abs(sl - entry) * 3.0)
 
-                # 模式 C: 加密貨幣 & 黃金 15m 斐波那契回撤 (15m)
+                # 加密貨幣 & 黃金 15m 斐波那契回撤 (BTC 需波幅 >= 1%)
                 else:
                     sub = df.iloc[max(0, idx-25):idx+1]
                     h, l = sub['h'].max(), sub['l'].min()
                     wave = h - l
-                    if wave > 0 and (wave / l) >= 0.005:
+                    min_wave_ratio = 0.01 if sym == 'BTC' else 0.005
+                    
+                    if wave > 0 and (wave / l) >= min_wave_ratio:
                         fib_0618_l = h - (wave * 0.618)
                         fib_0618_s = l + (wave * 0.618)
                         rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
@@ -355,7 +328,7 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 美股4h突破 + BTC SFP獵殺 + 加密15m斐波 + 全域複利 (1年期回測)\n"
+        "判定邏輯: 美股4h突破 + BTC(1%波幅)斐波 + 加密15m斐波 + 全域複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET:.1f} USDT\n"
         f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
