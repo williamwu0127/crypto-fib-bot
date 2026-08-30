@@ -4,7 +4,7 @@ on:
   schedule:
     # 台灣時間每週一早上 08:00 (UTC 週日 00:00) 執行
     - cron: '0 0 * * 1'
-  workflow_dispatch: # 支援手動觸發測試
+  workflow_dispatch: # 支援手動按鈕觸發
 
 jobs:
   run-global-monitor:
@@ -22,7 +22,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install requests pandas yfinance
+          pip install -r requirements.txt
 
       - name: Run Global Monitor
         run: |
