@@ -1,4 +1,4 @@
-name: Taiwan Stock Free Scanner
+name: Taiwan Stock Scanner
 
 on:
   schedule:
