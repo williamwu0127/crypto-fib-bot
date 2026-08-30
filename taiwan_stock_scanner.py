@@ -101,7 +101,7 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     return dif, dea, hist
 
 def get_market_analysis():
-    """獲取台股加權指數 (^TWII) 大盤資訊"""
+    """獲取加權指數大盤資訊"""
     try:
         twii = yf.Ticker("^TWII")
         df = twii.history(period="1mo", interval="1d")
@@ -189,21 +189,23 @@ def main():
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # ----------------- 妖股獵人判斷 (起漲前夕蓄勢爆量) -----------------
+                # ----------------- 妖股獵人判斷 (放大 TP 目標，捕捉狂飆利潤) -----------------
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
                 
-                is_accumulating_box = box_range_pct <= 0.20
+                is_accumulating_box = box_range_pct <= 0.25
                 is_pre_monster_vol = vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5
                 is_breakout_edge = today_close >= recent_high_20d * 0.98
                 
                 if est_money_mil >= 0.8 and is_accumulating_box and is_pre_monster_vol and is_breakout_edge:
-                    # 妖股專屬風控價位（因為爆發力強，止損設在箱體底部下方，約 5%~6% 防守）
                     m_entry_low = round(today_close * 0.99, 2)
                     m_entry_high = round(today_close * 1.003, 2)
                     m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
-                    m_tp = round(today_close + (recent_high_20d - recent_low_20d) * 1.5, 2)
+                    
+                    # 🚀 妖股專屬放大 TP：以箱體震幅的 3.0 倍計算，或至少距離現價 +20% 以上作為飆股目標價
+                    box_height = recent_high_20d - recent_low_20d
+                    m_tp = round(max(today_close + box_height * 3.0, today_close * 1.22), 2)
 
                     monster_stocks.append({
                         "sid": sid,
@@ -339,11 +341,11 @@ def main():
                 "inline": False
             })
 
-    # 3. 妖股獵人區塊 (置底，加入完整進場、TP、SL 與爆量倍數)
+    # 3. 妖股獵人區塊 (置底，TP 目標已大幅放寬以捕捉飆股行情)
     if monster_stocks:
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
         fields.append({
-            "name": "───────── 🚨 妖股獵人 (起漲爆量預警) ─────────",
+            "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
             "value": "\u200b",
             "inline": False
         })
@@ -353,8 +355,8 @@ def main():
                 "value": (
                     f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
                     f"> **進場**: `{m['entry']}`\n"
-                    f"> **止盈 (TP)**: `{m['tp']}`\n"
-                    f"> **止損 (SL)**: `{m['sl']}`"
+                    f"> **止盈 (TP)**: `{m['tp']}` 🚀\n"
+                    f"> **止損 (SL)**: `{m['sl']}` 🛡️"
                 ),
                 "inline": True
             })
@@ -366,7 +368,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股全方位{session_title}報告 ({latest_trade_date})",
-            "description": "已完成大盤結構判定、全市場動態掃描與潛伏妖股預警：",
+            "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
             "color": 3447003,
             "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
@@ -376,4 +378,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
