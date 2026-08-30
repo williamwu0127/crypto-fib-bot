@@ -37,16 +37,23 @@ def get_weekly_performance(ticker_symbol):
         return None, None, None
 
 def fetch_latest_financial_news():
-    """動態抓取 Google News 財經與總經即時 RSS"""
+    """動態抓取 Google News 財經與總經即時 RSS，並轉為超連結格式"""
     news_list = []
     try:
-        # 使用 Google News 財經關鍵字 RSS
         rss_url = "https://news.google.com/rss/search?q=stock+market+economy+Fed+interest+rate&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(rss_url)
         for entry in feed.entries[:5]:
             title = entry.get('title', '無標題')
             link = entry.get('link', '#')
-            news_list.append(f"📌 [{title}]({link})")
+            
+            # 清理標題中可能破壞 Markdown 格式的特殊字元
+            title = title.replace('[', '').replace(']', '').replace('(', '').replace(')', '')
+            
+            # 限制標題長度，避免過長
+            if len(title) > 90:
+                title = title[:87] + "..."
+                
+            news_list.append(f"• [{title}]({link})")
     except Exception as e:
         print(f"動態抓取新聞失敗: {e}")
         
@@ -56,7 +63,7 @@ def fetch_latest_financial_news():
     return news_list
 
 def main():
-    print("【一週全球市場資訊】開始分析美股、亞股、台股、加密貨幣與即時新聞...")
+    print("【一週全球市場資訊】開始分析美股, 亞股, 台股, 加密貨幣與即時新聞...")
     
     targets = {
         "🇺🇸 那斯達克 (^IXIC)": "^IXIC",
@@ -93,24 +100,24 @@ def main():
     print("發送第一則訊息 (市場行情)...")
     send_msg(payload_market)
 
-    # --- 第二則訊息：即時財經新聞快訊 ---
+    # --- 第二則訊息：即時財經新聞超連結快訊 ---
     latest_news = fetch_latest_financial_news()
-    news_text = "\n".join([f"> {item}" for item in latest_news])
+    news_text = "\n".join([f"{item}" for item in latest_news])
     
     payload_news = {
         "username": "一週全球市場資訊雷達",
         "embeds": [{
             "title": f"📰 即時全球財經新聞與事件快訊 ({datetime.now().strftime('%Y-%m-%d')})",
-            "description": "本週自動抓取的最新財經動態與焦點新聞：",
+            "description": "本週自動抓取的最新財經動態與焦點新聞（點擊標題即可查看原文）：",
             "color": 3447003,
             "fields": [{
-                "name": "───────── 焦點新聞快訊 ─────────",
+                "name": "───────── 焦點新聞超連結 ─────────",
                 "value": news_text,
                 "inline": False
             }]
         }]
     }
-    print("發送第二則訊息 (即時新聞)...")
+    print("發送第二則訊息 (即時新聞超連結)...")
     send_msg(payload_news)
 
 if __name__ == "__main__":
