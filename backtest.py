@@ -55,11 +55,11 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-def fetch_1month_historical_data(cfg):
+def fetch_1year_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
             now_ms = int(time.time() * 1000)
-            start_ms = now_ms - (30 * 24 * 60 * 60 * 1000) # 最近 30 天
+            start_ms = now_ms - (365 * 24 * 60 * 60 * 1000) # 改回 365 天
             all_klines = []
             curr_start = start_ms
             
@@ -72,7 +72,7 @@ def fetch_1month_historical_data(cfg):
                 curr_start = res[-1][0] + (15 * 60 * 1000)
                 time.sleep(0.04)
             
-            if len(all_klines) > 50:
+            if len(all_klines) > 200:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
                 df = pd.DataFrame(all_klines, columns=cols)
                 df = df.drop_duplicates(subset=['t'])
@@ -81,8 +81,8 @@ def fetch_1month_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="1mo", interval="1h", progress=False) # 最近 1 個月
-            if df is not None and not df.empty and len(df) > 20:
+            df = yf.download(cfg['s'], period="1y", interval="1h", progress=False) # 改回 1y
+            if df is not None and not df.empty and len(df) > 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -116,7 +116,7 @@ def prepare_indicators(df):
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【原版 50/50 雙軌斐波 + 全域高精度複利】1 個月期回測")
+    print(">>> 啟動【原版 50/50 雙軌斐波 + 全域高精度複利】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -125,11 +125,11 @@ def run_backtest():
 
     for sym, cfg in SYMBOLS.items():
         print(f"拉取數據: {sym.ljust(5)} ({cfg['interval']}) ...", end=" ")
-        df = fetch_1month_historical_data(cfg)
-        if df is not None and len(df) > 20:
+        df = fetch_1year_historical_data(cfg)
+        if df is not None and len(df) > 30:
             df = prepare_indicators(df)
             dfs[sym] = df
-            s_date = pd.to_datetime(df.iloc[15]['time']).strftime("%Y-%m-%d")
+            s_date = pd.to_datetime(df.iloc[25]['time']).strftime("%Y-%m-%d")
             e_date = pd.to_datetime(df.iloc[-1]['time']).strftime("%Y-%m-%d")
             if earliest_start is None or s_date < earliest_start:
                 earliest_start = s_date
@@ -157,7 +157,7 @@ def run_backtest():
             if match_row.empty:
                 continue
             idx = match_row.index[0]
-            if idx < 20:
+            if idx < 30:
                 continue
             
             bar = match_row.iloc[0]
@@ -355,7 +355,7 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 美股1h均線回踩 + BTC盈虧比重構 + 加密15m斐波 + 全域高精度複利 (1個月期回測)\n"
+        "判定邏輯: 美股1h均線回踩 + BTC盈虧比重構 + 加密15m斐波 + 全域高精度複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
