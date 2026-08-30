@@ -49,20 +49,35 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-def fetch_historical_data(cfg):
+def fetch_1year_historical_data(cfg):
+    """取得 1 年歷史 15m K 線 (幣安透過分頁抓足 365 天，美股抓滿 60 天上限)"""
     try:
         if cfg['t'] == 'binance':
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&limit=1000"
-            res = requests.get(url, timeout=10).json()
-            if isinstance(res, list) and len(res) > 200:
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (365 * 24 * 60 * 60 * 1000)
+            all_klines = []
+            curr_start = start_ms
+            
+            while curr_start < now_ms:
+                url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&startTime={curr_start}&limit=1000"
+                res = requests.get(url, timeout=10).json()
+                if not isinstance(res, list) or len(res) == 0:
+                    break
+                all_klines.extend(res)
+                curr_start = res[-1][0] + (15 * 60 * 1000)
+                time.sleep(0.05)  # 避免觸發限流
+            
+            if len(all_klines) > 200:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-                df = pd.DataFrame(res, columns=cols)
+                df = pd.DataFrame(all_klines, columns=cols)
+                df = df.drop_duplicates(subset=['t'])
                 for col in ['o', 'h', 'l', 'c', 'v']:
                     df[col] = df[col].astype(float)
                 df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="1mo", interval="15m", progress=False)
+            # yfinance 15m 最大取 60 天
+            df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
             if df is not None and not df.empty and len(df) > 100:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -76,7 +91,7 @@ def fetch_historical_data(cfg):
     return None
 
 def backtest_single_symbol(sym, cfg):
-    df = fetch_historical_data(cfg)
+    df = fetch_1year_historical_data(cfg)
     if df is None or len(df) < 100:
         return [], None, None
 
@@ -105,7 +120,7 @@ def backtest_single_symbol(sym, cfg):
         bar = df.iloc[i]
         prev_bar = df.iloc[i - 1]
 
-        # 持倉處理 (SL / TP1 / TP2)
+        # 持倉狀態處理 (SL / TP1 / TP2)
         if in_position:
             if bar['l'] <= sl_price:
                 exit_price = sl_price
@@ -124,7 +139,7 @@ def backtest_single_symbol(sym, cfg):
                 in_position = False
                 continue
 
-        # 開倉判定 (EMA多頭 + Fib 0.618回撤 + RSI回升)
+        # 開倉判定 (EMA多頭 + Fib 0.618回撤 + RSI動能)
         if not in_position:
             sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
@@ -153,7 +168,7 @@ def backtest_single_symbol(sym, cfg):
     return trades, start_date, end_date
 
 def run_full_backtest():
-    print(">>> 正在進行 20 檔標的 1 個月 15m 策略回測...")
+    print(">>> 正在啟動 1 年期歷史回測 (加密貨幣 365 天 / 美股 60 天)...")
     all_trades = []
     earliest_start, latest_end = None, None
 
@@ -184,14 +199,14 @@ def run_full_backtest():
         c = len(sub)
         w = len(sub[sub['pnl'] > 0])
         wr = (w / c * 100) if c > 0 else 0.0
-        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(3)}次 | 勝率: {wr:5.1f}%")
+        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.1f}%")
 
     report_text = (
         "```text\n"
-        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能\n"
+        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${START_BALANCE:.1f} USDT\n"
-        f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:.2f}%)\n"
+        f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:+.2f}%)\n"
         f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.1f}%\n"
         "----------------------------------------------------\n"
         + "\n".join(symbol_lines) + "\n"
