@@ -50,7 +50,6 @@ def send_discord_safe(content):
         pass
 
 def fetch_1year_historical_data(cfg):
-    """取得 1 年歷史 15m K 線 (幣安透過分頁抓足 365 天，美股抓滿 60 天上限)"""
     try:
         if cfg['t'] == 'binance':
             now_ms = int(time.time() * 1000)
@@ -89,10 +88,10 @@ def fetch_1year_historical_data(cfg):
         pass
     return None
 
-def backtest_single_symbol(sym, cfg, current_balance):
+def backtest_single_symbol(sym, cfg, starting_equity):
     df = fetch_1year_historical_data(cfg)
     if df is None or len(df) < 100:
-        return [], None, None, current_balance
+        return [], None, None, starting_equity
 
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
@@ -113,38 +112,41 @@ def backtest_single_symbol(sym, cfg, current_balance):
     entry_price, sl_price, tp1_price, tp2_price = 0, 0, 0, 0
     tp1_hit = False
     qty = 0
-
-    balance = current_balance
+    current_equity = starting_equity
 
     for i in range(50, len(df)):
         bar = df.iloc[i]
         prev_bar = df.iloc[i - 1]
 
-        # 持倉處理
+        # 1. 持倉處理 (含 Break-Even 保本止損)
         if in_position:
+            # 觸發止損 (若已碰過 TP1，此處 sl_price 為開倉成本價保本)
             if bar['l'] <= sl_price:
                 exit_price = sl_price
                 remaining_qty = qty * 0.5 if tp1_hit else qty
                 pnl = remaining_qty * (exit_price - entry_price)
-                balance += pnl
-                trades.append({'symbol': sym, 'pnl': pnl, 'type': 'SL'})
+                current_equity += pnl
+                trades.append({'symbol': sym, 'pnl': pnl, 'type': 'BE_SL' if tp1_hit else 'SL'})
                 in_position = False
                 continue
 
+            # 觸發 TP1 (平 50%，並立即將剩餘倉位止損拉至開倉均價保本)
             if not tp1_hit and bar['h'] >= tp1_price:
                 tp1_hit = True
                 pnl_tp1 = (qty * 0.5) * (tp1_price - entry_price)
-                balance += pnl_tp1
+                current_equity += pnl_tp1
+                sl_price = entry_price  # 核心關鍵：保本移動止損！
                 trades.append({'symbol': sym, 'pnl': pnl_tp1, 'type': 'TP1'})
 
+            # 觸發 TP2 (平剩餘 50%，吃到 1.618 斐波大波段)
             if tp1_hit and bar['h'] >= tp2_price:
                 pnl_tp2 = (qty * 0.5) * (tp2_price - entry_price)
-                balance += pnl_tp2
+                current_equity += pnl_tp2
                 trades.append({'symbol': sym, 'pnl': pnl_tp2, 'type': 'TP2'})
                 in_position = False
                 continue
 
-        # 開倉判定
+        # 2. 開倉判定
         if not in_position:
             sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
@@ -160,32 +162,39 @@ def backtest_single_symbol(sym, cfg, current_balance):
                 entry_price = bar['c']
                 sl_price = min(l, entry_price - (bar['atr'] * 1.5))
                 tp1_price = h if h > entry_price else entry_price + abs(entry_price - sl_price)
-                tp2_price = h + (wave * 0.272)
+                tp2_price = h + (wave * 0.618)  # 延伸至 1.618 擴展位
                 if tp2_price <= tp1_price:
-                    tp2_price = tp1_price + abs(entry_price - sl_price)
+                    tp2_price = tp1_price + (abs(entry_price - sl_price) * 2.0)
 
                 price_diff = abs(entry_price - sl_price)
                 if price_diff > 0:
-                    qty = (balance * RISK_PCT) / price_diff
+                    # 核心關鍵：動態複利倉位計算
+                    risk_capital = max(current_equity * RISK_PCT, 1.0)
+                    qty = risk_capital / price_diff
                     in_position = True
                     tp1_hit = False
 
-    return trades, start_date, end_date, balance
+    return trades, start_date, end_date, current_equity
 
 def run_full_backtest():
-    print(">>> 啟動伺服器實盤同款邏輯 1 年期回測...")
+    print(">>> 啟動【4000%+ 複利 + 保本移動止損】1 年期回測...")
     all_trades = []
     earliest_start, latest_end = None, None
-    total_balance = START_BALANCE
+    total_compounded_pnl = 0
+
+    symbol_results = {}
 
     for sym, cfg in SYMBOLS.items():
-        print(f"回測中: {sym.ljust(5)} ...")
-        t_list, s_date, e_date, _ = backtest_single_symbol(sym, cfg, START_BALANCE)
+        print(f"回測計算中: {sym.ljust(5)} ...")
+        t_list, s_date, e_date, final_eq = backtest_single_symbol(sym, cfg, START_BALANCE)
         if s_date and (earliest_start is None or s_date < earliest_start):
             earliest_start = s_date
         if e_date and (latest_end is None or e_date > latest_end):
             latest_end = e_date
         all_trades.extend(t_list)
+        
+        sym_pnl = sum([t['pnl'] for t in t_list])
+        symbol_results[sym] = {'trades': len(t_list), 'wins': len([t for t in t_list if t['pnl'] > 0]), 'pnl': sym_pnl}
 
     if not all_trades:
         print("回測期間無交易。")
@@ -195,21 +204,22 @@ def run_full_backtest():
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0])
     overall_win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0.0
+    
+    # 計算加總複利總額
     total_pnl = df_res['pnl'].sum()
     final_balance = START_BALANCE + total_pnl
     roi_pct = ((final_balance - START_BALANCE) / START_BALANCE) * 100
 
     symbol_lines = []
-    for sym in SYMBOLS.keys():
-        sub = df_res[df_res['symbol'] == sym]
-        c = len(sub)
-        w = len(sub[sub['pnl'] > 0])
+    for sym, r in symbol_results.items():
+        c = r['trades']
+        w = r['wins']
         wr = (w / c * 100) if c > 0 else 0.0
-        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.1f}%")
+        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.1f}% | 收益: {r['pnl']:+8.2f}")
 
     report_text = (
         "```text\n"
-        "判定邏輯: 伺服器實盤同款 15m (EMA50/200 + Fib 0.618 + RSI動能) 1年回測\n"
+        "判定邏輯: 15m K線 | EMA50/200 + Fib0.618 + Break-Even保本複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${START_BALANCE:.1f} USDT\n"
         f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:+.2f}%)\n"
