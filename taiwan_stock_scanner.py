@@ -189,8 +189,7 @@ def main():
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # ----------------- 升級版：妖股潛伏與起漲前夕獵人 -----------------
-                # 條件：箱體狹幅整理 (<=20%) + 突然爆量 (>=2.5x) + 準備突破箱體上緣
+                # ----------------- 妖股獵人判斷 (起漲前夕蓄勢爆量) -----------------
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -305,7 +304,7 @@ def main():
             "inline": False
         })
     
-    # 2. 妖股獵人區塊（起漲前夕爆量潛伏）
+    # 2. 妖股獵人區塊
     if monster_stocks:
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
         monster_lines = []
@@ -360,4 +359,4 @@ def main():
     send_msg(payload)
 
 if __name__ == "__main__":
-main()
+    main()
