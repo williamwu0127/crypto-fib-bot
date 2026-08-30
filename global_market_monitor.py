@@ -37,10 +37,11 @@ def get_weekly_performance(ticker_symbol):
         return None, None, None
 
 def fetch_latest_financial_news():
-    """動態抓取 Yahoo Finance 的即時財經新聞 RSS 作為參考"""
+    """動態抓取 Google News 財經與總經即時 RSS"""
     news_list = []
     try:
-        rss_url = "https://finance.yahoo.com/news/rssindex"
+        # 使用 Google News 財經關鍵字 RSS
+        rss_url = "https://news.google.com/rss/search?q=stock+market+economy+Fed+interest+rate&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(rss_url)
         for entry in feed.entries[:5]:
             title = entry.get('title', '無標題')
