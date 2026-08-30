@@ -2,9 +2,9 @@ name: Taiwan Stock Scanner
 
 on:
   schedule:
-    # 台灣時間週一至週五 16:30 (UTC 08:30) 執行
+    # 台灣時間週一至週五 16:30 (UTC 08:30) 執行盤後掃描
     - cron: '30 8 * * 1-5'
-  workflow_dispatch: # 支援手動按鈕一鍵執行
+  workflow_dispatch: # 支援 GitHub 頁面手動一鍵執行
 
 jobs:
   run-scanner:
@@ -24,8 +24,8 @@ jobs:
           pip install --upgrade pip
           pip install requests pandas numpy yfinance
 
-      - name: Run Free Scanner
+      - name: Run Scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python taiwan_stock_free_scanner.py
+          python taiwan_stock_scanner.py
