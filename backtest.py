@@ -65,7 +65,7 @@ def fetch_1year_historical_data(cfg):
                     break
                 all_klines.extend(res)
                 curr_start = res[-1][0] + (15 * 60 * 1000)
-                time.sleep(0.05)  # 避免觸發限流
+                time.sleep(0.05)
             
             if len(all_klines) > 200:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -76,7 +76,6 @@ def fetch_1year_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            # yfinance 15m 最大取 60 天
             df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
             if df is not None and not df.empty and len(df) > 100:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -90,12 +89,11 @@ def fetch_1year_historical_data(cfg):
         pass
     return None
 
-def backtest_single_symbol(sym, cfg):
+def backtest_single_symbol(sym, cfg, current_balance):
     df = fetch_1year_historical_data(cfg)
     if df is None or len(df) < 100:
-        return [], None, None
+        return [], None, None, current_balance
 
-    # 技術指標運算
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -116,30 +114,37 @@ def backtest_single_symbol(sym, cfg):
     tp1_hit = False
     qty = 0
 
+    balance = current_balance
+
     for i in range(50, len(df)):
         bar = df.iloc[i]
         prev_bar = df.iloc[i - 1]
 
-        # 持倉狀態處理 (SL / TP1 / TP2)
+        # 持倉處理
         if in_position:
             if bar['l'] <= sl_price:
                 exit_price = sl_price
                 remaining_qty = qty * 0.5 if tp1_hit else qty
                 pnl = remaining_qty * (exit_price - entry_price)
+                balance += pnl
                 trades.append({'symbol': sym, 'pnl': pnl, 'type': 'SL'})
                 in_position = False
                 continue
 
             if not tp1_hit and bar['h'] >= tp1_price:
                 tp1_hit = True
-                trades.append({'symbol': sym, 'pnl': (qty * 0.5) * (tp1_price - entry_price), 'type': 'TP1'})
+                pnl_tp1 = (qty * 0.5) * (tp1_price - entry_price)
+                balance += pnl_tp1
+                trades.append({'symbol': sym, 'pnl': pnl_tp1, 'type': 'TP1'})
 
             if tp1_hit and bar['h'] >= tp2_price:
-                trades.append({'symbol': sym, 'pnl': (qty * 0.5) * (tp2_price - entry_price), 'type': 'TP2'})
+                pnl_tp2 = (qty * 0.5) * (tp2_price - entry_price)
+                balance += pnl_tp2
+                trades.append({'symbol': sym, 'pnl': pnl_tp2, 'type': 'TP2'})
                 in_position = False
                 continue
 
-        # 開倉判定 (EMA多頭 + Fib 0.618回撤 + RSI動能)
+        # 開倉判定
         if not in_position:
             sub = df.iloc[max(0, i-25):i+1]
             h, l = sub['h'].max(), sub['l'].min()
@@ -161,20 +166,21 @@ def backtest_single_symbol(sym, cfg):
 
                 price_diff = abs(entry_price - sl_price)
                 if price_diff > 0:
-                    qty = (START_BALANCE * RISK_PCT) / price_diff
+                    qty = (balance * RISK_PCT) / price_diff
                     in_position = True
                     tp1_hit = False
 
-    return trades, start_date, end_date
+    return trades, start_date, end_date, balance
 
 def run_full_backtest():
-    print(">>> 正在啟動 1 年期歷史回測 (加密貨幣 365 天 / 美股 60 天)...")
+    print(">>> 啟動伺服器實盤同款邏輯 1 年期回測...")
     all_trades = []
     earliest_start, latest_end = None, None
+    total_balance = START_BALANCE
 
     for sym, cfg in SYMBOLS.items():
-        print(f"回測計算中: {sym.ljust(5)} ...")
-        t_list, s_date, e_date = backtest_single_symbol(sym, cfg)
+        print(f"回測中: {sym.ljust(5)} ...")
+        t_list, s_date, e_date, _ = backtest_single_symbol(sym, cfg, START_BALANCE)
         if s_date and (earliest_start is None or s_date < earliest_start):
             earliest_start = s_date
         if e_date and (latest_end is None or e_date > latest_end):
@@ -182,7 +188,7 @@ def run_full_backtest():
         all_trades.extend(t_list)
 
     if not all_trades:
-        print("回測期間內無交易產生。")
+        print("回測期間無交易。")
         return
 
     df_res = pd.DataFrame(all_trades)
@@ -203,7 +209,7 @@ def run_full_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 15m K線 | EMA50/200趨勢 + Fib 0.618回撤 + RSI動能 (1年期回測)\n"
+        "判定邏輯: 伺服器實盤同款 15m (EMA50/200 + Fib 0.618 + RSI動能) 1年回測\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${START_BALANCE:.1f} USDT\n"
         f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:+.2f}%)\n"
@@ -216,7 +222,7 @@ def run_full_backtest():
     print("\n" + report_text)
     print(">>> 正在發送至 Discord...")
     send_discord_safe(report_text)
-    print(">>> 完成推播！")
+    print(">>> Discord 推播完成！")
 
 if __name__ == '__main__':
     run_full_backtest()
