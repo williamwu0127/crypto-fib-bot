@@ -8,27 +8,28 @@ from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
+# 美股 1h 雙均線回踩 / BTC 15m 波動率擴展 / 主流幣 15m 斐波順勢
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.01},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'lookback': 25, 'min_wave': 0.005},
-    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'META':  {'t': 'stock',   's': 'META',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03},
-    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1d',  'lookback': 60, 'min_wave': 0.03}
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_opt'},
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
+    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '1h',  'mode': 'stock_pullback'},
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'stock_pullback'},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1h',  'mode': 'stock_pullback'},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1h',  'mode': 'stock_pullback'},
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'stock_pullback'},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1h',  'mode': 'stock_pullback'},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1h',  'mode': 'stock_pullback'},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1h',  'mode': 'stock_pullback'},
+    'META':  {'t': 'stock',   's': 'META',     'interval': '1h',  'mode': 'stock_pullback'},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1h',  'mode': 'stock_pullback'},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1h',  'mode': 'stock_pullback'},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1h',  'mode': 'stock_pullback'},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1h',  'mode': 'stock_pullback'},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1h',  'mode': 'stock_pullback'}
 }
 
 INITIAL_WALLET = 100.0
@@ -74,8 +75,8 @@ def fetch_1year_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="1y", interval="1d", progress=False)
-            if df is not None and not df.empty and len(df) > 30:
+            df = yf.download(cfg['s'], period="1y", interval="1h", progress=False)
+            if df is not None and not df.empty and len(df) > 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -94,6 +95,7 @@ def fetch_1year_historical_data(cfg):
     return None
 
 def prepare_indicators(df):
+    df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -108,7 +110,7 @@ def prepare_indicators(df):
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【美股1D長波段 + 加密15m高頻 + 高精度全域複利】1 年期回測")
+    print(">>> 啟動【美股1h雙均線回踩 + BTC盈虧比重構 + 全標的高精度全域複利】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -155,6 +157,7 @@ def run_backtest():
             bar = match_row.iloc[0]
             prev_bar = df.iloc[idx - 1]
             cfg = SYMBOLS[sym]
+            mode = cfg['mode']
 
             # 1. 持倉處理 (TP1 達成後 SL 移至 TP1 鎖利)
             if sym in positions:
@@ -187,14 +190,14 @@ def run_backtest():
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
                     if pos['tp1_hit'] and bar['h'] >= tp2:
                         pnl_tp2 = (qty * 0.5) * (tp2 - entry)
                         current_wallet += pnl_tp2
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp2
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP2', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
                         del positions[sym]
                         continue
 
@@ -229,53 +232,105 @@ def run_backtest():
                         del positions[sym]
                         continue
 
-            # 2. 開倉信號判定 (日線 60 根回溯 / 15m 25 根回溯)
+            # 2. 開倉信號判定 (全域複利)
             if sym not in positions and current_wallet > 5.0:
-                lookback_len = cfg['lookback']
-                sub = df.iloc[max(0, idx - lookback_len):idx + 1]
-                h, l = sub['h'].max(), sub['l'].min()
-                wave = h - l
-                
-                if wave > 0 and (wave / l) >= cfg['min_wave']:
-                    fib_0618_l = h - (wave * 0.618)
-                    fib_0618_s = l + (wave * 0.618)
-                    rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-                    rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+                sig_side = None
+                entry, sl, tp1, tp2 = 0, 0, 0, 0
 
-                    cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-                    cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+                # 模式 A: 美股 1h EMA 均線回踩 + 結構重啟 (1.5R / 3.0R)
+                if mode == 'stock_pullback':
+                    trend_bull = (bar['ema20'] > bar['ema50']) and (bar['c'] > bar['ema200'])
+                    trend_bear = (bar['ema20'] < bar['ema50']) and (bar['c'] < bar['ema200'])
+                    
+                    # 多頭回踩：最低價碰觸 EMA20~EMA50 價值區間，且收陽線收高
+                    pullback_long = (bar['l'] <= bar['ema20']) and (bar['l'] >= bar['ema50'] * 0.995) and (bar['c'] > bar['o']) and (bar['rsi'] >= 45 and bar['rsi'] <= 60)
+                    # 空頭回抽：最高價碰觸 EMA20~EMA50 阻力區間，且收陰線收低
+                    pullback_short = (bar['h'] >= bar['ema20']) and (bar['h'] <= bar['ema50'] * 1.005) and (bar['c'] < bar['o']) and (bar['rsi'] <= 55 and bar['rsi'] >= 40)
 
-                    if cond_long:
+                    if trend_bull and pullback_long:
+                        sig_side = 'LONG'
                         entry = bar['c']
-                        sl = min(l, entry - (bar['atr'] * 1.5))
-                        tp1 = h if h > entry else entry + abs(entry - sl)
-                        tp2 = h + (wave * 0.272)
-                        if tp2 <= tp1:
-                            tp2 = tp1 + abs(entry - sl)
-
-                        price_diff = abs(entry - sl)
-                        if price_diff > 0:
-                            qty = (current_wallet * RISK_PCT) / price_diff
-                            positions[sym] = {
-                                'side': 'LONG', 'entry': entry, 'sl': sl,
-                                'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
-                            }
-
-                    elif cond_short:
+                        sl = min(bar['l'], bar['ema50'] - (bar['atr'] * 1.0))
+                        r = abs(entry - sl)
+                        tp1 = entry + (r * 1.5)
+                        tp2 = entry + (r * 3.0)
+                    elif trend_bear and pullback_short:
+                        sig_side = 'SHORT'
                         entry = bar['c']
-                        sl = max(h, entry + (bar['atr'] * 1.5))
-                        tp1 = l if l < entry else entry - abs(sl - entry)
-                        tp2 = l - (wave * 0.272)
-                        if tp2 >= tp1:
-                            tp2 = tp1 - abs(sl - entry)
+                        sl = max(bar['h'], bar['ema50'] + (bar['atr'] * 1.0))
+                        r = abs(sl - entry)
+                        tp1 = entry - (r * 1.5)
+                        tp2 = entry - (r * 3.0)
 
-                        price_diff = abs(sl - entry)
-                        if price_diff > 0:
-                            qty = (current_wallet * RISK_PCT) / price_diff
-                            positions[sym] = {
-                                'side': 'SHORT', 'entry': entry, 'sl': sl,
-                                'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
-                            }
+                # 模式 B: BTC 15m 盈虧比修復斐波順勢 (1.2R / 2.5R)
+                elif mode == 'btc_opt':
+                    sub = df.iloc[max(0, idx-25):idx+1]
+                    h, l = sub['h'].max(), sub['l'].min()
+                    wave = h - l
+                    if wave > 0 and (wave / l) >= 0.008:
+                        fib_0618_l = h - (wave * 0.618)
+                        fib_0618_s = l + (wave * 0.618)
+                        rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+                        rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+
+                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+
+                        if cond_long:
+                            sig_side = 'LONG'
+                            entry = bar['c']
+                            sl = min(l, entry - (bar['atr'] * 1.5))
+                            r = abs(entry - sl)
+                            tp1 = entry + (r * 1.2)
+                            tp2 = entry + (r * 2.5)
+                        elif cond_short:
+                            sig_side = 'SHORT'
+                            entry = bar['c']
+                            sl = max(h, entry + (bar['atr'] * 1.5))
+                            r = abs(sl - entry)
+                            tp1 = entry - (r * 1.2)
+                            tp2 = entry - (r * 2.5)
+
+                # 模式 C: 主流幣 & 黃金 15m 斐波順勢 (高勝率原版)
+                else:
+                    sub = df.iloc[max(0, idx-25):idx+1]
+                    h, l = sub['h'].max(), sub['l'].min()
+                    wave = h - l
+                    if wave > 0 and (wave / l) >= 0.005:
+                        fib_0618_l = h - (wave * 0.618)
+                        fib_0618_s = l + (wave * 0.618)
+                        rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+                        rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+
+                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+
+                        if cond_long:
+                            sig_side = 'LONG'
+                            entry = bar['c']
+                            sl = min(l, entry - (bar['atr'] * 1.5))
+                            tp1 = h if h > entry else entry + abs(entry - sl)
+                            tp2 = h + (wave * 0.272)
+                            if tp2 <= tp1:
+                                tp2 = tp1 + abs(entry - sl)
+                        elif cond_short:
+                            sig_side = 'SHORT'
+                            entry = bar['c']
+                            sl = max(h, entry + (bar['atr'] * 1.5))
+                            tp1 = l if l < entry else entry - abs(sl - entry)
+                            tp2 = l - (wave * 0.272)
+                            if tp2 >= tp1:
+                                tp2 = tp1 - abs(sl - entry)
+
+                # 建立持倉
+                if sig_side:
+                    price_diff = abs(entry - sl)
+                    if price_diff > 0:
+                        qty = (current_wallet * RISK_PCT) / price_diff
+                        positions[sym] = {
+                            'side': sig_side, 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                        }
 
     if not completed_trades:
         print("回測期間內無交易產生。")
@@ -296,7 +351,7 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 美股1D(60日波段) + 加密15m斐波 + TP1鎖利 + 全域高精度複利 (1年期回測)\n"
+        "判定邏輯: 美股1h均線回踩 + BTC盈虧比重構 + 加密15m斐波 + 全域高精度複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET} USDT\n"
         f"最終結餘: ${current_wallet:.6f} USDT ({roi_pct:+.4f}%)\n"
