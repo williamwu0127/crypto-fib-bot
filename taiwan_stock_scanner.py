@@ -180,7 +180,7 @@ def main():
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # 妖股獵人判斷
+                # 妖股獵人判斷 (Monster Stock)
                 high_60d = float(high_s.iloc[-61:-1].max())
                 is_monster_vol = vol_ma5 > 0 and (today_vol / vol_ma5) >= 3.0
                 is_monster_breakout = today_close > high_60d
@@ -279,6 +279,7 @@ def main():
 
     fields = []
     
+    # 1. 大盤分析區塊
     if market_data:
         sign = "+" if market_data['change_pts'] > 0 else ""
         fields.append({
@@ -291,20 +292,20 @@ def main():
             "inline": False
         })
     
+    # 2. 妖股獵人區塊
     if monster_stocks:
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
-        monster_str = ""
+        monster_lines = []
         for m in top_monsters:
-            monster_str += f"🔥 **{m['sid']} {m['name']}** ({m['close']}) | {m['industry']} | 爆量 `{m['vol_ratio']}x`\n"
+            monster_lines.append(f"🔥 **{m['sid']} {m['name']}** ({m['close']}) | {m['industry']} | 爆量 `{m['vol_ratio']}x`")
         
-        # 在 f-string 外部處理好字串換行，避免 Python 語法報錯
-        formatted_monster_str = f"> {monster_str.strip().replace('\n', '\n> ')}"
         fields.append({
             "name": "🚨 妖股獵人 (極端爆量 + 突破60日新高)",
-            "value": formatted_monster_str,
+            "value": "> " + "\n> ".join(monster_lines),
             "inline": False
         })
 
+    # 3. 常規 Top 10 區塊
     fields.append({
         "name": "───────── 🎯 盤後精選 Top 10 ─────────",
         "value": "\u200b",
