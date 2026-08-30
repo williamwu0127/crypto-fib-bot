@@ -69,7 +69,6 @@ def get_dynamic_all_stocks():
                     name = parts[1].strip()
                     if len(sid) == 4 and sid.isdigit():
                         ticker = f"{sid}.{market}"
-                        # 進行智慧產業細分
                         ind_str = refine_industry(name, original_ind)
                         stock_dict[ticker] = (sid, name, ind_str)
         except Exception as e:
@@ -297,10 +296,12 @@ def main():
         monster_str = ""
         for m in top_monsters:
             monster_str += f"🔥 **{m['sid']} {m['name']}** ({m['close']}) | {m['industry']} | 爆量 `{m['vol_ratio']}x`\n"
-            
+        
+        # 在 f-string 外部處理好字串換行，避免 Python 語法報錯
+        formatted_monster_str = f"> {monster_str.strip().replace('\n', '\n> ')}"
         fields.append({
             "name": "🚨 妖股獵人 (極端爆量 + 突破60日新高)",
-            "value": f"> {monster_str.strip().replace('\n', '\n> ')}",
+            "value": formatted_monster_str,
             "inline": False
         })
 
