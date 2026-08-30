@@ -64,7 +64,7 @@ def fetch_1year_historical_data(cfg):
                     break
                 all_klines.extend(res)
                 curr_start = res[-1][0] + (15 * 60 * 1000)
-                time.sleep(0.05)
+                time.sleep(0.04)
             
             if len(all_klines) > 200:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -88,11 +88,7 @@ def fetch_1year_historical_data(cfg):
         pass
     return None
 
-def backtest_single_symbol(sym, cfg, starting_equity):
-    df = fetch_1year_historical_data(cfg)
-    if df is None or len(df) < 100:
-        return [], None, None, starting_equity
-
+def prepare_market_indicators(df):
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -103,126 +99,197 @@ def backtest_single_symbol(sym, cfg, starting_equity):
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
+    return df
 
-    start_date = df.iloc[50]['time'].strftime("%Y-%m-%d")
-    end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
+def run_unified_backtest():
+    print("==================================================")
+    print(">>> 啟動【多空雙向 + 保本移動止損 + 全局複利】1 年歷史回測")
+    print(f">>> 初始本金: ${START_BALANCE:.2f} USDT | 風控: 1.0%")
+    print("==================================================\n")
 
-    trades = []
-    in_position = False
-    entry_price, sl_price, tp1_price, tp2_price = 0, 0, 0, 0
-    tp1_hit = False
-    qty = 0
-    current_equity = starting_equity
-
-    for i in range(50, len(df)):
-        bar = df.iloc[i]
-        prev_bar = df.iloc[i - 1]
-
-        # 1. 持倉處理 (含 Break-Even 保本止損)
-        if in_position:
-            # 觸發止損 (若已碰過 TP1，此處 sl_price 為開倉成本價保本)
-            if bar['l'] <= sl_price:
-                exit_price = sl_price
-                remaining_qty = qty * 0.5 if tp1_hit else qty
-                pnl = remaining_qty * (exit_price - entry_price)
-                current_equity += pnl
-                trades.append({'symbol': sym, 'pnl': pnl, 'type': 'BE_SL' if tp1_hit else 'SL'})
-                in_position = False
-                continue
-
-            # 觸發 TP1 (平 50%，並立即將剩餘倉位止損拉至開倉均價保本)
-            if not tp1_hit and bar['h'] >= tp1_price:
-                tp1_hit = True
-                pnl_tp1 = (qty * 0.5) * (tp1_price - entry_price)
-                current_equity += pnl_tp1
-                sl_price = entry_price  # 核心關鍵：保本移動止損！
-                trades.append({'symbol': sym, 'pnl': pnl_tp1, 'type': 'TP1'})
-
-            # 觸發 TP2 (平剩餘 50%，吃到 1.618 斐波大波段)
-            if tp1_hit and bar['h'] >= tp2_price:
-                pnl_tp2 = (qty * 0.5) * (tp2_price - entry_price)
-                current_equity += pnl_tp2
-                trades.append({'symbol': sym, 'pnl': pnl_tp2, 'type': 'TP2'})
-                in_position = False
-                continue
-
-        # 2. 開倉判定
-        if not in_position:
-            sub = df.iloc[max(0, i-25):i+1]
-            h, l = sub['h'].max(), sub['l'].min()
-            wave = h - l
-            if wave <= 0 or (wave / l) < 0.005:
-                continue
-
-            fib_0618_l = h - (wave * 0.618)
-            rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-            cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-
-            if cond_long:
-                entry_price = bar['c']
-                sl_price = min(l, entry_price - (bar['atr'] * 1.5))
-                tp1_price = h if h > entry_price else entry_price + abs(entry_price - sl_price)
-                tp2_price = h + (wave * 0.618)  # 延伸至 1.618 擴展位
-                if tp2_price <= tp1_price:
-                    tp2_price = tp1_price + (abs(entry_price - sl_price) * 2.0)
-
-                price_diff = abs(entry_price - sl_price)
-                if price_diff > 0:
-                    # 核心關鍵：動態複利倉位計算
-                    risk_capital = max(current_equity * RISK_PCT, 1.0)
-                    qty = risk_capital / price_diff
-                    in_position = True
-                    tp1_hit = False
-
-    return trades, start_date, end_date, current_equity
-
-def run_full_backtest():
-    print(">>> 啟動【4000%+ 複利 + 保本移動止損】1 年期回測...")
-    all_trades = []
+    dfs = {}
     earliest_start, latest_end = None, None
-    total_compounded_pnl = 0
-
-    symbol_results = {}
 
     for sym, cfg in SYMBOLS.items():
-        print(f"回測計算中: {sym.ljust(5)} ...")
-        t_list, s_date, e_date, final_eq = backtest_single_symbol(sym, cfg, START_BALANCE)
-        if s_date and (earliest_start is None or s_date < earliest_start):
-            earliest_start = s_date
-        if e_date and (latest_end is None or e_date > latest_end):
-            latest_end = e_date
-        all_trades.extend(t_list)
-        
-        sym_pnl = sum([t['pnl'] for t in t_list])
-        symbol_results[sym] = {'trades': len(t_list), 'wins': len([t for t in t_list if t['pnl'] > 0]), 'pnl': sym_pnl}
+        print(f"正在拉取數據: {sym.ljust(5)} ...", end=" ")
+        df = fetch_1year_historical_data(cfg)
+        if df is not None and len(df) > 100:
+            df = prepare_market_indicators(df)
+            dfs[sym] = df
+            s_date = df.iloc[60]['time'].strftime("%Y-%m-%d")
+            e_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
+            if earliest_start is None or s_date < earliest_start:
+                earliest_start = s_date
+            if latest_end is None or e_date > latest_end:
+                latest_end = e_date
+            print(f"成功 ({len(df)} 根 K 線)")
+        else:
+            print("資料不足略過")
 
-    if not all_trades:
-        print("回測期間無交易。")
+    if not dfs:
+        print("無可用數據。")
         return
 
-    df_res = pd.DataFrame(all_trades)
+    # 模擬逐根 K 線時間推進（全局統一時間軸）
+    # 建立持倉狀態與統一錢包
+    current_wallet = START_BALANCE
+    positions = {}  # {sym: {side, entry, sl, tp1, tp2, tp1_hit, qty, risk_cash}}
+    completed_trades = []
+
+    # 彙整所有時間點
+    all_timestamps = sorted(list(set([t for df in dfs.values() for t in df['time']])))
+
+    print("\n>>> 正在進行全域時間軸撮合與複利滾動運算...")
+
+    for curr_time in all_timestamps:
+        for sym, df in dfs.items():
+            match_row = df[df['time'] == curr_time]
+            if match_row.empty:
+                continue
+            idx = match_row.index[0]
+            if idx < 60:
+                continue
+            
+            bar = match_row.iloc[0]
+            prev_bar = df.iloc[idx - 1]
+
+            # 1. 檢查持倉出場
+            if sym in positions:
+                pos = positions[sym]
+                side = pos['side']
+                entry = pos['entry']
+                sl = pos['sl']
+                tp1 = pos['tp1']
+                tp2 = pos['tp2']
+                qty = pos['qty']
+                tp1_hit = pos['tp1_hit']
+
+                if side == 'LONG':
+                    # 觸發 SL / BE_SL
+                    if bar['l'] <= sl:
+                        rem_qty = qty * 0.5 if tp1_hit else qty
+                        pnl = rem_qty * (sl - entry)
+                        current_wallet += pnl
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'BE_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        del positions[sym]
+                        continue
+                    # 觸發 TP1
+                    if not tp1_hit and bar['h'] >= tp1:
+                        pos['tp1_hit'] = True
+                        pnl_tp1 = (qty * 0.5) * (tp1 - entry)
+                        current_wallet += pnl_tp1
+                        pos['sl'] = entry  # 保本移動止損！
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                    # 觸發 TP2
+                    if pos['tp1_hit'] and bar['h'] >= tp2:
+                        pnl_tp2 = (qty * 0.5) * (tp2 - entry)
+                        current_wallet += pnl_tp2
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                        del positions[sym]
+                        continue
+
+                elif side == 'SHORT':
+                    # 觸發 SL / BE_SL
+                    if bar['h'] >= sl:
+                        rem_qty = qty * 0.5 if tp1_hit else qty
+                        pnl = rem_qty * (entry - sl)
+                        current_wallet += pnl
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'BE_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        del positions[sym]
+                        continue
+                    # 觸發 TP1
+                    if not tp1_hit and bar['l'] <= tp1:
+                        pos['tp1_hit'] = True
+                        pnl_tp1 = (qty * 0.5) * (entry - tp1)
+                        current_wallet += pnl_tp1
+                        pos['sl'] = entry  # 保本移動止損！
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                    # 觸發 TP2
+                    if pos['tp1_hit'] and bar['l'] <= tp2:
+                        pnl_tp2 = (qty * 0.5) * (entry - tp2)
+                        current_wallet += pnl_tp2
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                        del positions[sym]
+                        continue
+
+            # 2. 開倉信號掃描 (波段 Swing 斐波 + 多空雙向)
+            if sym not in positions and current_wallet > 10.0:
+                sub = df.iloc[max(0, idx-60):idx+1]
+                h, l = sub['h'].max(), sub['l'].min()
+                wave = h - l
+                if wave <= 0 or (wave / l) < 0.008:
+                    continue
+
+                fib_0618_l = h - (wave * 0.618)
+                fib_0618_s = l + (wave * 0.618)
+
+                # 做多條件
+                rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
+                cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+
+                # 做空條件
+                rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+                cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+
+                if cond_long:
+                    entry = bar['c']
+                    sl = min(l, entry - (bar['atr'] * 1.5))
+                    tp1 = h if h > entry else entry + abs(entry - sl)
+                    tp2 = h + (wave * 0.618)
+                    if tp2 <= tp1:
+                        tp2 = tp1 + (abs(entry - sl) * 2.0)
+                    
+                    price_diff = abs(entry - sl)
+                    if price_diff > 0:
+                        risk_amount = current_wallet * RISK_PCT
+                        qty = risk_amount / price_diff
+                        positions[sym] = {
+                            'side': 'LONG', 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                        }
+
+                elif cond_short:
+                    entry = bar['c']
+                    sl = max(h, entry + (bar['atr'] * 1.5))
+                    tp1 = l if l < entry else entry - abs(sl - entry)
+                    tp2 = l - (wave * 0.618)
+                    if tp2 >= tp1:
+                        tp2 = tp1 - (abs(sl - entry) * 2.0)
+                    
+                    price_diff = abs(sl - entry)
+                    if price_diff > 0:
+                        risk_amount = current_wallet * RISK_PCT
+                        qty = risk_amount / price_diff
+                        positions[sym] = {
+                            'side': 'SHORT', 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                        }
+
+    if not completed_trades:
+        print("無成交紀錄。")
+        return
+
+    df_res = pd.DataFrame(completed_trades)
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0])
     overall_win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0.0
-    
-    # 計算加總複利總額
-    total_pnl = df_res['pnl'].sum()
-    final_balance = START_BALANCE + total_pnl
-    roi_pct = ((final_balance - START_BALANCE) / START_BALANCE) * 100
+    roi_pct = ((current_wallet - START_BALANCE) / START_BALANCE) * 100
 
     symbol_lines = []
-    for sym, r in symbol_results.items():
-        c = r['trades']
-        w = r['wins']
+    for sym in SYMBOLS.keys():
+        sub = df_res[df_res['symbol'] == sym]
+        c = len(sub)
+        w = len(sub[sub['pnl'] > 0])
         wr = (w / c * 100) if c > 0 else 0.0
-        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.1f}% | 收益: {r['pnl']:+8.2f}")
+        pnl = sub['pnl'].sum() if c > 0 else 0.0
+        symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.1f}% | 收益貢獻: {pnl:+9.2f}")
 
     report_text = (
         "```text\n"
-        "判定邏輯: 15m K線 | EMA50/200 + Fib0.618 + Break-Even保本複利 (1年期回測)\n"
+        "判定邏輯: 15m K線 | 多空雙向 + Swing Fib0.618 + 保本全域複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${START_BALANCE:.1f} USDT\n"
-        f"最終結餘: ${final_balance:.2f} USDT ({roi_pct:+.2f}%)\n"
+        f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
         f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.1f}%\n"
         "----------------------------------------------------\n"
         + "\n".join(symbol_lines) + "\n"
@@ -235,4 +302,4 @@ def run_full_backtest():
     print(">>> Discord 推播完成！")
 
 if __name__ == '__main__':
-    run_full_backtest()
+    run_unified_backtest()
