@@ -5,9 +5,8 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-if not WEBHOOK_URL or not WEBHOOK_URL.startswith("http"):
-    WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+# 固定使用指定新 Webhook（避免被 GitHub 舊 Secrets 覆蓋）
+WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 STOCK_POOL = [
     # 半導體 / 電子代工 / AI 概念
@@ -34,10 +33,8 @@ def send_msg(payload):
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Discord 狀態碼: {r.status_code}")
-        if r.status_code not in [200, 204]:
-            print(f"推播錯誤: {r.text}")
     except Exception as e:
-        print(f"發送 Discord 異常: {e}")
+        print(f"發送失敗: {e}")
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -55,7 +52,6 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     return dif, dea, hist
 
 def main():
-    print(f"目標 Webhook: {WEBHOOK_URL[:45]}...")
     scored_results = []
     latest_trade_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -87,9 +83,7 @@ def main():
             ma20_slope = ma20 - float(ma20_s.iloc[-2])
             vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
 
-            est_money_mil = (today_close * today_vol) / 100_000_000
-
-            # 門檻：站上月線
+            # 站上月線基礎門檻
             if today_close < ma20:
                 continue
 
@@ -99,88 +93,78 @@ def main():
             # 1. 均線多頭 (+25)
             if today_close > ma5 > ma10 > ma20 and ma20_slope > 0:
                 score += 25
-                reasons.append("均線多頭排列")
+                reasons.append("均線多頭")
 
             # 2. 突破 20 日高 (+20)
             high_20d = float(close_s.iloc[-21:-1].max())
             if today_close > high_20d:
                 score += 20
-                reasons.append("突破近20日新高")
+                reasons.append("突破20日高")
 
             # 3. 帶量表態 (+20)
             if vol_ma5 > 0 and (today_vol / vol_ma5) >= 1.2:
                 score += 20
-                reasons.append(f"帶量表態 (量比 {round(today_vol/vol_ma5, 1)}x)")
+                reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
 
             # 4. 實體紅 K (+15)
             k_range = today_high - today_low
             if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
                 score += 15
-                reasons.append("實體紅K收高")
+                reasons.append("紅K實體強")
 
             # 5. RSI & MACD (+20)
             rsi = float(calculate_rsi(close_s).iloc[-1])
             _, _, hist = calculate_macd(close_s)
             if 50 <= rsi <= 75 and hist.iloc[-1] > 0:
                 score += 20
-                reasons.append("MACD偏多 / RSI強勢區")
+                reasons.append("MACD偏多")
 
-            # 扣分機制
+            # 扣分
             if k_range > 0 and (today_high - today_close) / k_range > 0.4:
                 score -= 15
-                reasons.append("上影線偏長")
 
-            # 計算進出場建議價位
-            entry_low = round(min(ma5, today_close * 0.985), 2)
-            entry_high = round(today_close * 1.005, 2)
-            
-            # 止損設為月線 (20MA) 稍微下緣或 4% 防守
-            sl_price = round(max(ma20 * 0.985, today_close * 0.94), 2)
-            
-            # 止盈依據風險報酬比 1:1.5 與 1:2.5
-            risk_unit = today_close - sl_price
-            tp1_price = round(today_close + (risk_unit * 1.5), 2)
-            tp2_price = round(today_close + (risk_unit * 2.5), 2)
+            # 價位計算
+            entry_low = round(min(ma5, today_close * 0.985), 1)
+            entry_high = round(today_close * 1.005, 1)
+            sl_price = round(max(ma20 * 0.985, today_close * 0.94), 1)
+            risk = today_close - sl_price
+            tp1 = round(today_close + (risk * 1.5), 1)
+            tp2 = round(today_close + (risk * 2.5), 1)
 
             scored_results.append({
                 "sid": sid,
                 "name": name,
-                "entry_range": f"{entry_low} ~ {entry_high}",
-                "tp_str": f"{tp1_price} / {tp2_price}",
-                "sl_price": sl_price,
-                "turnover_mil": round(est_money_mil, 2),
+                "entry": f"{entry_low} ~ {entry_high}",
+                "tp": f"{tp1} / {tp2}",
+                "sl": sl_price,
                 "score": score,
-                "reasons": reasons
+                "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
             })
 
-        except Exception as e:
-            print(f"分析 {sid} 出錯: {e}")
+        except Exception:
+            continue
 
     top_picks = sorted(scored_results, key=lambda x: x["score"], reverse=True)[:5]
     
     fields = []
     for item in top_picks:
-        reasons_str = "、".join(item["reasons"]) if item["reasons"] else "多頭結構完整"
         fields.append({
-            "name": f"🎯 【{item['sid']} {item['name']}】",
+            "name": f"📌 {item['sid']} {item['name']}",
             "value": (
-                f"• 🟢 **建議進場區間**: `{item['entry_range']}` 元\n"
-                f"• 🎯 **建議止盈價位**: `{item['tp_str']}` 元 (TP1 / TP2)\n"
-                f"• 🛑 **建議止損價位**: `{item['sl_price']}` 元\n"
-                f"• 📊 **預估成交額**: `{item['turnover_mil']}` 億元\n"
-                f"• 🔍 **形態特徵**: {reasons_str}"
+                f"> **進場**: `{item['entry']}`\n"
+                f"> **止盈 (TP)**: `{item['tp']}`\n"
+                f"> **止損 (SL)**: `{item['sl']}`\n"
+                f"> **特徵**: `{item['tags']}`"
             ),
             "inline": False
         })
 
     payload = {
-        "username": "台股量化選股機器人",
-        "avatar_url": "https://cdn-icons-png.flaticon.com/512/3314/3314547.png",
+        "username": "台股量化選股",
         "embeds": [{
-            "title": f"📊 台股策略選股通知 ({latest_trade_date})",
-            "description": f"已完成主流標的形態結構分析，篩選出最佳進場標的：",
-            "color": 3066993,
-            "fields": fields if fields else [{"name": "提示", "value": "目前暫無符合形態門檻個股"}]
+            "title": f"📈 台股盤後精選 ({latest_trade_date})",
+            "color": 3447003,
+            "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
         }]
     }
 
