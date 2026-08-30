@@ -50,7 +50,7 @@ def fetch_latest_financial_news():
         print(f"動態抓取新聞失敗: {e}")
         
     if not news_list:
-        news_list.append("> 目前無法取得即時新聞，請透過各大財經平台關注本週聯準會動向與總經數據。")
+        news_list.append("> 目前無法取得即時新聞，請透過各大財經平台關注本週最新動態。")
         
     return news_list
 
@@ -79,26 +79,38 @@ def main():
                 "inline": True
             })
 
-    latest_news = fetch_latest_financial_news()
-    news_text = "\n".join([f"> {item}" for item in latest_news])
-    
-    fields.append({
-        "name": "───────── 📰 即時全球財經新聞快訊 ─────────",
-        "value": news_text,
-        "inline": False
-    })
-
-    payload = {
+    # --- 第一則訊息：全球指數與加密貨幣行情 ---
+    payload_market = {
         "username": "一週全球市場資訊雷達",
         "embeds": [{
-            "title": f"🌍 一週全球市場資訊與宏觀週報 ({datetime.now().strftime('%Y-%m-%d')})",
-            "description": "早安！本週全球資金風向、主要指數、加密貨幣表現以及自動抓取的最新市場動態如下：",
+            "title": f"🌍 一週全球市場指數與宏觀週報 ({datetime.now().strftime('%Y-%m-%d')})",
+            "description": "早安！本週全球資金風向、主要指數與加密貨幣表現總結如下：",
             "color": 15844367,
             "fields": fields
         }]
     }
+    print("發送第一則訊息 (市場行情)...")
+    send_msg(payload_market)
 
-    send_msg(payload)
+    # --- 第二則訊息：即時財經新聞快訊 ---
+    latest_news = fetch_latest_financial_news()
+    news_text = "\n".join([f"> {item}" for item in latest_news])
+    
+    payload_news = {
+        "username": "一週全球市場資訊雷達",
+        "embeds": [{
+            "title": f"📰 即時全球財經新聞與事件快訊 ({datetime.now().strftime('%Y-%m-%d')})",
+            "description": "本週自動抓取的最新財經動態與焦點新聞：",
+            "color": 3447003,
+            "fields": [{
+                "name": "───────── 焦點新聞快訊 ─────────",
+                "value": news_text,
+                "inline": False
+            }]
+        }]
+    }
+    print("發送第二則訊息 (即時新聞)...")
+    send_msg(payload_news)
 
 if __name__ == "__main__":
     main()
