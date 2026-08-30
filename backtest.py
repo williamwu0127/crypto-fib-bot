@@ -10,26 +10,26 @@ TZ_TW = timezone(timedelta(hours=8))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT'},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT'},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT'},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT'},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT'},
-    'CLU':   {'t': 'stock',   's': 'CL=F'},
-    'TSM':   {'t': 'stock',   's': 'TSM'},
-    'NVDA':  {'t': 'stock',   's': 'NVDA'},
-    'AMD':   {'t': 'stock',   's': 'AMD'},
-    'MSFT':  {'t': 'stock',   's': 'MSFT'},
-    'AAPL':  {'t': 'stock',   's': 'AAPL'},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL'},
-    'AMZN':  {'t': 'stock',   's': 'AMZN'},
-    'META':  {'t': 'stock',   's': 'META'},
-    'TSLA':  {'t': 'stock',   's': 'TSLA'},
-    'MU':    {'t': 'stock',   's': 'MU'},
-    'GLW':   {'t': 'stock',   's': 'GLW'},
-    'SPCX':  {'t': 'stock',   's': 'SPCX'},
-    'SNDK':  {'t': 'stock',   's': 'SNDK'}
+    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m'},
+    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m'},
+    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m'},
+    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m'},
+    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m'},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m'},
+    'CLU':   {'t': 'stock',   's': 'CL=F',     'interval': '1d'},
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1d'},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1d'},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1d'},
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1d'},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1d'},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1d'},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1d'},
+    'META':  {'t': 'stock',   's': 'META',     'interval': '1d'},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1d'},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1d'},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1d'},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1d'},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1d'}
 }
 
 INITIAL_WALLET = 100.0
@@ -58,7 +58,7 @@ def fetch_1year_historical_data(cfg):
             curr_start = start_ms
             
             while curr_start < now_ms:
-                url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval=15m&startTime={curr_start}&limit=1000"
+                url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
                 res = requests.get(url, timeout=10).json()
                 if not isinstance(res, list) or len(res) == 0:
                     break
@@ -75,8 +75,8 @@ def fetch_1year_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
-            df = yf.download(cfg['s'], period="60d", interval="15m", progress=False)
-            if df is not None and not df.empty and len(df) > 100:
+            df = yf.download(cfg['s'], period="1y", interval="1d", progress=False)
+            if df is not None and not df.empty and len(df) > 50:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 df = df.rename(columns=str.lower)
@@ -101,22 +101,22 @@ def prepare_indicators(df):
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
     return df
 
-def run_long_short_compounding_backtest():
+def run_backtest():
     print("==================================================")
-    print(">>> 啟動【多空雙向 + TP1鎖利 + 總倉位100U全域複利】1 年期回測")
-    print(f">>> 初始資金: ${INITIAL_WALLET:.2f} USDT | 風控: 1.0%")
+    print(">>> 啟動【美股1D日線 + BTC波幅過濾 + 總倉位全域複利】1 年期回測")
+    print(f">>> 初始本金: ${INITIAL_WALLET:.2f} USDT | 風控: 1.0%")
     print("==================================================\n")
 
     dfs = {}
     earliest_start, latest_end = None, None
 
     for sym, cfg in SYMBOLS.items():
-        print(f"拉取數據: {sym.ljust(5)} ...", end=" ")
+        print(f"拉取數據: {sym.ljust(5)} ({cfg['interval']}) ...", end=" ")
         df = fetch_1year_historical_data(cfg)
-        if df is not None and len(df) > 100:
+        if df is not None and len(df) > 50:
             df = prepare_indicators(df)
             dfs[sym] = df
-            s_date = df.iloc[50]['time'].strftime("%Y-%m-%d")
+            s_date = df.iloc[30]['time'].strftime("%Y-%m-%d")
             e_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
             if earliest_start is None or s_date < earliest_start:
                 earliest_start = s_date
@@ -136,7 +136,7 @@ def run_long_short_compounding_backtest():
     completed_trades = []
     symbol_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in SYMBOLS.keys()}
 
-    print(f"\n>>> 共有 {len(all_timestamps)} 個 15m 時間點，開始逐根排程撮合...")
+    print(f"\n>>> 共有 {len(all_timestamps)} 個時間點，開始全域時間軸撮合與複利滾動...")
 
     for curr_time in all_timestamps:
         for sym, df in dfs.items():
@@ -144,13 +144,13 @@ def run_long_short_compounding_backtest():
             if match_row.empty:
                 continue
             idx = match_row.index[0]
-            if idx < 50:
+            if idx < 30:
                 continue
             
             bar = match_row.iloc[0]
             prev_bar = df.iloc[idx - 1]
 
-            # 1. 持倉處理 (多空雙向 + TP1 鎖利)
+            # 1. 持倉處理 (多空雙向 + TP1 達成後 SL 移動於此)
             if sym in positions:
                 pos = positions[sym]
                 side = pos['side']
@@ -162,7 +162,6 @@ def run_long_short_compounding_backtest():
                 tp1_hit = pos['tp1_hit']
 
                 if side == 'LONG':
-                    # 觸發 SL
                     if bar['l'] <= sl:
                         rem_qty = qty * 0.5 if tp1_hit else qty
                         pnl = rem_qty * (sl - entry)
@@ -171,20 +170,18 @@ def run_long_short_compounding_backtest():
                         symbol_stats[sym]['pnl'] += pnl
                         if pnl > 0:
                             symbol_stats[sym]['wins'] += 1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1_LOCK_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
                         del positions[sym]
                         continue
-                    # 觸發 TP1
                     if not tp1_hit and bar['h'] >= tp1:
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (tp1 - entry)
                         current_wallet += pnl_tp1
-                        pos['sl'] = tp1  # 多單 SL 上移至 TP1 鎖利
+                        pos['sl'] = tp1  # SL 移動於此
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
                         completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    # 觸發 TP2
                     if pos['tp1_hit'] and bar['h'] >= tp2:
                         pnl_tp2 = (qty * 0.5) * (tp2 - entry)
                         current_wallet += pnl_tp2
@@ -196,7 +193,6 @@ def run_long_short_compounding_backtest():
                         continue
 
                 elif side == 'SHORT':
-                    # 觸發 SL
                     if bar['h'] >= sl:
                         rem_qty = qty * 0.5 if tp1_hit else qty
                         pnl = rem_qty * (entry - sl)
@@ -205,20 +201,18 @@ def run_long_short_compounding_backtest():
                         symbol_stats[sym]['pnl'] += pnl
                         if pnl > 0:
                             symbol_stats[sym]['wins'] += 1
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP1_LOCK_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
                         del positions[sym]
                         continue
-                    # 觸發 TP1
                     if not tp1_hit and bar['l'] <= tp1:
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (entry - tp1)
                         current_wallet += pnl_tp1
-                        pos['sl'] = tp1  # 空單 SL 下移至 TP1 鎖利
+                        pos['sl'] = tp1  # SL 移動於此
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
                         completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    # 觸發 TP2
                     if pos['tp1_hit'] and bar['l'] <= tp2:
                         pnl_tp2 = (qty * 0.5) * (entry - tp2)
                         current_wallet += pnl_tp2
@@ -234,7 +228,9 @@ def run_long_short_compounding_backtest():
                 sub = df.iloc[max(0, idx-25):idx+1]
                 h, l = sub['h'].max(), sub['l'].min()
                 wave = h - l
-                if wave <= 0 or (wave / l) < 0.005:
+                
+                min_wave_ratio = 0.01 if sym == 'BTC' else 0.005
+                if wave <= 0 or (wave / l) < min_wave_ratio:
                     continue
 
                 fib_0618_l = h - (wave * 0.618)
@@ -299,7 +295,7 @@ def run_long_short_compounding_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 15m K線 | 多空雙向 + TP1鎖利 + 總倉位100U全域複利 (1年期回測)\n"
+        "判定邏輯: 多空雙向 + (觸發後 SL 移動於此) + 美股1D/加密15m 全域複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET:.1f} USDT\n"
         f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
@@ -315,4 +311,4 @@ def run_long_short_compounding_backtest():
     print(">>> 完成推播！")
 
 if __name__ == '__main__':
-    run_long_short_compounding_backtest()
+    run_backtest()
