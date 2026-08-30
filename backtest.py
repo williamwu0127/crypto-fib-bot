@@ -104,6 +104,13 @@ def prepare_indicators(df):
     df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+    
+    # 布林帶 (20, 2)
+    df['bb_mid'] = df['c'].rolling(20).mean()
+    df['bb_std'] = df['c'].rolling(20).std()
+    df['bb_upper'] = df['bb_mid'] + (df['bb_std'] * 2.0)
+    df['bb_lower'] = df['bb_mid'] - (df['bb_std'] * 2.0)
+
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
     df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
 
@@ -116,7 +123,7 @@ def prepare_indicators(df):
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【原版 50/50 雙軌斐波 + 全域高精度複利】回測")
+    print(">>> 啟動【原版雙軌斐波 + 布林帶(BB)流動性過濾】回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -238,12 +245,12 @@ def run_backtest():
                         del positions[sym]
                         continue
 
-            # 2. 開倉信號判定 (全域複利)
+            # 2. 開倉信號判定 (結合布林帶下軌/上軌觸及收回過濾)
             if sym not in positions and current_wallet > 5.0:
                 sig_side = None
                 entry, sl, tp1, tp2 = 0, 0, 0, 0
 
-                # 美股 1h EMA 均線回踩 (1.5R / 3.0R)
+                # 美股 1h EMA 均線回踩 (維持不變)
                 if mode == 'stock_pullback':
                     trend_bull = (bar['ema20'] > bar['ema50']) and (bar['c'] > bar['ema200'])
                     trend_bear = (bar['ema20'] < bar['ema50']) and (bar['c'] < bar['ema200'])
@@ -266,7 +273,7 @@ def run_backtest():
                         tp1 = entry - (r * 1.5)
                         tp2 = entry - (r * 3.0)
 
-                # BTC 15m 盈虧比修復斐波順勢 (1.2R / 2.5R)
+                # BTC 15m 盈虧比修復斐波順勢 (加入布林帶過濾)
                 elif mode == 'btc_opt':
                     sub = df.iloc[max(0, idx-25):idx+1]
                     h, l = sub['h'].max(), sub['l'].min()
@@ -276,9 +283,13 @@ def run_backtest():
                         fib_0618_s = l + (wave * 0.618)
                         rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
                         rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+                        
+                        # 布林帶過濾：觸及或跌破下軌/上軌但收回
+                        bb_touch_long = (bar['l'] <= bar['bb_lower']) and (bar['c'] > bar['bb_lower'])
+                        bb_touch_short = (bar['h'] >= bar['bb_upper']) and (bar['c'] < bar['bb_upper'])
 
-                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull and bb_touch_long
+                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear and bb_touch_short
 
                         if cond_long:
                             sig_side = 'LONG'
@@ -295,7 +306,7 @@ def run_backtest():
                             tp1 = entry - (r * 1.2)
                             tp2 = entry - (r * 2.5)
 
-                # 主流幣 & 黃金 15m 斐波順勢
+                # 主流幣 & 黃金 15m 斐波順勢 (加入布林帶過濾)
                 else:
                     sub = df.iloc[max(0, idx-25):idx+1]
                     h, l = sub['h'].max(), sub['l'].min()
@@ -306,8 +317,11 @@ def run_backtest():
                         rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
                         rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
 
-                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+                        bb_touch_long = (bar['l'] <= bar['bb_lower']) and (bar['c'] > bar['bb_lower'])
+                        bb_touch_short = (bar['h'] >= bar['bb_upper']) and (bar['c'] < bar['bb_upper'])
+
+                        cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull and bb_touch_long
+                        cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear and bb_touch_short
 
                         if cond_long:
                             sig_side = 'LONG'
@@ -355,7 +369,7 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 美股1h均線回踩 + BTC盈虧比重構 + 加密15m斐波 + 全域高精度複利 (1年期回測)\n"
+        "判定邏輯: 雙軌斐波 + 布林帶下軌/上軌收回過濾 + 全域高精度複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
