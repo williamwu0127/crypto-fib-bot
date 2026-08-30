@@ -32,8 +32,8 @@ SYMBOLS = {
     'SNDK':  {'t': 'stock',   's': 'SNDK'}
 }
 
-INITIAL_WALLET = 100.0  # 總倉位初始本金 100 USDT
-RISK_PCT = 0.01         # 單筆動態風控 1%
+INITIAL_WALLET = 100.0
+RISK_PCT = 0.01
 
 def send_discord_safe(content):
     if not DISCORD_WEBHOOK_URL:
@@ -88,7 +88,7 @@ def fetch_1year_historical_data(cfg):
         pass
     return None
 
-def prepare_market_indicators(df):
+def prepare_indicators(df):
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
@@ -101,20 +101,20 @@ def prepare_market_indicators(df):
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
     return df
 
-def run_portfolio_compounding_backtest():
+def run_long_short_compounding_backtest():
     print("==================================================")
-    print(">>> 啟動【總倉位 100U + 20 檔標的全域複利滾動】1 年期回測")
-    print(f">>> 初始總資金: ${INITIAL_WALLET:.2f} USDT | 單筆動態風控: 1%")
+    print(">>> 啟動【多空雙向 + TP1鎖利 + 總倉位100U全域複利】1 年期回測")
+    print(f">>> 初始資金: ${INITIAL_WALLET:.2f} USDT | 風控: 1.0%")
     print("==================================================\n")
 
     dfs = {}
     earliest_start, latest_end = None, None
 
     for sym, cfg in SYMBOLS.items():
-        print(f"正在拉取數據: {sym.ljust(5)} ...", end=" ")
+        print(f"拉取數據: {sym.ljust(5)} ...", end=" ")
         df = fetch_1year_historical_data(cfg)
         if df is not None and len(df) > 100:
-            df = prepare_market_indicators(df)
+            df = prepare_indicators(df)
             dfs[sym] = df
             s_date = df.iloc[50]['time'].strftime("%Y-%m-%d")
             e_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
@@ -130,14 +130,13 @@ def run_portfolio_compounding_backtest():
         print("無可用數據。")
         return
 
-    # 全局時間軸統一排程
     all_timestamps = sorted(list(set([t for df in dfs.values() for t in df['time']])))
     current_wallet = INITIAL_WALLET
-    positions = {}  # {sym: {entry, sl, tp1, tp2, tp1_hit, qty}}
+    positions = {}
     completed_trades = []
     symbol_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in SYMBOLS.keys()}
 
-    print(f"\n>>> 共有 {len(all_timestamps)} 個 15m 時間切片，開始逐根時間撮合與複利滾動...")
+    print(f"\n>>> 共有 {len(all_timestamps)} 個 15m 時間點，開始逐根排程撮合...")
 
     for curr_time in all_timestamps:
         for sym, df in dfs.items():
@@ -151,9 +150,10 @@ def run_portfolio_compounding_backtest():
             bar = match_row.iloc[0]
             prev_bar = df.iloc[idx - 1]
 
-            # 1. 持倉處理 (含 SL 上移至 TP1 鎖利機制)
+            # 1. 持倉處理 (多空雙向 + TP1 鎖利)
             if sym in positions:
                 pos = positions[sym]
+                side = pos['side']
                 entry = pos['entry']
                 sl = pos['sl']
                 tp1 = pos['tp1']
@@ -161,43 +161,75 @@ def run_portfolio_compounding_backtest():
                 qty = pos['qty']
                 tp1_hit = pos['tp1_hit']
 
-                # 觸發止損 (若已碰過 TP1，此處 sl 已鎖死在 tp1 價位)
-                if bar['l'] <= sl:
-                    exit_price = sl
-                    remaining_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = remaining_qty * (exit_price - entry)
-                    current_wallet += pnl
-                    symbol_stats[sym]['trades'] += 1
-                    symbol_stats[sym]['pnl'] += pnl
-                    if pnl > 0:
+                if side == 'LONG':
+                    # 觸發 SL
+                    if bar['l'] <= sl:
+                        rem_qty = qty * 0.5 if tp1_hit else qty
+                        pnl = rem_qty * (sl - entry)
+                        current_wallet += pnl
+                        symbol_stats[sym]['trades'] += 1
+                        symbol_stats[sym]['pnl'] += pnl
+                        if pnl > 0:
+                            symbol_stats[sym]['wins'] += 1
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1_LOCK_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        del positions[sym]
+                        continue
+                    # 觸發 TP1
+                    if not tp1_hit and bar['h'] >= tp1:
+                        pos['tp1_hit'] = True
+                        pnl_tp1 = (qty * 0.5) * (tp1 - entry)
+                        current_wallet += pnl_tp1
+                        pos['sl'] = tp1  # 多單 SL 上移至 TP1 鎖利
+                        symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
-                    completed_trades.append({'symbol': sym, 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
-                    del positions[sym]
-                    continue
+                        symbol_stats[sym]['pnl'] += pnl_tp1
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                    # 觸發 TP2
+                    if pos['tp1_hit'] and bar['h'] >= tp2:
+                        pnl_tp2 = (qty * 0.5) * (tp2 - entry)
+                        current_wallet += pnl_tp2
+                        symbol_stats[sym]['trades'] += 1
+                        symbol_stats[sym]['wins'] += 1
+                        symbol_stats[sym]['pnl'] += pnl_tp2
+                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                        del positions[sym]
+                        continue
 
-                # 觸發第一止盈 TP1 (平 50%，並立即將剩餘 50% 倉位止損上移至 TP1 鎖死利潤)
-                if not tp1_hit and bar['h'] >= tp1:
-                    pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (tp1 - entry)
-                    current_wallet += pnl_tp1
-                    pos['sl'] = tp1  # 止損上移至 TP1 鎖死利潤！
-                    symbol_stats[sym]['trades'] += 1
-                    symbol_stats[sym]['wins'] += 1
-                    symbol_stats[sym]['pnl'] += pnl_tp1
-                    completed_trades.append({'symbol': sym, 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                elif side == 'SHORT':
+                    # 觸發 SL
+                    if bar['h'] >= sl:
+                        rem_qty = qty * 0.5 if tp1_hit else qty
+                        pnl = rem_qty * (entry - sl)
+                        current_wallet += pnl
+                        symbol_stats[sym]['trades'] += 1
+                        symbol_stats[sym]['pnl'] += pnl
+                        if pnl > 0:
+                            symbol_stats[sym]['wins'] += 1
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP1_LOCK_SL' if tp1_hit else 'SL', 'time': curr_time})
+                        del positions[sym]
+                        continue
+                    # 觸發 TP1
+                    if not tp1_hit and bar['l'] <= tp1:
+                        pos['tp1_hit'] = True
+                        pnl_tp1 = (qty * 0.5) * (entry - tp1)
+                        current_wallet += pnl_tp1
+                        pos['sl'] = tp1  # 空單 SL 下移至 TP1 鎖利
+                        symbol_stats[sym]['trades'] += 1
+                        symbol_stats[sym]['wins'] += 1
+                        symbol_stats[sym]['pnl'] += pnl_tp1
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                    # 觸發 TP2
+                    if pos['tp1_hit'] and bar['l'] <= tp2:
+                        pnl_tp2 = (qty * 0.5) * (entry - tp2)
+                        current_wallet += pnl_tp2
+                        symbol_stats[sym]['trades'] += 1
+                        symbol_stats[sym]['wins'] += 1
+                        symbol_stats[sym]['pnl'] += pnl_tp2
+                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                        del positions[sym]
+                        continue
 
-                # 觸發第二止盈 TP2 (平剩餘 50%)
-                if pos['tp1_hit'] and bar['h'] >= tp2:
-                    pnl_tp2 = (qty * 0.5) * (tp2 - entry)
-                    current_wallet += pnl_tp2
-                    symbol_stats[sym]['trades'] += 1
-                    symbol_stats[sym]['wins'] += 1
-                    symbol_stats[sym]['pnl'] += pnl_tp2
-                    completed_trades.append({'symbol': sym, 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
-                    del positions[sym]
-                    continue
-
-            # 2. 開倉信號判定 (單幣嚴格單持倉，以最新滾動錢包計算 1% 風險)
+            # 2. 開倉信號判定 (全域複利)
             if sym not in positions and current_wallet > 5.0:
                 sub = df.iloc[max(0, idx-25):idx+1]
                 h, l = sub['h'].max(), sub['l'].min()
@@ -206,8 +238,13 @@ def run_portfolio_compounding_backtest():
                     continue
 
                 fib_0618_l = h - (wave * 0.618)
+                fib_0618_s = l + (wave * 0.618)
+
                 rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
                 cond_long = (bar['c'] >= bar['ema50']) and (bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
+
+                rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+                cond_short = (bar['c'] <= bar['ema50']) and (bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
 
                 if cond_long:
                     entry = bar['c']
@@ -219,12 +256,28 @@ def run_portfolio_compounding_backtest():
 
                     price_diff = abs(entry - sl)
                     if price_diff > 0:
-                        # 全域動態複利核心：依當前總結餘動態計算下單數量
                         dynamic_risk = current_wallet * RISK_PCT
                         qty = dynamic_risk / price_diff
                         positions[sym] = {
-                            'entry': entry, 'sl': sl, 'tp1': tp1,
-                            'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                            'side': 'LONG', 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                        }
+
+                elif cond_short:
+                    entry = bar['c']
+                    sl = max(h, entry + (bar['atr'] * 1.5))
+                    tp1 = l if l < entry else entry - abs(sl - entry)
+                    tp2 = l - (wave * 0.272)
+                    if tp2 >= tp1:
+                        tp2 = tp1 - abs(sl - entry)
+
+                    price_diff = abs(sl - entry)
+                    if price_diff > 0:
+                        dynamic_risk = current_wallet * RISK_PCT
+                        qty = dynamic_risk / price_diff
+                        positions[sym] = {
+                            'side': 'SHORT', 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
                         }
 
     if not completed_trades:
@@ -246,7 +299,7 @@ def run_portfolio_compounding_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 15m K線 | 總倉位100U全域複利 + 觸發TP1後SL鎖利 (1年期回測)\n"
+        "判定邏輯: 15m K線 | 多空雙向 + TP1鎖利 + 總倉位100U全域複利 (1年期回測)\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${INITIAL_WALLET:.1f} USDT\n"
         f"最終結餘: ${current_wallet:.2f} USDT ({roi_pct:+.2f}%)\n"
@@ -262,4 +315,4 @@ def run_portfolio_compounding_backtest():
     print(">>> 完成推播！")
 
 if __name__ == '__main__':
-    run_portfolio_compounding_backtest()
+    run_long_short_compounding_backtest()
