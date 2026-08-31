@@ -1,5 +1,6 @@
 """
-Crypto & Gold 1-Year Backtest Engine (1h MTF Filter + Dynamic Compounding)
+Crypto & Gold Backtest Engine (1D Macro Trend Filter + 4H Dual-MA System)
+Supporting 1-Month and 1-Year Backtesting with Discord Webhook Notifications.
 """
 
 import os
@@ -17,16 +18,17 @@ DISCORD_WEBHOOK_URL = os.getenv(
 
 # ==================== 2. 標的配置 (純加密貨幣與黃金) ====================
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_opt'},     # BTC 防雜訊優化版
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'}, # ETH 標準斐波順勢
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'}, # SOL 標準斐波順勢
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'}, # BNB 標準斐波順勢
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'}, # DOGE 標準斐波順勢
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'mode': 'crypto_fib'}  # 黃金標準斐波順勢
+    'BTC':  {'t': 'binance', 's': 'BTCUSDT',  'interval': '4h'},
+    'ETH':  {'t': 'binance', 's': 'ETHUSDT',  'interval': '4h'},
+    'SOL':  {'t': 'binance', 's': 'SOLUSDT',  'interval': '4h'},
+    'BNB':  {'t': 'binance', 's': 'BNBUSDT',  'interval': '4h'},
+    'DOGE': {'t': 'binance', 's': 'DOGEUSDT', 'interval': '4h'},
+    'XAU':  {'t': 'binance', 's': 'XAUUSDT', 'interval': '4h'}
 }
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.01
+RISK_PCT = 0.01  # 單筆風險 1%
+FEE_RATE = 0.0006  # 萬分之六單邊手續費與滑價
 
 def format_full_num(val, max_dec=8):
     try:
@@ -50,15 +52,16 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-# ==================== 3. 數據抓取與指標計算 ====================
+# ==================== 3. 數據抓取與雙均線指標計算 ====================
 def fetch_historical_data(cfg, interval=None, days=365):
     itv = interval if interval else cfg['interval']
     try:
         now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
+        # 多抓 90 天以確保 MA120 及日線 MA60 有足夠 K 棒初始化
+        start_ms = now_ms - ((days + 90) * 24 * 60 * 60 * 1000)
         all_klines = []
         curr_start = start_ms
-        step_ms = 15 * 60 * 1000 if itv == '15m' else 60 * 60 * 1000
+        step_ms = 4 * 60 * 60 * 1000 if itv == '4h' else 24 * 60 * 60 * 1000
         
         while curr_start < now_ms:
             url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={itv}&startTime={curr_start}&limit=1000"
@@ -81,53 +84,78 @@ def fetch_historical_data(cfg, interval=None, days=365):
         pass
     return None
 
-def prepare_indicators(df):
-    df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
-    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
-    tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
-    df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
+def prepare_indicators(df_4h, df_1d):
+    # 1. 4H 雙均線系統配置 (MA / EMA 20, 60, 120 共 6 條線)
+    df_4h['ma20'] = df_4h['c'].rolling(20).mean()
+    df_4h['ma60'] = df_4h['c'].rolling(60).mean()
+    df_4h['ma120'] = df_4h['c'].rolling(120).mean()
 
-    delta = df['c'].diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-    df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
-    return df
+    df_4h['ema20'] = df_4h['c'].ewm(span=20, adjust=False).mean()
+    df_4h['ema60'] = df_4h['c'].ewm(span=60, adjust=False).mean()
+    df_4h['ema120'] = df_4h['c'].ewm(span=120, adjust=False).mean()
+
+    # 均線密集帶 (MA Band)
+    df_4h['band_top'] = df_4h[['ma20', 'ema20', 'ma60', 'ema60', 'ma120', 'ema120']].max(axis=1)
+    df_4h['band_bot'] = df_4h[['ma20', 'ema20', 'ma60', 'ema60', 'ma120', 'ema120']].min(axis=1)
+    
+    # 密集判定：6 條均線最大與最小落差在收盤價 3.5% 內
+    df_4h['is_squeeze'] = (df_4h['band_top'] - df_4h['band_bot']) / df_4h['c'] < 0.035
+
+    # 均線發散判定
+    df_4h['bull_div'] = (df_4h['ema20'] > df_4h['ema60']) & (df_4h['ema60'] > df_4h['ema120']) & (df_4h['ma20'] > df_4h['ma60'])
+    df_4h['bear_div'] = (df_4h['ema20'] < df_4h['ema60']) & (df_4h['ema60'] < df_4h['ema120']) & (df_4h['ma20'] < df_4h['ma60'])
+
+    # 成交量防濾網 (大於 20 期均量 1.2 倍)
+    df_4h['vol_ma20'] = df_4h['v'].rolling(20).mean()
+    df_4h['vol_surge'] = df_4h['v'] >= (1.2 * df_4h['vol_ma20'])
+
+    # 2. 日線趨勢濾網 (日線 MA60 / EMA120)
+    df_1d['daily_ma60'] = df_1d['c'].rolling(60).mean()
+    df_1d['daily_trend'] = np.where(df_1d['c'] > df_1d['daily_ma60'], 1, -1)
+
+    df_4h['daily_date'] = df_4h['time'].dt.floor('D')
+    df_1d['daily_date'] = df_1d['time'].dt.floor('D')
+    daily_map = df_1d.drop_duplicates(subset=['daily_date']).set_index('daily_date')['daily_trend'].to_dict()
+    df_4h['macro_filter'] = df_4h['daily_date'].map(daily_map).ffill().fillna(0)
+
+    return df_4h
 
 # ==================== 4. 事件驅動撮合回測引擎 ====================
-def run_backtest():
+def run_backtest(days=365):
+    period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 60)
-    print(">>> 啟動【純加密貨幣 + 黃金 (1h 大趨勢鎖定 + 15m 順勢斐波 + 全域複利)】1 年期回測")
-    print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
+    print(f">>> 啟動【純加密貨幣 + 黃金 (日線大趨勢定錨 + 4H 雙均線系統 + 階梯平倉)】{period_title}回測")
+    print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 單筆風控: {RISK_PCT*100}% | 手續費: {FEE_RATE*100}%")
     print("=" * 60 + "\n")
 
     dfs_trade = {}
-    dfs_1h = {}
     events = []
     earliest_start, latest_end = None, None
+    now_ms = int(time.time() * 1000)
+    start_filter_time = pd.to_datetime(now_ms - (days * 24 * 60 * 60 * 1000), unit='ms')
 
     for sym, cfg in SYMBOLS.items():
-        print(f"拉取數據: {sym.ljust(5)} (15m + 1h MTF) ...", end=" ", flush=True)
-        df_trade = fetch_historical_data(cfg, interval='15m', days=365)
-        df_1h = fetch_historical_data(cfg, interval='1h', days=365)
+        print(f"拉取數據: {sym.ljust(5)} (4h + 1d MTF) ...", end=" ", flush=True)
+        df_4h = fetch_historical_data(cfg, interval='4h', days=days)
+        df_1d = fetch_historical_data(cfg, interval='1d', days=days)
         
-        if df_trade is not None and len(df_trade) > 30 and df_1h is not None and len(df_1h) > 50:
-            df_trade = prepare_indicators(df_trade)
-            df_1h = prepare_indicators(df_1h)
+        if df_4h is not None and len(df_4h) > 130 and df_1d is not None and len(df_1d) > 65:
+            df_prepared = prepare_indicators(df_4h, df_1d)
+            # 截取所選回測期間
+            df_trade = df_prepared[df_prepared['time'] >= start_filter_time].reset_index(drop=True)
             dfs_trade[sym] = df_trade
-            dfs_1h[sym] = df_1h
 
-            s_date = pd.to_datetime(df_trade.iloc[25]['time']).strftime("%Y-%m-%d")
-            e_date = pd.to_datetime(df_trade.iloc[-1]['time']).strftime("%Y-%m-%d")
-            if earliest_start is None or s_date < earliest_start:
-                earliest_start = s_date
-            if latest_end is None or e_date > latest_end:
-                latest_end = e_date
+            if len(df_trade) > 0:
+                s_date = pd.to_datetime(df_trade.iloc[0]['time']).strftime("%Y-%m-%d")
+                e_date = pd.to_datetime(df_trade.iloc[-1]['time']).strftime("%Y-%m-%d")
+                if earliest_start is None or s_date < earliest_start:
+                    earliest_start = s_date
+                if latest_end is None or e_date > latest_end:
+                    latest_end = e_date
 
-            for idx in range(25, len(df_trade)):
-                events.append((df_trade.iloc[idx]['time'], sym, idx))
-            print(f"完成 ({len(df_trade)} 根 15m K 線)")
+                for idx in range(1, len(df_trade)):
+                    events.append((df_trade.iloc[idx]['time'], sym, idx))
+                print(f"完成 ({len(df_trade)} 根 4H K 線)")
         else:
             print("❌ 資料不足略過")
 
@@ -147,10 +175,8 @@ def run_backtest():
         df = dfs_trade[sym]
         bar = df.iloc[idx]
         prev_bar = df.iloc[idx - 1]
-        cfg = SYMBOLS[sym]
-        mode = cfg['mode']
 
-        # 1. 持倉處理 (TP1 平倉 50% 且 SL 移至 TP1 鎖利)
+        # 1. 持倉狀態檢查與平倉 (階梯止盈：TP1 達 1:1.5 平 50% 且 SL 移至開倉價，TP2 達 1:3 全平)
         if sym in positions:
             pos = positions[sym]
             side = pos['side']
@@ -162,28 +188,31 @@ def run_backtest():
             tp1_hit = pos['tp1_hit']
 
             if side == 'LONG':
+                # 止損觸發
                 if bar['l'] <= sl:
                     rem_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = rem_qty * (sl - entry)
+                    pnl = rem_qty * (sl - entry) - (rem_qty * (entry + sl) * FEE_RATE)
                     current_wallet += pnl
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['pnl'] += pnl
                     if pnl > 0:
                         symbol_stats[sym]['wins'] += 1
-                    completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'SL', 'time': event_time})
+                    completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'SL/BE', 'time': event_time})
                     del positions[sym]
                     continue
+                # TP1 觸發 (平 50%，止損移至成本線)
                 if not tp1_hit and bar['h'] >= tp1:
                     pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (tp1 - entry)
+                    pnl_tp1 = (qty * 0.5) * (tp1 - entry) - ((qty * 0.5) * (entry + tp1) * FEE_RATE)
                     current_wallet += pnl_tp1
-                    pos['sl'] = tp1
+                    pos['sl'] = entry  # 移至保本損
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['wins'] += 1
                     symbol_stats[sym]['pnl'] += pnl_tp1
                     completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': event_time})
+                # TP2 觸發 (平剩餘 50%)
                 if pos['tp1_hit'] and bar['h'] >= tp2:
-                    pnl_tp2 = (qty * 0.5) * (tp2 - entry)
+                    pnl_tp2 = (qty * 0.5) * (tp2 - entry) - ((qty * 0.5) * (entry + tp2) * FEE_RATE)
                     current_wallet += pnl_tp2
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['wins'] += 1
@@ -193,28 +222,31 @@ def run_backtest():
                     continue
 
             elif side == 'SHORT':
+                # 止損觸發
                 if bar['h'] >= sl:
                     rem_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = rem_qty * (entry - sl)
+                    pnl = rem_qty * (entry - sl) - (rem_qty * (entry + sl) * FEE_RATE)
                     current_wallet += pnl
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['pnl'] += pnl
                     if pnl > 0:
                         symbol_stats[sym]['wins'] += 1
-                    completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'SL', 'time': event_time})
+                    completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'SL/BE', 'time': event_time})
                     del positions[sym]
                     continue
+                # TP1 觸發
                 if not tp1_hit and bar['l'] <= tp1:
                     pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (entry - tp1)
+                    pnl_tp1 = (qty * 0.5) * (entry - tp1) - ((qty * 0.5) * (entry + tp1) * FEE_RATE)
                     current_wallet += pnl_tp1
-                    pos['sl'] = tp1
+                    pos['sl'] = entry  # 移至保本損
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['wins'] += 1
                     symbol_stats[sym]['pnl'] += pnl_tp1
                     completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': event_time})
+                # TP2 觸發
                 if pos['tp1_hit'] and bar['l'] <= tp2:
-                    pnl_tp2 = (qty * 0.5) * (entry - tp2)
+                    pnl_tp2 = (qty * 0.5) * (entry - tp2) - ((qty * 0.5) * (entry + tp2) * FEE_RATE)
                     current_wallet += pnl_tp2
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['wins'] += 1
@@ -223,91 +255,69 @@ def run_backtest():
                     del positions[sym]
                     continue
 
-        # 2. 開倉信號判定 (含 1h 大週期 EMA200 鎖定)
+        # 2. 開倉信號判定 (雙均線策略：密集突破開倉 + 首次回踩 20 均線)
         if sym not in positions and current_wallet > 5.0:
             sig_side = None
-            entry, sl, tp1, tp2 = 0, 0, 0, 0
+            entry, sl, tp1, tp2 = 0.0, 0.0, 0.0, 0.0
+            macro_trend = bar['macro_filter']
 
-            higher_trend_bull = True
-            higher_trend_bear = True
-            
-            if sym in dfs_1h:
-                df_h = dfs_1h[sym]
-                matched_1h = df_h[df_h['time'] <= event_time]
-                if not matched_1h.empty and len(matched_1h) >= 200:
-                    bar_1h = matched_1h.iloc[-1]
-                    higher_trend_bull = (bar_1h['c'] >= bar_1h['ema200'])
-                    higher_trend_bear = (bar_1h['c'] <= bar_1h['ema200'])
+            # --- 做多信號 ---
+            if macro_trend == 1:
+                # 模式 A: 均線密集向上突破 (前根密集 + 當根實體突破頂部帶 + 放量)
+                if prev_bar['is_squeeze'] and bar['c'] > bar['band_top'] and bar['vol_surge']:
+                    sig_side = 'LONG'
+                    entry = bar['c']
+                    sl = bar['band_bot']  # 止損設密集區底部
+                # 模式 B: 多頭發散下首次回踩 20 均線不破 (收盤站穩 EMA20 / MA20 且最低價有觸及)
+                elif bar['bull_div'] and (bar['l'] <= bar['ema20']) and (bar['c'] >= bar['ema20']) and (prev_bar['c'] > prev_bar['ema20']):
+                    sig_side = 'LONG'
+                    entry = bar['c']
+                    sl = min(bar['ma20'], bar['ema20']) * 0.995  # 止損設 20 均線微下方
 
-            sub = df.iloc[max(0, idx-25):idx+1]
-            h, l = sub['h'].max(), sub['l'].min()
-            wave = h - l
+                if sig_side == 'LONG':
+                    r = entry - sl
+                    if r > 0 and (r / entry) >= 0.003:  # 確保止損空間合理
+                        tp1 = entry + (r * 1.5)
+                        tp2 = entry + (r * 3.0)
+                    else:
+                        sig_side = None
 
-            # BTC 防雜訊優化版
-            if mode == 'btc_opt':
-                if wave > 0 and (wave / l) >= 0.008:
-                    fib_0618_l = h - (wave * 0.618)
-                    fib_0618_s = l + (wave * 0.618)
-                    rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-                    rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
+            # --- 做空信號 ---
+            elif macro_trend == -1:
+                # 模式 A: 均線密集跌破
+                if prev_bar['is_squeeze'] and bar['c'] < bar['band_bot'] and bar['vol_surge']:
+                    sig_side = 'SHORT'
+                    entry = bar['c']
+                    sl = bar['band_top']  # 止損設密集區頂部
+                # 模式 B: 空頭發散下首次回踩 20 均線不破
+                elif bar['bear_div'] and (bar['h'] >= bar['ema20']) and (bar['c'] <= bar['ema20']) and (prev_bar['c'] < prev_bar['ema20']):
+                    sig_side = 'SHORT'
+                    entry = bar['c']
+                    sl = max(bar['ma20'], bar['ema20']) * 1.005
 
-                    cond_long = higher_trend_bull and (bar['c'] >= bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-                    cond_short = higher_trend_bear and (bar['c'] <= bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
+                if sig_side == 'SHORT':
+                    r = sl - entry
+                    if r > 0 and (r / entry) >= 0.003:
+                        tp1 = entry - (r * 1.5)
+                        tp2 = entry - (r * 3.0)
+                    else:
+                        sig_side = None
 
-                    if cond_long:
-                        sig_side = 'LONG'
-                        entry = bar['c']
-                        sl = min(l, entry - (bar['atr'] * 1.5))
-                        r = abs(entry - sl)
-                        tp1 = entry + (r * 1.2)
-                        tp2 = entry + (r * 2.5)
-                    elif cond_short:
-                        sig_side = 'SHORT'
-                        entry = bar['c']
-                        sl = max(h, entry + (bar['atr'] * 1.5))
-                        r = abs(sl - entry)
-                        tp1 = entry - (r * 1.2)
-                        tp2 = entry - (r * 2.5)
-
-            # ETH, SOL, BNB, DOGE, XAU 標準斐波順勢
-            else:
-                if wave > 0 and (wave / l) >= 0.005:
-                    fib_0618_l = h - (wave * 0.618)
-                    fib_0618_s = l + (wave * 0.618)
-                    rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_bar['rsi'])
-                    rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_bar['rsi'])
-
-                    cond_long = higher_trend_bull and (bar['c'] >= bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] >= l) and rsi_bull
-                    cond_short = higher_trend_bear and (bar['c'] <= bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] <= h) and rsi_bear
-
-                    if cond_long:
-                        sig_side = 'LONG'
-                        entry = bar['c']
-                        sl = min(l, entry - (bar['atr'] * 1.5))
-                        tp1 = h if h > entry else entry + abs(entry - sl)
-                        tp2 = h + (wave * 0.272)
-                        if tp2 <= tp1:
-                            tp2 = tp1 + abs(entry - sl)
-                    elif cond_short:
-                        sig_side = 'SHORT'
-                        entry = bar['c']
-                        sl = max(h, entry + (bar['atr'] * 1.5))
-                        tp1 = l if l < entry else entry - abs(sl - entry)
-                        tp2 = l - (wave * 0.272)
-                        if tp2 >= tp1:
-                            tp2 = tp1 - abs(sl - entry)
-
+            # 計算部位大小 (依據 1% 風控金額反推，實際槓桿最高限制 5 倍)
             if sig_side:
-                price_diff = abs(entry - sl)
-                if price_diff > 0:
-                    qty = (current_wallet * RISK_PCT) / price_diff
-                    positions[sym] = {
-                        'side': sig_side, 'entry': entry, 'sl': sl,
-                        'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
-                    }
+                risk_dist = abs(entry - sl)
+                qty = (current_wallet * RISK_PCT) / risk_dist
+                # 限制最大實際名義名額不超過當前總資金 5 倍
+                if (qty * entry) > (current_wallet * 5.0):
+                    qty = (current_wallet * 5.0) / entry
+                    
+                positions[sym] = {
+                    'side': sig_side, 'entry': entry, 'sl': sl,
+                    'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                }
 
     if not completed_trades:
-        print("回測期間內無交易產生。")
+        print(f"[{period_title}] 回測期間內無交易產生。")
         return
 
     df_res = pd.DataFrame(completed_trades)
@@ -325,8 +335,8 @@ def run_backtest():
 
     report_text = (
         "```text\n"
-        "判定邏輯: 純加密貨幣+黃金 (1h大趨勢鎖定 + 15m順勢斐波 + 全域複利)\n"
-        f"回測區間: {earliest_start} ~ {latest_end}\n"
+        f"判定邏輯: 純加密貨幣+黃金 (日線大趨勢定錨 + 4H雙均線系統 + 階梯平倉)\n"
+        f"回測週期: {period_title} ({earliest_start} ~ {latest_end})\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
         f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_win_rate:.2f}%\n"
@@ -341,4 +351,8 @@ def run_backtest():
     print("完成！\n", flush=True)
 
 if __name__ == '__main__':
-    run_backtest()
+    # 執行 1 個月 (30天) 回測
+    run_backtest(days=30)
+    time.sleep(2)
+    # 執行 1 年 (365天) 回測
+    run_backtest(days=365)
