@@ -1,9 +1,9 @@
 """
-XAU & MSFT Custom RR Dedicated Quant Engine
+XAU & MSFT Tri-Track Production Engine
 - Track 1: XAU Swing (4H)  | 1D MA60 + 4H Donchian(20) | 2.0R BE -> 5.0R TP
 - Track 2: XAU Fast  (1H)  | 1D MA60 + 1H Donchian(20) | 1.5R BE -> 3.0R TP
 - Track 3: MSFT Swing (4H) | 1D MA60 + 4H Donchian(20) | 1.5R BE -> 3.0R TP
-Features: Dual-Mode Execution (Mode 1: Isolated Wallets / Mode 2: Combined Compounding Wallet)
+Modes: 'ISOLATED' ($100 per track) | 'COMBINED' ($100 shared compounding)
 """
 
 import os
@@ -14,14 +14,14 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-# ==================== 1. Webhook 與交易配置 ====================
+# ==================== 1. Webhook 與交易風控配置 ====================
 DISCORD_WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
 INITIAL_CAPITAL = 100.0  # 基礎起始本金
-RISK_PCT = 0.05         # 單筆承擔 5% 風險
+RISK_PCT = 0.05         # 單筆固定承擔 5% 風險
 FEE_RATE = 0.0004       # 綜合點差與手續費 (萬分之四)
 MAX_LEVERAGE = 10.0     # 10 倍實質槓桿上限
 
@@ -60,15 +60,14 @@ def fetch_raw_data(ticker_sym, days=365):
         ticker = yf.Ticker(ticker_sym)
 
         # 抓取 1H K 線
-        df_1h = ticker.history(period=period_str, interval="1h")
+        df_1h = ticker.history(period=period_str, interval="1h").reset_index()
         if df_1h.empty:
             return None, None, None
 
-        df_1h = df_1h.reset_index()
         date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
         df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
         df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-        df_1h = df_1h.sort_values('time').reset_index(drop=True)
+        df_1h = df_1h.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
 
         # 合成 4H K 線
         df_1h_indexed = df_1h.set_index('time')
@@ -80,10 +79,10 @@ def fetch_raw_data(ticker_sym, days=365):
         df_1d = ticker.history(period=period_str, interval="1d").reset_index()
         date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
         df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
-        df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-        df_1d = df_1d.sort_values('time').reset_index(drop=True)
+        df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c'}, inplace=True)
+        df_1d = df_1d.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
 
-        return df_1h[['time', 'o', 'h', 'l', 'c', 'v']], df_4h[['time', 'o', 'h', 'l', 'c', 'v']], df_1d[['time', 'o', 'h', 'l', 'c', 'v']]
+        return df_1h[['time', 'o', 'h', 'l', 'c', 'v']], df_4h[['time', 'o', 'h', 'l', 'c', 'v']], df_1d[['time', 'o', 'h', 'l', 'c']]
     except Exception as e:
         print(f"[!] 數據抓取失敗 ({ticker_sym}): {e}")
         return None, None, None
@@ -108,16 +107,13 @@ def prepare_indicators(df_trade, df_1d, dc_window=20):
 
     return df_trade
 
-# ==================== 4. 回測執行引擎 ====================
+# ==================== 4. 撮合回測核心 ====================
 def run_unified_backtest(days=365, mode='COMBINED'):
-    """
-    mode: 'COMBINED' (合併共享資金池，極致複利) | 'ISOLATED' (分開獨立帳戶)
-    """
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     now_ms = int(time.time() * 1000)
     start_filter_time = pd.to_datetime(now_ms - (days * 24 * 60 * 60 * 1000), unit='ms')
 
-    # 拉取數據
+    # 1. 抓取數據
     gold_1h, gold_4h, gold_1d = fetch_raw_data("GC=F", days=days)
     msft_1h, msft_4h, msft_1d = fetch_raw_data("MSFT", days=days)
 
@@ -131,7 +127,7 @@ def run_unified_backtest(days=365, mode='COMBINED'):
         'MSFT_4H': prepare_indicators(msft_4h.copy(), msft_1d.copy(), dc_window=20)
     }
 
-    # 截取區間並構建時間序列事件
+    # 2. 構建事件隊列
     events = []
     earliest_start, latest_end = None, None
 
@@ -150,24 +146,26 @@ def run_unified_backtest(days=365, mode='COMBINED'):
 
     events.sort(key=lambda x: x[0])
 
-    # 資金初始化
+    # 3. 資金狀態初始化
     if mode == 'COMBINED':
         total_wallet = float(INITIAL_CAPITAL)
-        wallets = {t_key: total_wallet for t_key in STRATEGY_TRACKS.keys()} # 共享引用
+        wallets = {}
     else:
-        wallets = {t_key: float(INITIAL_CAPITAL) for t_key in STRATEGY_TRACKS.keys()} # 獨立 $100
+        total_wallet = 0.0
+        wallets = {t_key: float(INITIAL_CAPITAL) for t_key in STRATEGY_TRACKS.keys()}
 
     positions = {}
     completed_trades = []
     track_stats = {t: {'trades': 0, 'wins': 0, 'pnl': 0.0} for t in STRATEGY_TRACKS.keys()}
 
+    # 4. 時間序列撮合
     for event_time, t_key, idx in events:
         df = track_dfs[t_key]
         bar = df.iloc[idx]
         cfg = STRATEGY_TRACKS[t_key]
         current_w = total_wallet if mode == 'COMBINED' else wallets[t_key]
 
-        # 1. 持倉處理 (移保本 + 止盈)
+        # 4.1 持倉處理 (移保本 + 止盈)
         if t_key in positions:
             pos = positions[t_key]
             side = pos['side']
@@ -233,20 +231,22 @@ def run_unified_backtest(days=365, mode='COMBINED'):
                     del positions[t_key]
                     continue
 
-        # 2. 開倉判定
+        # 4.2 開倉判定 (已預先提取 be_r 與 tp_r，避免作用域錯誤)
         current_w = total_wallet if mode == 'COMBINED' else wallets[t_key]
         if t_key not in positions and current_w > 5.0:
             macro_trend = bar['macro_filter']
             sig_side = None
             entry, sl, tp, be_target = 0.0, 0.0, 0.0, 0.0
+            be_r = cfg['be_r']
+            tp_r = cfg['tp_r']
 
             if macro_trend == 1 and bar['c'] > bar['dc_high']:
                 sig_side = 'LONG'
                 entry = bar['c']
                 sl = entry - (bar['atr'] * 1.5)
                 risk_dist = entry - sl
-                be_target = entry + (risk_dist * cfg['be_r'])
-                tp = entry + (risk_dist * cfg['tp_r'])
+                be_target = entry + (risk_dist * be_r)
+                tp = entry + (risk_dist * tp_r)
 
             elif macro_trend == -1 and bar['c'] < bar['dc_low']:
                 sig_side = 'SHORT'
@@ -254,7 +254,7 @@ def run_unified_backtest(days=365, mode='COMBINED'):
                 sl = entry + (bar['atr'] * 1.5)
                 risk_dist = sl - entry
                 be_target = entry - (risk_dist * be_r)
-                tp = entry - (risk_dist * cfg['tp_r'])
+                tp = entry - (risk_dist * tp_r)
 
             if sig_side and risk_dist > 0:
                 qty = (current_w * RISK_PCT) / risk_dist
@@ -266,7 +266,7 @@ def run_unified_backtest(days=365, mode='COMBINED'):
                     'tp': tp, 'be_target': be_target, 'is_be_moved': False, 'qty': qty
                 }
 
-    # 輸出報表
+    # 5. 統計與格式化報表
     df_res = pd.DataFrame(completed_trades)
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0]) if total_trades > 0 else 0
@@ -280,7 +280,7 @@ def run_unified_backtest(days=365, mode='COMBINED'):
         tot_init = INITIAL_CAPITAL * 3
         tot_final = sum(wallets.values())
         roi_pct = ((tot_final - tot_init) / tot_init) * 100
-        final_str = f"${format_full_num(tot_final, 2)} USD ({roi_pct:+.2f}%)"
+        final_str = f"${format_full_num(tot_final, 2)} USD ({roi_pct:+.2f}\%)\n(各軌結餘: XAU_4H=${wallets['XAU_4H']:.2f} | XAU_1H=${wallets['XAU_1H']:.2f} \vert{} MSFT_4H=${wallets['MSFT_4H']:.2f})"
         init_str = f"${format_full_num(tot_init)} USD (每軌各 $100)"
 
     mode_title = "【三軌合併共享資金池 (極致動態複利)】" if mode == 'COMBINED' else "【三軌獨立帳戶 (風險完全隔離)】"
@@ -292,7 +292,7 @@ def run_unified_backtest(days=365, mode='COMBINED'):
         w = r['wins']
         wr = (w / c * 100) if c > 0 else 0.0
         pnl_val = r['pnl']
-        track_lines.append(f"• {name.ljust(15)} | 交易: {str(c).rjust(3)}次 | 勝率: {wr:5.2f}% | 貢獻: {pnl_val:+10.2f}")
+        track_lines.append(f"• {name.ljust(15)} | 交易: {str(c).rjust(3)}次 | 勝率: {wr:5.2f}% | 收益貢獻: {pnl_val:+10.2f}")
 
     report_text = (
         "```text\n"
@@ -311,9 +311,9 @@ def run_unified_backtest(days=365, mode='COMBINED'):
     send_discord_safe(report_text)
     print("完成！\n")
 
-# ==================== 5. 主執行程序 ====================
+# ==================== 5. 主執行入口 ====================
 if __name__ == '__main__':
-    # 1. 執行【分開獨立模式】(30 天 & 365 天)
+    # 1. 執行【獨立帳戶模式】(30 天 & 365 天)
     print("==================== 執行：三軌獨立帳戶回測 ====================")
     run_unified_backtest(days=30, mode='ISOLATED')
     time.sleep(2)
