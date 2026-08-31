@@ -9,9 +9,7 @@ from datetime import datetime, timezone, timedelta
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 直接寫死指定之 Discord Webhook
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
-
 FRICTION_COST_PCT = 0.40
 
 TARGET_THEMES = {
@@ -108,6 +106,41 @@ def get_dynamic_all_stocks():
             continue
     return stock_dict
 
+def get_large_shareholders_data():
+    """抓取每週集保大戶持股比例（400張以上大戶）"""
+    holders_dict = {}
+    try:
+        url = "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            df = pd.read_csv(pd.io.common.StringIO(r.text))
+            df.columns = [c.strip() for c in df.columns]
+            date_col, code_col, level_col, pct_col = df.columns[0], df.columns[1], df.columns[2], df.columns[5]
+
+            unique_dates = sorted(df[date_col].unique(), reverse=True)
+            if len(unique_dates) >= 2:
+                latest_d, prev_d = unique_dates[0], unique_dates[1]
+                df_400 = df[df[level_col] >= 12]
+                
+                latest_grp = df_400[df_400[date_col] == latest_d].groupby(code_col)[pct_col].sum()
+                prev_grp = df_400[df_400[date_col] == prev_d].groupby(code_col)[pct_col].sum()
+                
+                for sid in latest_grp.index:
+                    sid_str = str(sid).strip()
+                    if len(sid_str) == 4:
+                        curr_pct = float(latest_grp.get(sid, 0.0))
+                        p_pct = float(prev_grp.get(sid, curr_pct))
+                        diff_pct = curr_pct - p_pct
+                        holders_dict[sid_str] = {
+                            "ratio": curr_pct,
+                            "diff": diff_pct,
+                            "is_increasing": diff_pct > 0.0
+                        }
+    except Exception:
+        pass
+    return holders_dict
+
 def get_institutional_data(date_str):
     market_chips = {}
     stock_chips = {}
@@ -154,7 +187,7 @@ def calculate_atr(df, period=14):
     atr_val = tr.rolling(period).mean().iloc[-1]
     return float(atr_val) if not pd.isna(atr_val) else float(high.iloc[-1] - low.iloc[-1])
 
-def analyze_pattern_stages(df, sid, theme_str):
+def analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips):
     try:
         close_s = df['Close']
         high_s = df['High']
@@ -187,31 +220,62 @@ def analyze_pattern_stages(df, sid, theme_str):
         
         recent_low_5d = float(low_s.iloc[-5:].min())
         
+        # ----------------- 智慧大戶/主力籌碼雙軌確認 -----------------
+        holder_data = large_holders_info.get(sid, None)
+        chip_data = stock_chips.get(sid, {"foreign": 0, "trust": 0})
+        
+        foreign_net = chip_data['foreign']
+        trust_net = chip_data['trust']
+        
+        holder_str = ""
+        holder_bonus = 0
+        
+        # 1. 優先判定每週集保大戶持股
+        if holder_data:
+            diff_ratio = holder_data['diff']
+            if holder_data['is_increasing']:
+                holder_bonus = 20 if diff_ratio >= 0.5 else 10
+                holder_str = f" ｜ 400張大戶 `{diff_ratio:+.2f}%` 🔥"
+            else:
+                if diff_ratio <= -0.5 and trust_net <= 0:
+                    return None
+                holder_str = f" ｜ 400張大戶 `{diff_ratio:+.2f}%`"
+        
+        # 2. 每日即時法人籌碼動態確認（非週五時段的主力替代指標）
+        # 若法人（外資或投信）出現明顯大舉提款賣超（例如合計賣超張數過重），直接過濾防範假突破
+        if foreign_net < -500 and trust_net < 0:
+            return None
+            
+        if trust_net > 0 or foreign_net > 300:
+            holder_bonus += 10
+            holder_str += " 🟢 法人買超"
+
+        # ----------------- 結構深度判定 -----------------
         if c_price >= neck_high and right_foot >= left_foot:
-            structure_desc = "多頭破頸線 (突破20日高, 階梯墊高發動)"
+            structure_desc = f"多頭破頸線 (突破20日高, 階梯墊高發動){holder_str}"
             status_text = "🟢 突破頸線 (波段轉強)"
             left_strat = f"`{right_foot*1.01:.2f}` 左腳已成"
             right_strat = f"突破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
-            score = 96
+            score = 96 + holder_bonus
         elif c_price >= neck_low and c_price < neck_high:
-            structure_desc = "強勢箱型蓄勢 (回測頸線支撐帶, 浮額清洗)"
+            structure_desc = f"強勢箱型蓄勢 (回測頸線支撐帶, 浮額清洗){holder_str}"
             status_text = "🟡 突破後回測 (支撐確認)"
             left_strat = f"`{neck_low:.2f}` 支撐帶試單"
             right_strat = f"回測 `{neck_low:.2f}` 不破進場 ｜ 跌破放棄"
-            score = 89
+            score = 89 + holder_bonus
         elif right_foot >= head_price and c_price > ma10:
             pattern_type = "W底" if abs(left_foot - right_foot) / left_foot <= 0.035 else "右腳墊高築底"
-            structure_desc = f"{pattern_type} (均線多頭排列, 右腳支撐確立)"
+            structure_desc = f"{pattern_type} (均線多頭排列, 右腳支撐確立){holder_str}"
             status_text = f"🟢 左右腳成型 ({pattern_type})"
             left_strat = f"`{right_foot*1.01:.2f}` 附近低接試單"
             right_strat = f"帶量突破 `{neck_high:.2f}` 確認順勢加碼"
-            score = 84
+            score = 84 + holder_bonus
         elif right_foot >= head_price:
-            structure_desc = "底部二度回測 (右腳築底中, 均線糾結轉折)"
+            structure_desc = f"底部二度回測 (右腳築底中, 均線糾結轉折){holder_str}"
             status_text = "🟡 右腳形成中 (轉折觀察)"
             left_strat = f"`{right_foot*1.01:.2f}` 分批承接"
             right_strat = f"突破 `{neck_high:.2f}` 確認後加碼"
-            score = 76
+            score = 76 + holder_bonus
         else:
             return None
 
@@ -219,6 +283,7 @@ def analyze_pattern_stages(df, sid, theme_str):
         if is_target_theme:
             score += 15
 
+        # 每檔獨立動態 SL
         support_levels = [recent_low_5d * 0.992, c_price - atr_14 * 1.5]
         if c_price >= neck_low:
             support_levels.append(neck_low * 0.988)
@@ -228,6 +293,7 @@ def analyze_pattern_stages(df, sid, theme_str):
         sl_price = max(sl_price, round(c_price * 0.920, 2))
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
+        # 每檔獨立動態 TP
         box_height = neck_high - right_foot
         pattern_target = round(c_price + max(box_height, atr_14 * 2.2), 2)
         tp_price = pattern_target
@@ -399,7 +465,8 @@ def main():
         print("未獲取到股票清單，結束。")
         return
 
-    market_chips, stock_chips = get_institutional_data(date_str) if is_chips_session else ({}, {})
+    large_holders_info = get_large_shareholders_data()
+    market_chips, stock_chips = get_institutional_data(date_str)
 
     futures_sids = list(stock_futures.keys())
     target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in futures_sids]
@@ -437,6 +504,7 @@ def main():
                     if is_limit_up_locked_over_hour(df, today_close, prev_close):
                         continue
 
+                    # 正價差套利
                     if sid in stock_futures and today_close > 0:
                         f_dict = stock_futures[sid]
                         far_f = f_dict.get("far")
@@ -481,6 +549,7 @@ def main():
                     if gain_5d > 25.0 and yesterday_pct >= 9.0:
                         continue
 
+                    # 全域推薦
                     recent_high_20d = float(high_s.iloc[-21:-1].max())
                     recent_low_20d = float(low_s.iloc[-21:-1].min())
                     box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -504,7 +573,8 @@ def main():
                             "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                         })
 
-                    p_res = analyze_pattern_stages(df, sid, theme_str)
+                    # 波段評分（雙軌大戶/法人籌碼動態確認）
+                    p_res = analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips)
                     if p_res:
                         scored_results.append({
                             "sid": sid,
@@ -572,7 +642,7 @@ def main():
     
     for i, item in enumerate(top_picks):
         chip_line = ""
-        if is_chips_session and item['sid'] in stock_chips:
+        if item['sid'] in stock_chips:
             c_info = stock_chips[item['sid']]
             f_cnt = c_info['foreign']
             t_cnt = c_info['trust']
@@ -610,7 +680,7 @@ def main():
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
         for m in top_monsters:
             m_chip_line = ""
-            if is_chips_session and m['sid'] in stock_chips:
+            if m['sid'] in stock_chips:
                 c_info = stock_chips[m['sid']]
                 m_chip_line = f"\n> **法人籌碼**: 外資 `{c_info['foreign']:+d}張` ｜ 投信 `{c_info['trust']:+d}張`"
 
