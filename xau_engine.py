@@ -1,7 +1,8 @@
 """
-XAU/USD Dual-Track Quant Engine
-Track 1 (Swing 4H): 1D MA60 + 4H Donchian(20) | 1.5R BE -> 3.0R TP | 5% Risk ($100 Wallet)
-Track 2 (Fast 1H) : 1D MA60 + 1H Donchian(20) | 1.2R BE -> 2.5R TP | 5% Risk ($100 Wallet)
+XAU/USD Dual-Track Production Engine (Optimized High-Performance Edition)
+Track 1 (Swing 4H Long-term) : 1D MA60 + 4H Donchian(20) | 2.0R BE -> 5.0R TP (Classic 400%+ Version)
+Track 2 (Fast 1H Short-term) : 1D MA60 + 1H Donchian(20) | 1.5R BE -> 3.0R TP (Fixed Retest Breathing Space)
+Capital: $100 Isolated per Track | 5% Dynamic Risk | 10x Max Leverage
 """
 
 import os
@@ -19,25 +20,25 @@ DISCORD_WEBHOOK_URL = os.getenv(
 )
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.05        # 單筆承擔 5% 風險
-FEE_RATE = 0.0004      # 黃金手續費與點差 (萬分之四)
-MAX_LEVERAGE = 10.0    # 10 倍實質槓桿上限
+RISK_PCT = 0.05        # 單筆固定承擔 5% 風險
+FEE_RATE = 0.0004      # 黃金現貨手續費與點差 (萬分之四)
+MAX_LEVERAGE = 10.0    # 10 倍實質槓桿保護上限
 
-# 雙軌參數配置
+# 雙軌配置
 TRACKS = {
     'TRACK_4H': {
-        'name': '4H 中波段穩健軌',
+        'name': '4H 長線大波段軌',
         'itv': '4h',
         'dc_window': 20,
-        'be_r': 1.5,
-        'tp_r': 3.0
+        'be_r': 2.0,   # 換回原始最佳配置: 2.0R 保本
+        'tp_r': 5.0    # 換回原始最佳配置: 5.0R 止盈
     },
     'TRACK_1H': {
-        'name': '1H 高頻短波段軌',
+        'name': '1H 短線高頻優化軌',
         'itv': '1h',
         'dc_window': 20,
-        'be_r': 1.2,
-        'tp_r': 2.5
+        'be_r': 1.5,   # 放寬至 1.5R，給予回踩呼吸空間
+        'tp_r': 3.0    # 3.0R 止盈，確保高賠率覆蓋率
     }
 }
 
@@ -62,7 +63,7 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-# ==================== 2. 數據抓取模組 ====================
+# ==================== 2. 黃金數據抓取模組 ====================
 def fetch_gold_data(days=365):
     try:
         period_str = f"{days + 90}d" if days <= 600 else "2y"
@@ -85,7 +86,7 @@ def fetch_gold_data(days=365):
             'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
         }).dropna().reset_index()
 
-        # 3. 抓取 1D 日線數據 (宏觀定錨)
+        # 3. 抓取日線數據 (1D 宏觀濾網)
         df_1d = ticker.history(period=period_str, interval="1d").reset_index()
         date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
         df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
@@ -230,11 +231,11 @@ def run_single_track(df, cfg, days=365):
         'total_trades': total_trades, 'win_rate': win_rate
     }
 
-# ==================== 5. 雙軌回測與即時推播 ====================
+# ==================== 5. 雙軌回測與推播 ====================
 def run_dual_track_system(days=365):
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 65)
-    print(f">>> 啟動【XAU/USD 現貨黃金 雙軌並行量化引擎】{period_title}回測")
+    print(f">>> 啟動【XAU/USD 現貨黃金 雙軌並行量化系統 (升級版)】{period_title}回測")
     print("=" * 65 + "\n")
 
     df_1h, df_4h, df_1d = fetch_gold_data(days=days)
@@ -242,7 +243,7 @@ def run_dual_track_system(days=365):
         print("[!] 數據抓取異常。")
         return
 
-    # 準備指標
+    # 指標運算
     df_4h_prep = prepare_indicators(df_4h.copy(), df_1d.copy(), dc_window=TRACKS['TRACK_4H']['dc_window'])
     df_1h_prep = prepare_indicators(df_1h.copy(), df_1d.copy(), dc_window=TRACKS['TRACK_1H']['dc_window'])
 
@@ -253,7 +254,6 @@ def run_dual_track_system(days=365):
         print("[!] 回測執行失敗。")
         return
 
-    # 計算雙軌合併資產總結
     combined_start = INITIAL_WALLET * 2
     combined_end = res_4h['final_wallet'] + res_1h['final_wallet']
     combined_roi = ((combined_end - combined_start) / combined_start) * 100
@@ -261,17 +261,17 @@ def run_dual_track_system(days=365):
 
     report_text = (
         "```text\n"
-        f"【XAU/USD 現貨黃金 - 雙軌並行量化系統】\n"
+        f"【XAU/USD 現貨黃金 - 雙軌並行量化系統 (升級版)】\n"
         f"回測週期: {period_title} ({res_4h['start_date']} ~ {res_4h['end_date']})\n"
         f"總投入本金: ${format_full_num(combined_start)} USD (每軌各 $100)\n"
         f"雙軌合併結餘: ${format_full_num(combined_end, 2)} USD ({combined_roi:+.2f}%)\n"
         f"全系統總交易: {combined_trades} 次\n"
         "----------------------------------------------------\n"
-        f"【軌道 1：4H 中波段穩健軌】(1.5R保本 / 3.0R止盈)\n"
+        f"【軌道 1：4H 長線大波段軌】(2.0R保本 / 5.0R止盈)\n"
         f"• 結餘: ${format_full_num(res_4h['final_wallet'], 2)} USD ({res_4h['roi_pct']:+.2f}%)\n"
         f"• 交易: {res_4h['total_trades']} 次 | 勝率: {res_4h['win_rate']:.2f}%\n"
         "\n"
-        f"【軌道 2：1H 高頻短波段軌】(1.2R保本 / 2.5R止盈)\n"
+        f"【軌道 2：1H 短線高頻優化軌】(1.5R保本 / 3.0R止盈)\n"
         f"• 結餘: ${format_full_num(res_1h['final_wallet'], 2)} USD ({res_1h['roi_pct']:+.2f}%)\n"
         f"• 交易: {res_1h['total_trades']} 次 | 勝率: {res_1h['win_rate']:.2f}%\n"
         "```"
@@ -283,7 +283,6 @@ def run_dual_track_system(days=365):
     print("完成！\n")
 
 if __name__ == '__main__':
-    # 執行 30 天與 365 天回測
     run_dual_track_system(days=30)
     time.sleep(2)
     run_dual_track_system(days=365)
