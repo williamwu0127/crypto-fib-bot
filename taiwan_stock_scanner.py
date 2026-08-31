@@ -45,7 +45,6 @@ def send_msg(payload):
 def get_session_info():
     tz_tw = timezone(timedelta(hours=8))
     now_tw = datetime.now(tz_tw)
-    
     event_name = os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     trigger_type = "排程" if event_name == "schedule" else "手動"
 
@@ -107,7 +106,6 @@ def get_dynamic_all_stocks():
     return stock_dict
 
 def get_large_shareholders_data():
-    """抓取每週集保大戶持股比例（400張以上大戶）"""
     holders_dict = {}
     try:
         url = "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5"
@@ -220,17 +218,14 @@ def analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips):
         
         recent_low_5d = float(low_s.iloc[-5:].min())
         
-        # ----------------- 智慧大戶/主力籌碼雙軌確認 -----------------
         holder_data = large_holders_info.get(sid, None)
         chip_data = stock_chips.get(sid, {"foreign": 0, "trust": 0})
-        
         foreign_net = chip_data['foreign']
         trust_net = chip_data['trust']
         
         holder_str = ""
         holder_bonus = 0
         
-        # 1. 優先判定每週集保大戶持股
         if holder_data:
             diff_ratio = holder_data['diff']
             if holder_data['is_increasing']:
@@ -241,8 +236,6 @@ def analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips):
                     return None
                 holder_str = f" ｜ 400張大戶 `{diff_ratio:+.2f}%`"
         
-        # 2. 每日即時法人籌碼動態確認（非週五時段的主力替代指標）
-        # 若法人（外資或投信）出現明顯大舉提款賣超（例如合計賣超張數過重），直接過濾防範假突破
         if foreign_net < -500 and trust_net < 0:
             return None
             
@@ -250,7 +243,6 @@ def analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips):
             holder_bonus += 10
             holder_str += " 🟢 法人買超"
 
-        # ----------------- 結構深度判定 -----------------
         if c_price >= neck_high and right_foot >= left_foot:
             structure_desc = f"多頭破頸線 (突破20日高, 階梯墊高發動){holder_str}"
             status_text = "🟢 突破頸線 (波段轉強)"
@@ -283,7 +275,6 @@ def analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips):
         if is_target_theme:
             score += 15
 
-        # 每檔獨立動態 SL
         support_levels = [recent_low_5d * 0.992, c_price - atr_14 * 1.5]
         if c_price >= neck_low:
             support_levels.append(neck_low * 0.988)
@@ -293,7 +284,6 @@ def analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips):
         sl_price = max(sl_price, round(c_price * 0.920, 2))
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
-        # 每檔獨立動態 TP
         box_height = neck_high - right_foot
         pattern_target = round(c_price + max(box_height, atr_14 * 2.2), 2)
         tp_price = pattern_target
@@ -410,7 +400,8 @@ def get_market_and_futures():
     spot_close = 0.0
     try:
         twii = yf.Ticker("^TWII")
-        df_t = twii.history(period="1mo", interval="1d")
+        # 強制 auto_adjust=False 避免大盤點位被還原權值放大
+        df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
         if not df_t.empty and len(df_t) >= 20:
             spot_close = float(df_t['Close'].iloc[-1])
             p_close = float(df_t['Close'].iloc[-2])
@@ -480,7 +471,8 @@ def main():
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            df_batch = yf.download(chunk, period="3mo", interval="1d", group_by="ticker", progress=False, threads=True)
+            # 強制 auto_adjust=False 確保抓到的個股價格為真實成交價
+            df_batch = yf.download(chunk, period="3mo", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
             
             for ticker in chunk:
                 try:
@@ -573,7 +565,7 @@ def main():
                             "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                         })
 
-                    # 波段評分（雙軌大戶/法人籌碼動態確認）
+                    # 波段評分
                     p_res = analyze_pattern_stages(df, sid, theme_str, large_holders_info, stock_chips)
                     if p_res:
                         scored_results.append({
@@ -590,7 +582,7 @@ def main():
 
     target_results = [x for x in scored_results if x["is_target_theme"]]
     if len(target_results) < 6:
-        target_results += [x for x in scored_results if not x["is_target_theme"]]
+        target_results += [x for x in scored_credits if not x["is_target_theme"]] if 'scored_credits' in locals() else [x for x in scored_results if not x["is_target_theme"]]
 
     sorted_all = sorted(target_results, key=lambda x: x["score"], reverse=True)
     industry_count = {}
