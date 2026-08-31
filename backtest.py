@@ -15,7 +15,7 @@ DISCORD_WEBHOOK_URL = os.getenv(
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
-# ==================== 2. 標的配置 (僅保留加密貨幣與黃金) ====================
+# ==================== 2. 標的配置 (純加密貨幣與黃金) ====================
 SYMBOLS = {
     'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'btc_opt'},     # BTC 防雜訊優化版
     'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'}, # ETH 標準斐波順勢
@@ -95,10 +95,10 @@ def prepare_indicators(df):
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
     return df
 
-# ==================== 4. 事件驅動撮合引擎 ====================
+# ==================== 4. 事件驅動撮合回測引擎 ====================
 def run_backtest():
     print("=" * 60)
-    print(">>> 啟動【純加密貨幣 + 黃金 (1h 大趨勢過濾 + 全域複利)】1 年期回測")
+    print(">>> 啟動【純加密貨幣 + 黃金 (1h 大趨勢鎖定 + 15m 順勢斐波 + 全域複利)】1 年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("=" * 60 + "\n")
 
