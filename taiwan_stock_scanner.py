@@ -105,9 +105,20 @@ def get_dynamic_all_stocks():
             continue
     return stock_dict
 
+def calculate_atr(df, period=14):
+    """計算真實波動區間 ATR"""
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return float(tr.rolling(period).mean().iloc[-1])
+
 def analyze_pattern_stages(df):
     """
-    重構版：形態學 4 步驟 ＋ 結構判定 ＋ 實戰風控比例 TP/SL
+    動態個股專屬：形態學 4 步驟 ＋ 結構判定 ＋ 依個股 ATR/形態滿足點計算 TP/SL
     """
     try:
         close_s = df['Close']
@@ -118,6 +129,7 @@ def analyze_pattern_stages(df):
         ma5 = float(close_s.rolling(5).mean().iloc[-1])
         ma10 = float(close_s.rolling(10).mean().iloc[-1])
         ma20 = float(close_s.rolling(20).mean().iloc[-1])
+        atr_14 = calculate_atr(df, 14)
         
         # 尋找過去 40 天結構
         low_40d = low_s.iloc[-40:]
@@ -136,9 +148,8 @@ def analyze_pattern_stages(df):
         neck_low = round(neck_high * 0.985, 2)
         neck_zone = f"{neck_low:.2f} ~ {neck_high:.2f}"
         
-        # ----------------- 結構判定 (Market Structure) -----------------
+        # ----------------- 結構判定 -----------------
         recent_low_5d = float(low_s.iloc[-5:].min())
-        recent_high_10d = float(high_s.iloc[-10:].max())
         
         if c_price >= neck_high and right_foot > left_foot:
             structure_tag = "多頭破頸線 (階梯墊高)"
@@ -168,24 +179,20 @@ def analyze_pattern_stages(df):
         else:
             return None
 
-        # ----------------- 重修 TP / SL (實戰風控比 R:R >= 2.0) -----------------
-        # SL: 緊貼近期支撐 (取 近5日低點, 頸線下緣, MA10 之最佳防守點)，限制在 -3.5% ~ -5.5% 之間
-        key_support = min(recent_low_5d, neck_low if c_price >= neck_low else ma10)
-        raw_sl = round(key_support * 0.99, 2)
-        
-        # 嚴格控制 SL 最大幅度不超過 -5.5%，最小不低於 -3.2%（避免雜訊掃出場）
-        if raw_sl < c_price * 0.945:
-            sl_price = round(c_price * 0.95, 2)
-        elif raw_sl > c_price * 0.968:
-            sl_price = round(c_price * 0.965, 2)
-        else:
-            sl_price = raw_sl
-
-        risk_delta = c_price - sl_price
+        # ----------------- 個股專屬動態 SL（止損）-----------------
+        # 邏輯：取 (近 5 日波段低點, 頸線下緣回測點, 右腳支撐) 之有效防守點，並給予 1.0~1.2 倍 ATR 呼吸空間
+        structural_support = min(recent_low_5d, neck_low if c_price >= neck_low else right_foot)
+        sl_price = round(min(structural_support * 0.99, c_price - atr_14 * 1.2), 2)
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
-        # TP: 以 2.2 ~ 2.8 倍風險報酬比 (R:R) 設定實戰目標價，約落在 +8% ~ +15%
-        tp_price = round(c_price + risk_delta * 2.5, 2)
+        # ----------------- 個股專屬動態 TP（形態 1:1 等幅測幅滿足點）-----------------
+        # 邏輯：目標價 = 頸線高點 + (頸線高點 - 底部最低點)
+        pattern_height = neck_high - head_price
+        target_by_pattern = neck_high + pattern_height
+        target_by_risk_reward = c_price + (c_price - sl_price) * 2.2
+        
+        # 綜合形態滿足點與風控比
+        tp_price = round(max(target_by_pattern, target_by_risk_reward), 2)
         tp_pct = round(((tp_price - c_price) / c_price) * 100, 2)
 
         entry_low = round(c_price * 0.992, 2)
@@ -397,16 +404,17 @@ def main():
                     if gain_5d > 25.0 and yesterday_pct >= 9.0:
                         continue
 
-                    # 3. 妖股獵人判斷（TP/SL 緊湊優化）
+                    # 3. 妖股獵人判斷
                     recent_high_20d = float(high_s.iloc[-21:-1].max())
                     recent_low_20d = float(low_s.iloc[-21:-1].min())
                     box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
                     
                     if box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98 and gain_5d <= 22.0:
+                        atr_m = calculate_atr(df, 14)
                         m_entry_low = round(today_close * 0.992, 2)
                         m_entry_high = round(today_close * 1.005, 2)
-                        m_sl = round(today_close * 0.952, 2)
-                        m_tp = round(today_close * 1.125, 2)
+                        m_sl = round(max(recent_low_20d * 0.99, today_close - atr_m * 1.5), 2)
+                        m_tp = round(today_close + (recent_high_20d - recent_low_20d) * 2.5, 2)
 
                         monster_stocks.append({
                             "sid": sid,
@@ -467,7 +475,7 @@ def main():
             "inline": False
         })
     
-    # 2. 精選 Top 10 (含實戰 TP/SL、頸線、左右側策略與結構標籤)
+    # 2. 精選 Top 10 (含各股專屬 TP/SL、頸線、策略與結構狀態)
     fields.append({
         "name": f"───────── 🎯 {session_name}精選 Top 10 ─────────",
         "value": "\u200b",
