@@ -16,16 +16,16 @@ def send_msg(payload):
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Discord 回應狀態碼: {r.status_code}")
         if r.status_code != 204:
-            print(f"發送警示回應: {r.text}")
+            print(f"回應內容: {r.text}")
     except Exception as e:
-        print(f"Webhook 發送失敗: {e}")
+        print(f"發送失敗: {e}")
 
 def get_session_info():
     tz_tw = timezone(timedelta(hours=8))
     now_tw = datetime.now(tz_tw)
     
     event_name = os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
-    trigger_type = "排程推播" if event_name == "schedule" else "手動觸發"
+    trigger_type = "排程" if event_name == "schedule" else "手動"
 
     time_val = now_tw.hour * 100 + now_tw.minute
     if time_val < 900:
@@ -33,9 +33,9 @@ def get_session_info():
     elif 900 <= time_val <= 1330:
         session = "盤中分析"
     else:
-        session = "盤後總結"
+        session = "盤後掃描"
 
-    return f"{session} ｜ {trigger_type}", now_tw.strftime("%Y-%m-%d %H:%M")
+    return f"全方位{session}報告 ({trigger_type})", now_tw.strftime("%Y-%m-%d")
 
 def refine_industry(name, original_industry):
     orig_str = str(original_industry).strip() if original_industry else ""
@@ -43,17 +43,17 @@ def refine_industry(name, original_industry):
         return orig_str
         
     name_str = str(name)
-    if any(k in name_str for k in ["生技", "藥", "醫", "基因", "針劑"]):
-        return "生技醫療"
-    elif any(k in name_str for k in ["能源", "綠能", "太陽能", "風電", "電力", "環保"]):
-        return "綠能環保"
+    if any(k in name_str for k in ["生技", "藥", "醫", "基因", "針劑", "臨床"]):
+        return "生技醫療業"
+    elif any(k in name_str for k in ["能源", "綠能", "太陽能", "風電", "電力", "環保", "水資源"]):
+        return "綠能環保業"
     elif any(k in name_str for k in ["投控", "控股", "投資", "集團"]):
-        return "投資控股"
-    elif any(k in name_str for k in ["建設", "開發", "營造", "置地"]):
-        return "營建開發"
-    elif any(k in name_str for k in ["軟體", "資訊", "網路", "雲端", "系統"]):
-        return "資訊服務"
-    elif any(k in name_str for k in ["航運", "海運", "航空", "物流"]):
+        return "投資控股業"
+    elif any(k in name_str for k in ["建設", "開發", "營造", "置地", "工程"]):
+        return "建材營造"
+    elif any(k in name_str for k in ["軟體", "資訊", "網路", "雲端", "智能", "系統", "數據"]):
+        return "資訊服務業"
+    elif any(k in name_str for k in ["航運", "海運", "航空", "物流", "運輸"]):
         return "航運業"
     elif any(k in name_str for k in ["機電", "機械", "電機", "自動化"]):
         return "電機機械"
@@ -65,7 +65,7 @@ def get_dynamic_all_stocks():
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "TW"),
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=4", "TWO")
     ]
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     for url, market in urls:
         success = False
         for parser in ["lxml", "html5lib"]:
@@ -116,63 +116,24 @@ def get_dynamic_all_stocks():
                 
     return stock_dict
 
-def analyze_pattern_stages(df):
-    try:
-        close_s = df['Close']
-        high_s = df['High']
-        low_s = df['Low']
-        
-        c_price = float(close_s.iloc[-1])
-        ma20 = float(close_s.rolling(20).mean().iloc[-1])
-        
-        low_40d = low_s.iloc[-40:]
-        head_idx = low_40d.idxmin()
-        head_pos = low_40d.index.get_loc(head_idx)
-        head_price = float(low_40d.min())
-        
-        if head_pos < 5 or head_pos > len(low_40d) - 4:
-            return None
-            
-        right_foot = float(low_40d.iloc[head_pos+1:].min())
-        neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
-        neck_low = round(neck_high * 0.985, 2)
-        stop_loss = round(head_price * 0.97, 2)
-        
-        if c_price >= neck_high:
-            stage = "🟢 突破頸線"
-            action = f"破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
-            score = 95
-        elif c_price >= neck_low and c_price < neck_high:
-            stage = "🟡 突破後回測"
-            action = f"回測 `{neck_low:.2f}` 不破進 ｜ 跌破放棄"
-            score = 88
-        elif right_foot >= head_price and c_price > ma20:
-            stage = "🟢 左右腳完成 (W底)"
-            action = f"左側 `{right_foot*1.01:.2f}` 試單 ｜ 突破 `{neck_high:.2f}` 加碼"
-            score = 82
-        elif right_foot >= head_price:
-            stage = "🟡 右腳形成中"
-            action = f"左側 `{right_foot*1.01:.2f}` 分批接 ｜ 突破 `{neck_high:.2f}` 確認"
-            score = 75
-        else:
-            return None
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-        return {
-            "stage": stage,
-            "neck_zone": f"{neck_low:.2f}~{neck_high:.2f}",
-            "stop_loss": f"{stop_loss:.2f}",
-            "action": action,
-            "score": score
-        }
-    except Exception:
-        return None
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    dif = exp1 - exp2
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = (dif - dea) * 2
+    return dif, dea, hist
 
 def get_market_and_futures():
-    """獲取加權指數與台指期行情，並精確計算正逆價差"""
     res = {}
     spot_close = 0.0
-    
-    # 1. 加權指數
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d")
@@ -183,53 +144,45 @@ def get_market_and_futures():
             pct = (pts / p_close) * 100
             ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
             trend = "🟢 多頭控盤" if spot_close > ma20 else "🔴 弱勢整理"
+            emoji = "📈" if pts >= 0 else "📉"
             
             res['spot_close'] = spot_close
-            res['spot_str'] = f"`{spot_close:,.2f}` ({pts:+,.2f}點 / {pct:+.2f}%) ｜ {trend}"
-            res['ma20'] = f"`{ma20:,.2f}`"
+            res['pts'] = pts
+            res['pct'] = pct
+            res['trend'] = trend
+            res['emoji'] = emoji
+            res['ma20'] = ma20
     except Exception as e:
         print(f"大盤獲取失敗: {e}")
 
-    # 2. 台指期貨（透過 yfinance 穩健獲取近月台指期）
-    f_price = 0.0
-    f_pts = 0.0
-    f_pct = 0.0
-    futures_found = False
-
-    for symbol in ["WTX&", "TX=F", "^TWII"]:
+    # 台指期
+    for sym in ["WTX&", "TX=F"]:
         try:
-            tx = yf.Ticker(symbol)
+            tx = yf.Ticker(sym)
             df_f = tx.history(period="5d", interval="1d")
             if not df_f.empty and len(df_f) >= 2:
                 f_price = float(df_f['Close'].iloc[-1])
                 f_prev = float(df_f['Close'].iloc[-2])
                 f_pts = f_price - f_prev
                 f_pct = (f_pts / f_prev) * 100
-                if f_price > 5000:
-                    futures_found = True
+                if f_price > 5000 and spot_close > 0:
+                    diff = f_price - spot_close
+                    dtype = "正價差" if diff >= 0 else "逆價差"
+                    res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f} / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):.2f}`"
                     break
         except Exception:
             continue
 
-    if futures_found and spot_close > 0:
-        diff_pts = f_price - spot_close
-        diff_type = "正價差" if diff_pts >= 0 else "逆價差"
-        res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f}點 / {f_pct:+.2f}%) ｜ {diff_type} `{abs(diff_pts):,.2f}`點"
-    else:
-        res['futures_str'] = "盤中即時撮合中"
-
     return res
 
 def main():
-    session_title, date_time_str = get_session_info()
-    print(f"啟動台股掃描：{session_title} ({date_time_str})")
-    
+    title_suffix, date_str = get_session_info()
     market_info = get_market_and_futures()
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
     if not all_tickers:
-        print("未獲取到股票清單，結束執行。")
+        print("未獲取到股票清單，結束。")
         return
 
     chunk_size = 200
@@ -250,34 +203,104 @@ def main():
                     continue
 
                 sid, name, industry = stock_dict[ticker]
-                c_price = float(df['Close'].iloc[-1])
-                c_vol = float(df['Volume'].iloc[-1])
-                vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1])
-                
-                if (c_price * c_vol) / 100_000_000 < 0.8:
-                    continue
+                close_s = df['Close']
+                high_s = df['High']
+                low_s = df['Low']
+                open_s = df['Open']
+                vol_s = df['Volume']
 
-                recent_high_20d = float(df['High'].iloc[-21:-1].max())
-                recent_low_20d = float(df['Low'].iloc[-21:-1].min())
+                today_close = float(close_s.iloc[-1])
+                today_high = float(high_s.iloc[-1])
+                today_low = float(low_s.iloc[-1])
+                today_open = float(open_s.iloc[-1])
+                today_vol = float(vol_s.iloc[-1])
+
+                ma5 = float(close_s.rolling(5).mean().iloc[-1])
+                ma10 = float(close_s.rolling(10).mean().iloc[-1])
+                ma20_s = close_s.rolling(20).mean()
+                ma20 = float(ma20_s.iloc[-1])
+                ma20_slope = ma20 - float(ma20_s.iloc[-2])
+                vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
+
+                est_money_mil = (today_close * today_vol) / 100_000_000
+
+                # 妖股邏輯
+                recent_high_20d = float(high_s.iloc[-21:-1].max())
+                recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
                 
-                if box_range_pct <= 0.25 and vol_ma5 > 0 and (c_vol / vol_ma5) >= 2.5 and c_price >= recent_high_20d * 0.98:
+                if est_money_mil >= 0.8 and box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98:
+                    m_entry_low = round(today_close * 0.99, 2)
+                    m_entry_high = round(today_close * 1.003, 2)
+                    m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
+                    box_h = recent_high_20d - recent_low_20d
+                    m_tp = round(max(today_close + box_h * 3.0, today_close * 1.22), 2)
+
                     monster_stocks.append({
                         "sid": sid,
                         "name": name,
-                        "close": f"{c_price:,.2f}",
-                        "vol_ratio": round(c_vol / vol_ma5, 1)
+                        "industry": industry,
+                        "close": f"{today_close:.2f}",
+                        "vol_ratio": round(today_vol / vol_ma5, 1),
+                        "entry": f"{m_entry_low} ~ {m_entry_high}",
+                        "tp": f"{m_tp} (+{round(((m_tp-today_close)/today_close)*100, 2)}%)",
+                        "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                     })
 
-                p_res = analyze_pattern_stages(df)
-                if p_res:
-                    scored_results.append({
-                        "sid": sid,
-                        "name": name,
-                        "industry": industry,
-                        "close": f"{c_price:,.2f}",
-                        **p_res
-                    })
+                # 常規篩選
+                if est_money_mil < 0.8 or today_close < ma20 or today_close < today_open * 0.99:
+                    continue
+
+                score = 0
+                reasons = []
+
+                if today_close > ma5 > ma10 > ma20 and ma20_slope > 0:
+                    score += 25
+                    reasons.append("均線多頭")
+
+                if today_close > recent_high_20d:
+                    score += 20
+                    reasons.append("突破20日高")
+
+                if vol_ma5 > 0 and (today_vol / vol_ma5) >= 1.2:
+                    score += 20
+                    reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
+
+                k_range = today_high - today_low
+                if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
+                    score += 15
+                    reasons.append("紅K實體強")
+
+                rsi = float(calculate_rsi(close_s).iloc[-1])
+                _, _, hist = calculate_macd(close_s)
+                if 50 <= rsi <= 75 and hist.iloc[-1] > 0:
+                    score += 20
+                    reasons.append("MACD偏多")
+
+                entry_low = round(today_close * 0.99, 2)
+                entry_high = round(today_close * 1.003, 2)
+                support_low = min(float(low_s.iloc[-5:].min()), ma10)
+                sl_price = round(max(support_low * 0.99, entry_low * 0.925), 2)
+                if sl_price > entry_low * 0.94:
+                    sl_price = round(entry_low * 0.935, 2)
+
+                if recent_high_20d > today_close * 1.04:
+                    tp_price = round(recent_high_20d, 2)
+                else:
+                    swing_r = today_close - float(low_s.iloc[-15:].min())
+                    tp_price = round(today_close + max(swing_r, (entry_high - sl_price) * 1.8), 2)
+
+                scored_results.append({
+                    "sid": sid,
+                    "name": name,
+                    "industry": industry,
+                    "close": f"{today_close:.2f}",
+                    "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
+                    "tp": f"{tp_price} (+{round(((tp_price-today_close)/today_close)*100, 2)}%)",
+                    "sl": f"{sl_price} ({round(((sl_price-today_close)/today_close)*100, 2)}%)",
+                    "score": score,
+                    "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
+                })
         except Exception:
             continue
 
@@ -294,75 +317,81 @@ def main():
         if len(top_picks) >= 10:
             break
 
+    # 構造 Embed Fields
     fields = []
     
-    # 1. 大盤與台指期
-    if 'spot_str' in market_info:
+    # 1. 大盤
+    if 'spot_close' in market_info:
+        fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時連線中')}" if 'futures_str' in market_info else ""
         fields.append({
-            "name": "📊 大盤 ＆ 台指期解析",
+            "name": f"📊 加權指數大盤解析 ({market_info['trend']})",
             "value": (
-                f"> • **加權指數**: {market_info['spot_str']}\n"
-                f"> • **台指期貨**: {market_info.get('futures_str', '即時連線中')}\n"
-                f"> • **防守月線**: {market_info.get('ma20', '無')}"
+                f"> **收盤點位**: `{market_info['spot_close']:,.2f}`\n"
+                f"> **單日漲跌**: `{market_info['pts']:+,.2f}` ({market_info['pct']:+.2f}%) {market_info['emoji']}\n"
+                f"> **防守月線**: `{market_info['ma20']:,.2f}`"
+                f"{fut_text}"
             ),
             "inline": False
         })
-
-    # 2. 一行一項極簡 Top 10
-    if top_picks:
-        top_lines_1 = []
-        for item in top_picks[:5]:
-            top_lines_1.append(
-                f"📌 **{item['sid']} {item['name']}** ({item['industry']}) ｜ 現價 `{item['close']}`\n"
-                f"> • 狀態: {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
-                f"> • 策略: {item['action']}"
-            )
+    
+    # 2. 精選 Top 10（雙欄排版）
+    fields.append({
+        "name": "───────── 🎯 盤後精選 Top 10 ─────────",
+        "value": "\u200b",
+        "inline": False
+    })
+    
+    for i, item in enumerate(top_picks):
         fields.append({
-            "name": "🎯 精選 Top 10（型態與策略 1-5）",
-            "value": "\n\n".join(top_lines_1),
-            "inline": False
+            "name": f"📌 {item['sid']} {item['name']}  現價 : {item['close']}",
+            "value": (
+                f"> **產業**: `{item['industry']}`\n"
+                f"> **進場**: `{item['entry']}`\n"
+                f"> **止盈 (TP)**: `{item['tp']}`\n"
+                f"> **止損 (SL)**: `{item['sl']}`\n"
+                f"> **特徵**: `{item['tags']}`"
+            ),
+            "inline": True
         })
-
-        if len(top_picks) > 5:
-            top_lines_2 = []
-            for item in top_picks[5:10]:
-                top_lines_2.append(
-                    f"📌 **{item['sid']} {item['name']}** ({item['industry']}) ｜ 現價 `{item['close']}`\n"
-                    f"> • 狀態: {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
-                    f"> • 策略: {item['action']}"
-                )
+        if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
             fields.append({
-                "name": "🎯 精選 Top 10（型態與策略 6-10）",
-                "value": "\n\n".join(top_lines_2),
+                "name": "\u200b",
+                "value": "\u200b",
                 "inline": False
+            })
+
+    # 3. 妖股獵人
+    fields.append({
+        "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
+        "value": "\u200b",
+        "inline": False
+    })
+    
+    if monster_stocks:
+        top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
+        for m in top_monsters:
+            fields.append({
+                "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
+                "value": (
+                    f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
+                    f"> **進場**: `{m['entry']}`\n"
+                    f"> **止盈 (TP)**: `{m['tp']}`\n"
+                    f"> **止損 (SL)**: `{m['sl']}`"
+                ),
+                "inline": True
             })
     else:
         fields.append({
-            "name": "🎯 精選 Top 10（型態與策略）",
-            "value": "> 今日全市場暫無符合型態結構之標的",
-            "inline": False
-        })
-
-    # 3. 妖股獵人
-    if monster_stocks:
-        m_lines = "\n".join([f"> • 🔥 **{m['sid']} {m['name']}** ｜ 現價 `{m['close']}` ｜ 爆量 `{m['vol_ratio']}x`" for m in monster_stocks[:3]])
-        fields.append({
-            "name": "🚨 妖股獵人 (飆股狂飆預警)",
-            "value": m_lines,
-            "inline": False
-        })
-    else:
-        fields.append({
-            "name": "🚨 妖股獵人 (飆股狂飆預警)",
-            "value": "> • **狀態**：暫無符合",
+            "name": "⚡ 狀態提示",
+            "value": "> 今日全市場暫無符合標的",
             "inline": False
         })
 
     payload = {
-        "username": "台股型態量化監控",
+        "username": "台股全市場量化選股",
         "embeds": [{
-            "title": f"📈 台股型態量化監控報告（{session_title}）",
-            "description": f"**資料時間**：`{date_time_str}`",
+            "title": f"📈 台股{title_suffix} ({date_str})",
+            "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
             "color": 3447003,
             "fields": fields
         }]
