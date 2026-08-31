@@ -121,29 +121,21 @@ def calculate_atr(df, period=14):
     return float(atr_val) if not pd.isna(atr_val) else float(high.iloc[-1] - low.iloc[-1])
 
 def analyze_pattern_stages(df, sid, theme_str):
-    """
-    1~2 週波段趨勢 ＋ 形態學 4 步驟 ＋ 結構深度解析 ＋ 每檔獨立動態 TP/SL
-    """
     try:
         close_s = df['Close']
         high_s = df['High']
         low_s = df['Low']
-        open_s = df['Open']
-        vol_s = df['Volume']
         
         c_price = float(close_s.iloc[-1])
-        ma5 = float(close_s.rolling(5).mean().iloc[-1])
         ma10 = float(close_s.rolling(10).mean().iloc[-1])
         ma20 = float(close_s.rolling(20).mean().iloc[-1])
         ma20_s = close_s.rolling(20).mean()
         ma20_slope = ma20 - float(ma20_s.iloc[-3])
         atr_14 = calculate_atr(df, 14)
         
-        # 1~2 週波段趨勢核心過濾：必須站穩月線，且月線走平或翻揚
         if c_price < ma20 or ma20_slope < 0:
             return None
 
-        # 結構回溯：尋找 40 日型態
         low_40d = low_s.iloc[-40:]
         head_idx = low_40d.idxmin()
         head_pos = low_40d.index.get_loc(head_idx)
@@ -160,9 +152,7 @@ def analyze_pattern_stages(df, sid, theme_str):
         neck_zone = f"{neck_low:.2f} ~ {neck_high:.2f}"
         
         recent_low_5d = float(low_s.iloc[-5:].min())
-        recent_high_20d = float(high_s.iloc[-21:-1].max())
         
-        # ----------------- 結構深度判定 -----------------
         if c_price >= neck_high and right_foot >= left_foot:
             structure_desc = "多頭破頸線 (突破20日高, 階梯墊高發動)"
             status_text = "🟢 突破頸線 (波段轉強)"
@@ -191,18 +181,14 @@ def analyze_pattern_stages(df, sid, theme_str):
         else:
             return None
 
-        # 族群權重加分（若是 15 大核心概念股，波段權重大幅提升）
         is_target_theme = any(sid in sids for sids in TARGET_THEMES.values())
         if is_target_theme:
             score += 15
 
-        # ----------------- 每檔個股獨立動態 TP / SL 設置 -----------------
-        # SL: 取 (近5日低點, 頸線下緣回測點, 右腳支撐) 之結構支撐，並考量該股 ATR 波動預留空間
         structural_support = min(recent_low_5d, neck_low if c_price >= neck_low else right_foot)
         sl_price = round(min(structural_support * 0.99, c_price - atr_14 * 1.3), 2)
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
-        # TP: 形態學 1:1 等幅測幅目標 ＝ 頸線高點 ＋ (頸線高點 － 底部最低點)
         pattern_height = neck_high - head_price
         target_by_pattern = neck_high + pattern_height
         target_by_risk_reward = c_price + (c_price - sl_price) * 2.3
@@ -227,6 +213,13 @@ def analyze_pattern_stages(df, sid, theme_str):
     except Exception:
         return None
 
+def parse_price(val, default_val=0.0):
+    try:
+        p = float(str(val).replace(',', '').strip())
+        return p if p > 0 else default_val
+    except Exception:
+        return default_val
+
 def get_taifex_quotes():
     tx_quote = None
     stock_futures = {}
@@ -240,38 +233,74 @@ def get_taifex_quotes():
             data = r.json().get('RtData', {}).get('QuoteList', [])
             for item in data:
                 sym = item.get('SymbolID', '')
-                price = float(item.get('CLastPrice', 0))
-                diff = float(item.get('CDiff', 0))
-                rate = float(item.get('CDiffRate', 0))
+                last_p = parse_price(item.get('CLastPrice'))
+                bid_p = parse_price(item.get('CBidPrice'), last_p)
+                ask_p = parse_price(item.get('CAskPrice'), last_p)
+                diff = parse_price(item.get('CDiff'))
+                rate = parse_price(item.get('CDiffRate'))
                 
-                if sym.startswith('TX') and '-' not in sym and price > 5000 and not tx_quote:
-                    tx_quote = {"price": price, "diff": diff, "rate": rate}
+                if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
+                    tx_quote = {"price": last_p, "bid": bid_p, "ask": ask_p, "diff": diff, "rate": rate}
 
                 und_id = str(item.get('UnderlyingId', '')).strip()
-                if und_id.isdigit() and len(und_id) == 4 and price > 0 and '-' not in sym:
+                if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
+                    f_obj = {"price": last_p, "bid": bid_p, "ask": ask_p, "diff": diff, "rate": rate}
                     if und_id not in stock_futures:
-                        stock_futures[und_id] = {"near": {"price": price, "diff": diff, "rate": rate}, "far": None}
-                    elif stock_futures[und_id]["far"] is None and price != stock_futures[und_id]["near"]["price"]:
-                        stock_futures[und_id]["far"] = {"price": price, "diff": diff, "rate": rate}
+                        stock_futures[und_id] = {"near": f_obj, "far": None}
+                    elif stock_futures[und_id]["far"] is None and last_p != stock_futures[und_id]["near"]["price"]:
+                        stock_futures[und_id]["far"] = f_obj
 
         r_stk = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"S"}, headers=headers, timeout=5)
         if r_stk.status_code == 200:
             data_stk = r_stk.json().get('RtData', {}).get('QuoteList', [])
             for item in data_stk:
                 und_id = str(item.get('UnderlyingId', '')).strip()
-                price = float(item.get('CLastPrice', 0))
-                diff = float(item.get('CDiff', 0))
-                rate = float(item.get('CDiffRate', 0))
+                last_p = parse_price(item.get('CLastPrice'))
+                bid_p = parse_price(item.get('CBidPrice'), last_p)
+                ask_p = parse_price(item.get('CAskPrice'), last_p)
+                diff = parse_price(item.get('CDiff'))
+                rate = parse_price(item.get('CDiffRate'))
                 sym = item.get('SymbolID', '')
                 
-                if und_id.isdigit() and len(und_id) == 4 and price > 0 and '-' not in sym:
+                if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
+                    f_obj = {"price": last_p, "bid": bid_p, "ask": ask_p, "diff": diff, "rate": rate}
                     if und_id not in stock_futures:
-                        stock_futures[und_id] = {"near": {"price": price, "diff": diff, "rate": rate}, "far": None}
+                        stock_futures[und_id] = {"near": f_obj, "far": None}
                     elif stock_futures[und_id]["far"] is None:
-                        stock_futures[und_id]["far"] = {"price": price, "diff": diff, "rate": rate}
+                        stock_futures[und_id]["far"] = f_obj
     except Exception:
         pass
     return tx_quote, stock_futures
+
+def get_spot_orderbook(ticker_list):
+    book_dict = {}
+    try:
+        query_keys = []
+        for t in ticker_list:
+            sid, mkt = t.split('.')
+            prefix = "tse" if mkt == "TW" else "otc"
+            query_keys.append(f"{prefix}_{sid}.tw")
+
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            msg_arr = r.json().get('msgArray', [])
+            for m in msg_arr:
+                sid = m.get('c', '')
+                ask_str = m.get('a', '_').split('_')[0]
+                bid_str = m.get('b', '_').split('_')[0]
+                last_str = m.get('z', '_')
+                
+                last_p = parse_price(last_str)
+                ask_p = parse_price(ask_str, last_p)
+                bid_p = parse_price(bid_str, last_p)
+                
+                if sid:
+                    book_dict[sid] = {"ask1": ask_p, "bid1": bid_p, "last": last_p}
+    except Exception:
+        pass
+    return book_dict
 
 def get_market_and_futures():
     res = {}
@@ -333,12 +362,15 @@ def main():
         print("未獲取到股票清單，結束。")
         return
 
+    futures_sids = list(stock_futures.keys())
+    target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in futures_sids]
+    spot_book = get_spot_orderbook(target_spot_tickers)
+
     chunk_size = 150
     scored_results = []
     monster_stocks = []
     spread_candidates = []
 
-    # 全市場掃描
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
@@ -361,52 +393,48 @@ def main():
                     today_vol = float(vol_s.iloc[-1])
                     vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
 
-                    # 1. 排除鎖死無買點標的
                     if is_limit_up_locked_over_hour(df, today_close, prev_close):
                         continue
 
-                    # 2. 期現價差計算
+                    # ----------------- 全域掃描：實質可成交遠月期現正價差 -----------------
                     if sid in stock_futures and today_close > 0:
                         f_dict = stock_futures[sid]
-                        near_f = f_dict.get("near")
                         far_f = f_dict.get("far")
                         
-                        if near_f:
-                            near_p = near_f['price']
-                            diff_val = near_p - today_close
-                            gross_pct = abs(diff_val / today_close) * 100
-                            net_pct = gross_pct - FRICTION_COST_PCT
-                            cost_ratio = (FRICTION_COST_PCT / gross_pct * 100) if gross_pct > 0 else 100.0
+                        if far_f:
+                            book_info = spot_book.get(sid, {})
+                            spot_ask = book_info.get('ask1', today_close)
                             
-                            if far_f:
-                                far_p = far_f['price']
-                                cal_diff = far_p - near_p
-                                cal_pct = (cal_diff / near_p) * 100
-                                far_str = f"`{far_p:,.2f}` ｜ 跨月 `{'+' if cal_diff>=0 else ''}{cal_diff:.2f}` ({cal_pct:+.2f}%)"
-                            else:
-                                far_str = "無遠月撮合"
+                            fut_bid = far_f['bid']
+                            
+                            # 只做正價差套利：買現貨(Ask) + 賣遠月期貨(Bid)
+                            pos_diff = fut_bid - spot_ask
+                            
+                            if pos_diff >= 0:
+                                diff_val = pos_diff
+                                base_spot = spot_ask
+                                
+                                gross_pct = (diff_val / base_spot) * 100 if base_spot > 0 else 0.0
+                                net_pct = gross_pct - FRICTION_COST_PCT
+                                cost_ratio = (FRICTION_COST_PCT / gross_pct * 100) if gross_pct > 0 else 100.0
+                                
+                                if net_pct >= 0.2:
+                                    signal = f"實質淨正價差 +{net_pct:.2f}% (成本佔 {cost_ratio:.0f}%)"
+                                else:
+                                    signal = f"成本摩擦偏高 (佔 {min(cost_ratio, 99):.0f}%) ｜ 邊際利潤"
 
-                            if diff_val > 0 and net_pct >= 0.2:
-                                signal = f"實質淨正價差 +{net_pct:.2f}% (成本佔 {cost_ratio:.0f}%)"
-                            elif diff_val < 0 and net_pct >= 0.2:
-                                signal = f"實質淨逆價差 -{net_pct:.2f}% (成本佔 {cost_ratio:.0f}%)"
-                            else:
-                                signal = f"成本摩擦偏高 (佔 {min(cost_ratio, 99):.0f}%) ｜ 邊際利潤"
-
-                            if gross_pct >= 0.45:
-                                spread_candidates.append({
-                                    "sid": sid,
-                                    "name": name,
-                                    "industry": theme_str,
-                                    "spot_p": f"{today_close:,.2f}",
-                                    "near_p": f"{near_p:,.2f}",
-                                    "far_str": far_str,
-                                    "diff_val": diff_val,
-                                    "net_pct": net_pct,
-                                    "diff_str": f"{'+' if diff_val>=0 else ''}{diff_val:.2f} ({'+' if diff_val>=0 else ''}{(diff_val/today_close)*100:.2f}%)",
-                                    "dtype": "🟢 正價差" if diff_val >= 0 else "🔴 逆價差",
-                                    "signal": signal
-                                })
+                                if gross_pct >= 0.45:
+                                    spread_candidates.append({
+                                        "sid": sid,
+                                        "name": name,
+                                        "industry": theme_str, # 保留原產業分類，全域皆可入選
+                                        "spot_p": f"{base_spot:,.2f}",
+                                        "far_p": f"{far_f['price']:,.2f}",
+                                        "diff_val": diff_val,
+                                        "net_pct": net_pct,
+                                        "diff_str": f"+{diff_val:.2f} (+{(diff_val/base_spot)*100:.2f}%)",
+                                        "signal": signal
+                                    })
 
                     est_money_mil = (today_close * today_vol) / 100_000_000
                     if est_money_mil < 0.8:
@@ -417,7 +445,6 @@ def main():
                     if gain_5d > 25.0 and yesterday_pct >= 9.0:
                         continue
 
-                    # 3. 全域推薦（原妖股獵人升級：全市場篩選）
                     recent_high_20d = float(high_s.iloc[-21:-1].max())
                     recent_low_20d = float(low_s.iloc[-21:-1].min())
                     box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -440,7 +467,6 @@ def main():
                             "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                         })
 
-                    # 4. 形態 ＋ 結構判讀（針對 15 大核心族群優先評分）
                     p_res = analyze_pattern_stages(df, sid, theme_str)
                     if p_res:
                         scored_results.append({
@@ -455,7 +481,6 @@ def main():
         except Exception:
             continue
 
-    # 精選 Top 6（優先鎖定 15 大核心族群）
     target_results = [x for x in scored_results if x["is_target_theme"]]
     if len(target_results) < 6:
         target_results += [x for x in scored_results if not x["is_target_theme"]]
@@ -473,14 +498,11 @@ def main():
         if len(top_picks) >= 6:
             break
 
-    # 期現價差 Top 4
-    pos_spreads = sorted([s for s in spread_candidates if s['diff_val'] > 0], key=lambda x: x['net_pct'], reverse=True)[:2]
-    neg_spreads = sorted([s for s in spread_candidates if s['diff_val'] < 0], key=lambda x: x['net_pct'], reverse=True)[:2]
-    top_4_spreads = pos_spreads + neg_spreads
+    # 僅留正價差 Top 4
+    top_4_spreads = sorted(spread_candidates, key=lambda x: x['net_pct'], reverse=True)[:4]
 
     fields = []
     
-    # 1. 加權指數大盤解析
     if 'spot_close' in market_info:
         fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時撮合中')}"
         fields.append({
@@ -494,7 +516,6 @@ def main():
             "inline": False
         })
     
-    # 2. 波段精選 Top 6 (15大族群核心池)
     fields.append({
         "name": f"───────── 🎯 {session_name}波段精選 Top 6 (核心族群) ─────────",
         "value": "\u200b",
@@ -523,7 +544,6 @@ def main():
                 "inline": False
             })
 
-    # 3. 全域推薦（原妖股獵人升級：全市場狂飆預警）
     fields.append({
         "name": "───────── 🚨 全域推薦 (飆股狂飆預警) ─────────",
         "value": "\u200b",
@@ -550,9 +570,8 @@ def main():
             "inline": False
         })
 
-    # 4. 個股期現 ＆ 跨月價差焦點 Top 4（移至最後）
     fields.append({
-        "name": "───────── ⚡ 個股期現 ＆ 跨月價差焦點 Top 4 ─────────",
+        "name": "───────── ⚡ 期現貨正價差套利焦點 ─────────",
         "value": "\u200b",
         "inline": False
     })
@@ -562,10 +581,10 @@ def main():
             fields.append({
                 "name": f"⚡ {item['sid']} {item['name']} ｜ {item['industry']}",
                 "value": (
-                    f"> **現貨價位**: `{item['spot_p']}`\n"
-                    f"> **近月期 / 價差**: `{item['near_p']}` ｜ {item['dtype']} `{item['diff_str']}`\n"
-                    f"> **遠月期 / 跨月**: {item['far_str']}\n"
-                    f"> **成本與實質淨利**: `{item['signal']}`"
+                    f"> **現貨最佳賣價 (Ask)**: `{item['spot_p']}`\n"
+                    f"> **遠月期貨買價 (Bid)**: `{item['far_p']}`\n"
+                    f"> **實質遠月正價差**: 🟢 `{item['diff_str']}`\n"
+                    f"> **淨利 (扣摩擦成本)**: `{item['signal']}`"
                 ),
                 "inline": True
             })
@@ -578,7 +597,7 @@ def main():
     else:
         fields.append({
             "name": "⚡ 狀態提示",
-            "value": "> 今日全市場扣除交易摩擦成本（0.40%）後，暫無顯著超額淨價差標的。",
+            "value": "> 今日全市場扣除交易摩擦成本（0.40%）後，暫無顯著遠月期現實質正價差標的。",
             "inline": False
         })
 
