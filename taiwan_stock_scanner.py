@@ -15,8 +15,28 @@ WEBHOOK_URL = os.getenv(
     "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 )
 
-# 交易摩擦成本（現貨手續費+稅金 + 期貨成本 ≈ 0.40%）
+# 交易摩擦成本（現貨+期貨來回手續費與稅金 ≈ 0.40%）
 FRICTION_COST_PCT = 0.40
+
+# 指定 15 大核心聚焦族群庫 (Top 6 專屬池)
+TARGET_THEMES = {
+    "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
+    "AI伺服器": ["2382", "3231", "6669", "2356", "2376", "2317", "2301", "3017", "2421"],
+    "重電": ["1519", "1513", "1504", "1503", "1609", "1605"],
+    "矽光子": ["3450", "3081", "4979", "6442", "4908", "3163", "6530", "2455"],
+    "散熱PCB": ["3037", "8046", "3189", "2368", "2383", "6274", "3017", "3324", "2421", "3653", "8996"],
+    "軍工": ["2634", "8222", "2645", "5284", "4572", "3004"],
+    "機器人": ["2359", "4566", "2049", "8374", "4583", "1590", "2464", "4562"],
+    "特殊化學": ["4749", "4772", "4755", "1773", "4722", "5234", "1727"],
+    "ABF載板": ["3037", "8046", "3189"],
+    "功率元件": ["3707", "6438", "3675", "5425", "8255", "2481"],
+    "被動元件": ["2327", "2492", "3026", "2478", "2456", "6173"],
+    "玻璃相關": ["1802", "1809", "1810", "1817"],
+    "CoWoS": ["3131", "3583", "6187", "2467", "6640", "2330", "3711", "2449", "3374"],
+    "權值股": ["2330", "2454", "2317", "2308", "2881", "2882", "2886", "2891", "2412", "1301", "1303", "2002"],
+    "塑膠": ["1301", "1303", "1326", "1304", "1308", "1305", "1314", "1309"],
+    "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
+}
 
 def send_msg(payload):
     try:
@@ -45,27 +65,11 @@ def get_session_info():
     title_str = f"全方位{session_name}分析報告 ({trigger_type})"
     return session_name, title_str, now_tw.strftime("%Y-%m-%d")
 
-def refine_industry(name, original_industry):
-    orig_str = str(original_industry).strip() if original_industry else ""
-    if orig_str and orig_str not in ["其他", "nan", "其他業"]:
-        return orig_str
-        
-    name_str = str(name)
-    if any(k in name_str for k in ["生技", "藥", "醫", "基因", "針劑"]):
-        return "生技醫療業"
-    elif any(k in name_str for k in ["能源", "綠能", "太陽能", "風電", "電力", "環保"]):
-        return "綠能環保業"
-    elif any(k in name_str for k in ["投控", "控股", "投資", "集團"]):
-        return "投資控股業"
-    elif any(k in name_str for k in ["建設", "開發", "營造", "置地"]):
-        return "建材營造"
-    elif any(k in name_str for k in ["軟體", "資訊", "網路", "雲端", "系統"]):
-        return "資訊服務業"
-    elif any(k in name_str for k in ["航運", "海運", "航空", "物流"]):
-        return "航運業"
-    elif any(k in name_str for k in ["機電", "機械", "電機", "自動化"]):
-        return "電機機械"
-    return "一般產業"
+def identify_theme(sid, original_ind):
+    for theme, sids in TARGET_THEMES.items():
+        if sid in sids:
+            return theme
+    return original_ind if original_ind and original_ind != "其他" else "一般產業"
 
 def get_dynamic_all_stocks():
     stock_dict = {}
@@ -98,15 +102,14 @@ def get_dynamic_all_stocks():
                             if val_str in ["水泥工業", "食品工業", "塑膠工業", "紡織纖維", "電機機械", "電器電纜", "化學工業", "生技醫療業", "玻璃陶瓷", "造紙工業", "鋼鐵工業", "橡膠工業", "汽車工業", "電子通路業", "資訊服務業", "其他電子業", "建材營造", "航運業", "觀光餐旅", "金融保險業", "貿易百貨", "油電燃氣業", "綜合企業", "其他業", "半導體業", "電腦及週邊設備", "光電業", "通信網路業", "電子零組件", "電子用品"]:
                                 original_ind = val_str
                                 break
-                        ind_str = refine_industry(name, original_ind)
+                        theme_str = identify_theme(sid, original_ind)
                         ticker = f"{sid}.{market}"
-                        stock_dict[ticker] = (sid, name, ind_str)
+                        stock_dict[ticker] = (sid, name, theme_str)
         except Exception:
             continue
     return stock_dict
 
 def calculate_atr(df, period=14):
-    """計算真實波動區間 ATR"""
     high = df['High']
     low = df['Low']
     close = df['Close']
@@ -114,105 +117,117 @@ def calculate_atr(df, period=14):
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return float(tr.rolling(period).mean().iloc[-1])
+    atr_val = tr.rolling(period).mean().iloc[-1]
+    return float(atr_val) if not pd.isna(atr_val) else float(high.iloc[-1] - low.iloc[-1])
 
-def analyze_pattern_stages(df):
+def analyze_pattern_stages(df, sid, theme_str):
     """
-    動態個股專屬：形態學 4 步驟 ＋ 結構判定 ＋ 依個股 ATR/形態滿足點計算 TP/SL
+    1~2 週波段趨勢 ＋ 形態學 4 步驟 ＋ 結構深度解析 ＋ 每檔獨立動態 TP/SL
     """
     try:
         close_s = df['Close']
         high_s = df['High']
         low_s = df['Low']
+        open_s = df['Open']
+        vol_s = df['Volume']
         
         c_price = float(close_s.iloc[-1])
         ma5 = float(close_s.rolling(5).mean().iloc[-1])
         ma10 = float(close_s.rolling(10).mean().iloc[-1])
         ma20 = float(close_s.rolling(20).mean().iloc[-1])
+        ma20_s = close_s.rolling(20).mean()
+        ma20_slope = ma20 - float(ma20_s.iloc[-3])
         atr_14 = calculate_atr(df, 14)
         
-        # 尋找過去 40 天結構
+        # 1~2 週波段趨勢核心過濾：必須站穩月線，且月線走平或翻揚
+        if c_price < ma20 or ma20_slope < 0:
+            return None
+
+        # 結構回溯：尋找 40 日型態
         low_40d = low_s.iloc[-40:]
         head_idx = low_40d.idxmin()
         head_pos = low_40d.index.get_loc(head_idx)
         head_price = float(low_40d.min())
         
-        if head_pos < 4 or head_pos > len(low_40d) - 3:
+        if head_pos < 3 or head_pos > len(low_40d) - 3:
             return None
             
         left_foot = float(low_40d.iloc[:head_pos].min())
         right_foot = float(low_40d.iloc[head_pos+1:].min())
         
-        # 頸線高點與回測支撐帶
         neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
         neck_low = round(neck_high * 0.985, 2)
         neck_zone = f"{neck_low:.2f} ~ {neck_high:.2f}"
         
-        # ----------------- 結構判定 -----------------
         recent_low_5d = float(low_s.iloc[-5:].min())
+        recent_high_20d = float(high_s.iloc[-21:-1].max())
         
-        if c_price >= neck_high and right_foot > left_foot:
-            structure_tag = "多頭破頸線 (階梯墊高)"
-            status_text = "🟢 突破頸線 (轉強發動)"
-            left_strat = f"`{right_foot*1.01:.2f}` 已過"
+        # ----------------- 結構深度判定 -----------------
+        if c_price >= neck_high and right_foot >= left_foot:
+            structure_desc = "多頭破頸線 (突破20日高, 階梯墊高發動)"
+            status_text = "🟢 突破頸線 (波段轉強)"
+            left_strat = f"`{right_foot*1.01:.2f}` 左腳已成"
             right_strat = f"突破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
-            score = 95
+            score = 96
         elif c_price >= neck_low and c_price < neck_high:
-            structure_tag = "強勢箱型整理 (蓄勢突破)"
-            status_text = "🟡 突破後回測 (確認支撐)"
-            left_strat = f"`{neck_low:.2f}` 支撐小量試單"
+            structure_desc = "強勢箱型蓄勢 (回測頸線支撐帶, 浮額清洗)"
+            status_text = "🟡 突破後回測 (支撐確認)"
+            left_strat = f"`{neck_low:.2f}` 支撐帶試單"
             right_strat = f"回測 `{neck_low:.2f}` 不破進場 ｜ 跌破放棄"
-            score = 88
-        elif right_foot >= head_price and c_price > ma20:
-            pattern_type = "W底" if abs(left_foot - right_foot) / left_foot <= 0.03 else "破底翻轉折"
-            structure_tag = f"{pattern_type} (右腳確立)"
-            status_text = f"🟢 左右腳完成 ({pattern_type})"
-            left_strat = f"`{right_foot*1.01:.2f}` 附近試單"
-            right_strat = f"帶量突破 `{neck_high:.2f}` 順勢加碼"
-            score = 82
+            score = 89
+        elif right_foot >= head_price and c_price > ma10:
+            pattern_type = "W底" if abs(left_foot - right_foot) / left_foot <= 0.035 else "右腳墊高築底"
+            structure_desc = f"{pattern_type} (均線多頭排列, 右腳支撐確立)"
+            status_text = f"🟢 左右腳成型 ({pattern_type})"
+            left_strat = f"`{right_foot*1.01:.2f}` 附近低接試單"
+            right_strat = f"帶量突破 `{neck_high:.2f}` 確認順勢加碼"
+            score = 84
         elif right_foot >= head_price:
-            structure_tag = "底部築底中 (觀察防守)"
+            structure_desc = "底部二度回測 (右腳築底中, 均線糾結轉折)"
             status_text = "🟡 右腳形成中 (轉折觀察)"
             left_strat = f"`{right_foot*1.01:.2f}` 分批承接"
-            right_strat = f"等待突破 `{neck_high:.2f}` 確認"
-            score = 75
+            right_strat = f"突破 `{neck_high:.2f}` 確認後加碼"
+            score = 76
         else:
             return None
 
-        # ----------------- 個股專屬動態 SL（止損）-----------------
-        # 邏輯：取 (近 5 日波段低點, 頸線下緣回測點, 右腳支撐) 之有效防守點，並給予 1.0~1.2 倍 ATR 呼吸空間
+        # 族群權重加分（若是 15 大核心概念股，波段權重大幅提升）
+        is_target_theme = any(sid in sids for sids in TARGET_THEMES.values())
+        if is_target_theme:
+            score += 15
+
+        # ----------------- 每檔個股獨立動態 TP / SL 設置 -----------------
+        # SL: 取 (近5日低點, 頸線下緣回測點, 右腳支撐) 之結構支撐，並考量該股 ATR 波動預留空間
         structural_support = min(recent_low_5d, neck_low if c_price >= neck_low else right_foot)
-        sl_price = round(min(structural_support * 0.99, c_price - atr_14 * 1.2), 2)
+        sl_price = round(min(structural_support * 0.99, c_price - atr_14 * 1.3), 2)
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
-        # ----------------- 個股專屬動態 TP（形態 1:1 等幅測幅滿足點）-----------------
-        # 邏輯：目標價 = 頸線高點 + (頸線高點 - 底部最低點)
+        # TP: 形態學 1:1 等幅測幅目標 ＝ 頸線高點 ＋ (頸線高點 － 底部最低點)
         pattern_height = neck_high - head_price
         target_by_pattern = neck_high + pattern_height
-        target_by_risk_reward = c_price + (c_price - sl_price) * 2.2
+        target_by_risk_reward = c_price + (c_price - sl_price) * 2.3
         
-        # 綜合形態滿足點與風控比
         tp_price = round(max(target_by_pattern, target_by_risk_reward), 2)
         tp_pct = round(((tp_price - c_price) / c_price) * 100, 2)
 
         entry_low = round(c_price * 0.992, 2)
-        entry_high = round(c_price * 1.005, 2)
+        entry_high = round(c_price * 1.006, 2)
 
         return {
-            "status_text": f"{status_text} ｜ `{structure_tag}`",
+            "status_text": f"{status_text}\n> **結構敘述**: `{structure_desc}`",
             "neck_zone": neck_zone,
             "left_strat": left_strat,
             "right_strat": right_strat,
             "tp": f"{tp_price} (+{tp_pct}%)",
             "sl": f"{sl_price} ({sl_pct}%)",
             "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
-            "score": score
+            "score": score,
+            "is_target_theme": is_target_theme
         }
     except Exception:
         return None
 
 def get_taifex_quotes():
-    """解析期交所 API：提取台指期與個股期近遠月合約"""
     tx_quote = None
     stock_futures = {}
     try:
@@ -220,8 +235,6 @@ def get_taifex_quotes():
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Content-Type": "application/json"
         }
-        
-        # 1. 期貨即時行情（含台指期）
         r = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=5)
         if r.status_code == 200:
             data = r.json().get('RtData', {}).get('QuoteList', [])
@@ -241,7 +254,6 @@ def get_taifex_quotes():
                     elif stock_futures[und_id]["far"] is None and price != stock_futures[und_id]["near"]["price"]:
                         stock_futures[und_id]["far"] = {"price": price, "diff": diff, "rate": rate}
 
-        # 2. 股票期貨專區
         r_stk = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"S"}, headers=headers, timeout=5)
         if r_stk.status_code == 200:
             data_stk = r_stk.json().get('RtData', {}).get('QuoteList', [])
@@ -326,6 +338,7 @@ def main():
     monster_stocks = []
     spread_candidates = []
 
+    # 全市場掃描
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
@@ -337,7 +350,7 @@ def main():
                     if df.empty or len(df) < 45:
                         continue
 
-                    sid, name, industry = stock_dict[ticker]
+                    sid, name, theme_str = stock_dict[ticker]
                     close_s = df['Close']
                     high_s = df['High']
                     low_s = df['Low']
@@ -384,7 +397,7 @@ def main():
                                 spread_candidates.append({
                                     "sid": sid,
                                     "name": name,
-                                    "industry": industry,
+                                    "industry": theme_str,
                                     "spot_p": f"{today_close:,.2f}",
                                     "near_p": f"{near_p:,.2f}",
                                     "far_str": far_str,
@@ -404,7 +417,7 @@ def main():
                     if gain_5d > 25.0 and yesterday_pct >= 9.0:
                         continue
 
-                    # 3. 妖股獵人判斷
+                    # 3. 全域推薦（原妖股獵人升級：全市場篩選）
                     recent_high_20d = float(high_s.iloc[-21:-1].max())
                     recent_low_20d = float(low_s.iloc[-21:-1].min())
                     box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -412,14 +425,14 @@ def main():
                     if box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98 and gain_5d <= 22.0:
                         atr_m = calculate_atr(df, 14)
                         m_entry_low = round(today_close * 0.992, 2)
-                        m_entry_high = round(today_close * 1.005, 2)
+                        m_entry_high = round(today_close * 1.006, 2)
                         m_sl = round(max(recent_low_20d * 0.99, today_close - atr_m * 1.5), 2)
                         m_tp = round(today_close + (recent_high_20d - recent_low_20d) * 2.5, 2)
 
                         monster_stocks.append({
                             "sid": sid,
                             "name": name,
-                            "industry": industry,
+                            "industry": theme_str,
                             "close": f"{today_close:.2f}",
                             "vol_ratio": round(today_vol / vol_ma5, 1),
                             "entry": f"{m_entry_low:.2f} ~ {m_entry_high:.2f}",
@@ -427,13 +440,13 @@ def main():
                             "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                         })
 
-                    # 4. 形態 ＋ 結構判讀
-                    p_res = analyze_pattern_stages(df)
+                    # 4. 形態 ＋ 結構判讀（針對 15 大核心族群優先評分）
+                    p_res = analyze_pattern_stages(df, sid, theme_str)
                     if p_res:
                         scored_results.append({
                             "sid": sid,
                             "name": name,
-                            "industry": industry,
+                            "industry": theme_str,
                             "close": f"{today_close:.2f}",
                             **p_res
                         })
@@ -442,7 +455,12 @@ def main():
         except Exception:
             continue
 
-    sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
+    # 精選 Top 6（優先鎖定 15 大核心族群）
+    target_results = [x for x in scored_results if x["is_target_theme"]]
+    if len(target_results) < 6:
+        target_results += [x for x in scored_results if not x["is_target_theme"]]
+
+    sorted_all = sorted(target_results, key=lambda x: x["score"], reverse=True)
     industry_count = {}
     top_picks = []
     
@@ -452,16 +470,17 @@ def main():
             industry_count[ind] = industry_count.get(ind, 0) + 1
             top_picks.append(item)
             
-        if len(top_picks) >= 10:
+        if len(top_picks) >= 6:
             break
 
+    # 期現價差 Top 4
     pos_spreads = sorted([s for s in spread_candidates if s['diff_val'] > 0], key=lambda x: x['net_pct'], reverse=True)[:2]
     neg_spreads = sorted([s for s in spread_candidates if s['diff_val'] < 0], key=lambda x: x['net_pct'], reverse=True)[:2]
     top_4_spreads = pos_spreads + neg_spreads
 
     fields = []
     
-    # 1. 大盤
+    # 1. 加權指數大盤解析
     if 'spot_close' in market_info:
         fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時撮合中')}"
         fields.append({
@@ -475,9 +494,9 @@ def main():
             "inline": False
         })
     
-    # 2. 精選 Top 10 (含各股專屬 TP/SL、頸線、策略與結構狀態)
+    # 2. 波段精選 Top 6 (15大族群核心池)
     fields.append({
-        "name": f"───────── 🎯 {session_name}精選 Top 10 ─────────",
+        "name": f"───────── 🎯 {session_name}波段精選 Top 6 (核心族群) ─────────",
         "value": "\u200b",
         "inline": False
     })
@@ -486,10 +505,10 @@ def main():
         fields.append({
             "name": f"📌 {item['sid']} {item['name']}  現價 : {item['close']}",
             "value": (
-                f"> **產業**: `{item['industry']}`\n"
-                f"> **進場**: `{item['entry']}`\n"
-                f"> **止盈 (TP)**: `{item['tp']}`\n"
-                f"> **止損 (SL)**: `{item['sl']}`\n"
+                f"> **核心族群**: `{item['industry']}`\n"
+                f"> **進場區間**: `{item['entry']}`\n"
+                f"> **動態止盈 (TP)**: `{item['tp']}`\n"
+                f"> **動態止損 (SL)**: `{item['sl']}`\n"
                 f"> **頸線區間**: `{item['neck_zone']}`\n"
                 f"> **左側策略**: {item['left_strat']}\n"
                 f"> **右側策略**: {item['right_strat']}\n"
@@ -504,7 +523,34 @@ def main():
                 "inline": False
             })
 
-    # 3. 價差焦點 Top 4
+    # 3. 全域推薦（原妖股獵人升級：全市場狂飆預警）
+    fields.append({
+        "name": "───────── 🚨 全域推薦 (飆股狂飆預警) ─────────",
+        "value": "\u200b",
+        "inline": False
+    })
+    
+    if monster_stocks:
+        top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
+        for m in top_monsters:
+            fields.append({
+                "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
+                "value": (
+                    f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
+                    f"> **進場**: `{m['entry']}`\n"
+                    f"> **止盈 (TP)**: `{m['tp']}`\n"
+                    f"> **止損 (SL)**: `{m['sl']}`"
+                ),
+                "inline": True
+            })
+    else:
+        fields.append({
+            "name": "⚡ 狀態提示",
+            "value": "> 今日全市場暫無符合標的",
+            "inline": False
+        })
+
+    # 4. 個股期現 ＆ 跨月價差焦點 Top 4（移至最後）
     fields.append({
         "name": "───────── ⚡ 個股期現 ＆ 跨月價差焦點 Top 4 ─────────",
         "value": "\u200b",
@@ -536,38 +582,11 @@ def main():
             "inline": False
         })
 
-    # 4. 妖股獵人
-    fields.append({
-        "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
-        "value": "\u200b",
-        "inline": False
-    })
-    
-    if monster_stocks:
-        top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
-        for m in top_monsters:
-            fields.append({
-                "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
-                "value": (
-                    f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
-                    f"> **進場**: `{m['entry']}`\n"
-                    f"> **止盈 (TP)**: `{m['tp']}`\n"
-                    f"> **止損 (SL)**: `{m['sl']}`"
-                ),
-                "inline": True
-            })
-    else:
-        fields.append({
-            "name": "⚡ 狀態提示",
-            "value": "> 今日全市場暫無符合標的",
-            "inline": False
-        })
-
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股{title_suffix} ({date_str})",
-            "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
+            "description": "已完成大盤結構判定、15大核心族群波段掃描與全域飆股預警：",
             "color": 3447003,
             "fields": fields
         }]
