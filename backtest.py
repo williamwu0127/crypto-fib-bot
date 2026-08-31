@@ -231,7 +231,7 @@ def run_unified_backtest(days=365, mode='COMBINED'):
                     del positions[t_key]
                     continue
 
-        # 4.2 開倉判定 (已預先提取 be_r 與 tp_r，避免作用域錯誤)
+        # 4.2 開倉判定
         current_w = total_wallet if mode == 'COMBINED' else wallets[t_key]
         if t_key not in positions and current_w > 5.0:
             macro_trend = bar['macro_filter']
@@ -280,7 +280,10 @@ def run_unified_backtest(days=365, mode='COMBINED'):
         tot_init = INITIAL_CAPITAL * 3
         tot_final = sum(wallets.values())
         roi_pct = ((tot_final - tot_init) / tot_init) * 100
-        final_str = f"${format_full_num(tot_final, 2)} USD ({roi_pct:+.2f}\%)\n(各軌結餘: XAU_4H=${wallets['XAU_4H']:.2f} | XAU_1H=${wallets['XAU_1H']:.2f} \vert{} MSFT_4H=${wallets['MSFT_4H']:.2f})"
+        final_str = (
+            f"${format_full_num(tot_final, 2)} USD ({roi_pct:+.2f}%)\n"
+            f"(各軌結餘: XAU_4H=${wallets['XAU_4H']:.2f} | XAU_1H=${wallets['XAU_1H']:.2f} \vert{} MSFT_4H=${wallets['MSFT_4H']:.2f})"
+        )
         init_str = f"${format_full_num(tot_init)} USD (每軌各 $100)"
 
     mode_title = "【三軌合併共享資金池 (極致動態複利)】" if mode == 'COMBINED' else "【三軌獨立帳戶 (風險完全隔離)】"
