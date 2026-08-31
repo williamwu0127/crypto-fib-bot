@@ -1,6 +1,8 @@
 """
-XAU/USD Gold Dedicated Quant Engine (Exact 409.92% Reproduction)
-Strategy: 1D MA60 Macro Filter + 4H Donchian(20) Breakout + 1.5 ATR SL -> 2.0R BE -> 5.0R TP
+XAU/USD SNR Multi-Logic Dedicated Quant Engine
+- Logic A (4H Donchian Breakout) : 1D MA60 + 4H Breakout | 2.0R BE -> 5.0R TP ($100 USD)
+- Logic B (4H SNR Flip Retest)   : 1D MA60 + S/R Flip Retest | 1.5R BE -> 3.5R TP ($100 USD)
+Capital: $100 Isolated per Logic | 5% Risk per Trade | 10x Max Leverage
 """
 
 import os
@@ -9,162 +11,302 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from datetime import datetime
 
+# ==================== 1. Webhook 與交易風控配置 ====================
 DISCORD_WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
-INITIAL_WALLET = 100.0
-RISK_PCT = 0.05
-FEE_RATE = 0.0004
-MAX_LEVERAGE = 10.0
+INITIAL_WALLET_PER_LOGIC = 100.0
+RISK_PCT = 0.05        # 單筆承擔 5% 風險
+FEE_RATE = 0.0004      # 黃金點差與手續費 (萬分之四)
+MAX_LEVERAGE = 10.0    # 10 倍實質槓桿上限
 
-def send_discord(text):
-    if DISCORD_WEBHOOK_URL:
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=8)
-        except Exception:
-            pass
+# 雙邏輯配置
+LOGIC_CONFIGS = {
+    'LOGIC_BREAKOUT': {
+        'name': '邏輯 A：4H 順勢結構突破',
+        'be_r': 2.0,
+        'tp_r': 5.0
+    },
+    'LOGIC_SNR_RETEST': {
+        'name': '邏輯 B：4H SNR 互換回踩確認',
+        'be_r': 1.5,
+        'tp_r': 3.5
+    }
+}
 
-def run_exact_gold_backtest(days=365):
-    period_title = "1 年期" if days >= 365 else f"{days} 天期"
-    ticker = yf.Ticker("GC=F")
-    
-    # 抓取 1H 並合成標準 4H K 線
-    df_1h = ticker.history(period="2y", interval="1h").reset_index()
-    if df_1h.empty:
+def format_full_num(val, max_dec=4):
+    try:
+        f = float(val)
+        return f"{f:.{max_dec}f}".rstrip('0').rstrip('.')
+    except Exception:
+        return str(val)
+
+def send_discord_safe(content):
+    if not DISCORD_WEBHOOK_URL:
         return
-    date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
-    df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
-    df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-    df_1h = df_1h.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
-    
-    df_4h = df_1h.set_index('time').resample('4h').agg({
-        'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
-    }).dropna().reset_index()
+    try:
+        if len(content) <= 1900:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
+        else:
+            parts = [content[i:i+1800] for i in range(0, len(content), 1800)]
+            for p in parts:
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": p}, timeout=8)
+                time.sleep(0.5)
+    except Exception:
+        pass
 
-    # 抓取日線 MA60
-    df_1d = ticker.history(period="2y", interval="1d").reset_index()
-    date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
-    df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
-    df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c'}, inplace=True)
-    df_1d['ma60'] = df_1d['c'].rolling(60).mean()
-    df_1d['macro_trend'] = np.where(df_1d['c'] > df_1d['ma60'], 1, -1)
+# ==================== 2. 數據獲取與指標模組 ====================
+def fetch_gold_data(days=365):
+    try:
+        period_str = f"{days + 90}d" if days <= 600 else "2y"
+        ticker = yf.Ticker("GC=F")
 
-    df_4h['d_date'] = df_4h['time'].dt.floor('D')
-    df_1d['d_date'] = df_1d['time'].dt.floor('D')
-    d_map = df_1d.drop_duplicates('d_date').set_index('d_date')['macro_trend'].to_dict()
-    df_4h['macro_filter'] = df_4h['d_date'].map(d_map).ffill().fillna(0)
+        # 1. 抓取 1H K 線並合成 4H
+        df_1h = ticker.history(period=period_str, interval="1h").reset_index()
+        if df_1h.empty:
+            return None, None
 
-    # 4H 唐奇安(20) & ATR(14)
-    df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
-    df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
-    tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
-    df_4h['atr'] = tr.rolling(14).mean().fillna(df_4h['c'] * 0.015)
+        date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
+        df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
+        df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
+        df_1h = df_1h.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
 
-    # 精確錨定回測時間 (去除週末無效首根)
+        df_4h = df_1h.set_index('time').resample('4h').agg({
+            'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
+        }).dropna().reset_index()
+
+        # 2. 抓取 1D 日線計算 MA60
+        df_1d = ticker.history(period=period_str, interval="1d").reset_index()
+        date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
+        df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
+        df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c'}, inplace=True)
+        df_1d['daily_ma60'] = df_1d['c'].rolling(60).mean()
+        df_1d['daily_trend'] = np.where(df_1d['c'] > df_1d['daily_ma60'], 1, -1)
+
+        # 3. 日線定錨對齊
+        df_4h['daily_date'] = df_4h['time'].dt.floor('D')
+        df_1d['daily_date'] = df_1d['time'].dt.floor('D')
+        daily_map = df_1d.drop_duplicates(subset=['daily_date']).set_index('daily_date')['daily_trend'].to_dict()
+        df_4h['macro_filter'] = df_4h['daily_date'].map(daily_map).ffill().fillna(0)
+
+        # 4. 唐奇安通道 (水平阻力與支撐)
+        df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
+        df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
+
+        # 5. ATR(14)
+        tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
+        df_4h['atr'] = tr.rolling(14).mean().fillna(df_4h['c'] * 0.015)
+
+        return df_4h, df_1d
+    except Exception as e:
+        print(f"[!] 數據獲取異常: {e}")
+        return None, None
+
+# ==================== 3. 雙邏輯撮合回測引擎 ====================
+def run_snr_backtest(days=365):
+    period_title = "1 年期" if days >= 365 else f"{days} 天期"
+    print("=" * 65)
+    print(f">>> 啟動【XAU/USD 現貨黃金 - SNR 雙邏輯對比系統】{period_title}回測")
+    print("=" * 65 + "\n")
+
+    df_4h, _ = fetch_gold_data(days=days)
+    if df_4h is None or len(df_4h) < 60:
+        print("[!] 數據不足。")
+        return
+
     now_ms = int(time.time() * 1000)
-    start_filter_time = pd.to_datetime(now_ms - (days * 86400000), unit='ms')
+    start_filter_time = pd.to_datetime(now_ms - (days * 24 * 60 * 60 * 1000), unit='ms')
     df = df_4h[df_4h['time'] >= start_filter_time].reset_index(drop=True)
 
-    wallet = float(INITIAL_WALLET)
-    pos = None
-    trades = []
+    if df.empty:
+        return
 
-    for i in range(1, len(df)):
-        bar = df.iloc[i]
+    start_date = df.iloc[0]['time'].strftime("%Y-%m-%d")
+    end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
 
-        if pos is not None:
-            side, entry, sl, tp, be_tgt, qty, be_done = (
-                pos['side'], pos['entry'], pos['sl'], pos['tp'],
-                pos['be_target'], pos['qty'], pos['is_be_moved']
-            )
+    # 初始化雙軌狀態
+    wallets = {'LOGIC_BREAKOUT': float(INITIAL_WALLET_PER_LOGIC), 'LOGIC_SNR_RETEST': float(INITIAL_WALLET_PER_LOGIC)}
+    positions = {'LOGIC_BREAKOUT': None, 'LOGIC_SNR_RETEST': None}
+    completed_trades = {'LOGIC_BREAKOUT': [], 'LOGIC_SNR_RETEST': []}
 
-            if side == 'LONG':
-                if not be_done and bar['h'] >= be_tgt:
-                    pos['sl'] = entry
-                    pos['is_be_moved'] = True
+    # SNR 互換狀態紀錄變數 (記錄前次突破的水平位)
+    recent_sr_high = None
+    recent_sr_low = None
 
-                if bar['l'] <= pos['sl']:
-                    pnl = qty * (pos['sl'] - entry) - qty * (entry + pos['sl']) * FEE_RATE
-                    wallet += pnl
-                    trades.append(pnl)
-                    pos = None
-                    continue
+    for idx in range(1, len(df)):
+        bar = df.iloc[idx]
+        prev_bar = df.iloc[idx - 1]
 
-                if bar['h'] >= tp:
-                    pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
-                    wallet += pnl
-                    trades.append(pnl)
-                    pos = None
-                    continue
+        # ---------------- 1. 持倉處理 (兩套邏輯各自結算) ----------------
+        for l_key in ['LOGIC_BREAKOUT', 'LOGIC_SNR_RETEST']:
+            pos = positions[l_key]
+            if pos is not None:
+                side = pos['side']
+                entry = pos['entry']
+                tp = pos['tp']
+                be_target = pos['be_target']
+                qty = pos['qty']
+                is_be_moved = pos['is_be_moved']
 
-            elif side == 'SHORT':
-                if not be_done and bar['l'] <= be_tgt:
-                    pos['sl'] = entry
-                    pos['is_be_moved'] = True
+                if side == 'LONG':
+                    if not is_be_moved and bar['h'] >= be_target:
+                        pos['sl'] = entry
+                        pos['is_be_moved'] = True
 
-                if bar['h'] >= pos['sl']:
-                    pnl = qty * (entry - pos['sl']) - qty * (entry + pos['sl']) * FEE_RATE
-                    wallet += pnl
-                    trades.append(pnl)
-                    pos = None
-                    continue
+                    if bar['l'] <= pos['sl']:
+                        pnl = qty * (pos['sl'] - entry) - (qty * (entry + pos['sl']) * FEE_RATE)
+                        wallets[l_key] += pnl
+                        completed_trades[l_key].append({'side': 'LONG', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
+                        positions[l_key] = None
+                        continue
 
-                if bar['l'] <= tp:
-                    pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
-                    wallet += pnl
-                    trades.append(pnl)
-                    pos = None
-                    continue
+                    if bar['h'] >= tp:
+                        pnl = qty * (tp - entry) - (qty * (entry + tp) * FEE_RATE)
+                        wallets[l_key] += pnl
+                        completed_trades[l_key].append({'side': 'LONG', 'pnl': pnl, 'type': 'TP', 'time': bar['time']})
+                        positions[l_key] = None
+                        continue
 
-        if pos is None and wallet > 5.0:
-            trend = bar['macro_filter']
-            sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
+                elif side == 'SHORT':
+                    if not is_be_moved and bar['l'] <= be_target:
+                        pos['sl'] = entry
+                        pos['is_be_moved'] = True
 
-            if trend == 1 and bar['c'] > bar['dc_high']:
-                sig, entry = 'LONG', bar['c']
-                sl = entry - (bar['atr'] * 1.5)
+                    if bar['h'] >= pos['sl']:
+                        pnl = qty * (entry - pos['sl']) - (qty * (entry + pos['sl']) * FEE_RATE)
+                        wallets[l_key] += pnl
+                        completed_trades[l_key].append({'side': 'SHORT', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
+                        positions[l_key] = None
+                        continue
+
+                    if bar['l'] <= tp:
+                        pnl = qty * (entry - tp) - (qty * (entry + tp) * FEE_RATE)
+                        wallets[l_key] += pnl
+                        completed_trades[l_key].append({'side': 'SHORT', 'pnl': pnl, 'type': 'TP', 'time': bar['time']})
+                        positions[l_key] = None
+                        continue
+
+        # ---------------- 2. 開倉信號判定 ----------------
+        macro_trend = bar['macro_filter']
+        current_atr = bar['atr']
+
+        # 追蹤近期被實體突破的 S/R 水平位
+        if prev_bar['c'] > prev_bar['dc_high']:
+            recent_sr_high = prev_bar['dc_high']
+        if prev_bar['c'] < prev_bar['dc_low']:
+            recent_sr_low = prev_bar['dc_low']
+
+        # [邏輯 A] 4H 結構突破 (2.0R 保本 / 5.0R 止盈)
+        if positions['LOGIC_BREAKOUT'] is None and wallets['LOGIC_BREAKOUT'] > 5.0:
+            cfg = LOGIC_CONFIGS['LOGIC_BREAKOUT']
+            sig_side, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
+
+            if macro_trend == 1 and bar['c'] > bar['dc_high']:
+                sig_side = 'LONG'
+                entry = bar['c']
+                sl = entry - (current_atr * 1.5)
                 risk_dist = entry - sl
-                be_tgt = entry + (risk_dist * 2.0)
-                tp = entry + (risk_dist * 5.0)
+                be_tgt = entry + (risk_dist * cfg['be_r'])
+                tp = entry + (risk_dist * cfg['tp_r'])
 
-            elif trend == -1 and bar['c'] < bar['dc_low']:
-                sig, entry = 'SHORT', bar['c']
-                sl = entry + (bar['atr'] * 1.5)
+            elif macro_trend == -1 and bar['c'] < bar['dc_low']:
+                sig_side = 'SHORT'
+                entry = bar['c']
+                sl = entry + (current_atr * 1.5)
                 risk_dist = sl - entry
-                be_tgt = entry - (risk_dist * 2.0)
-                tp = entry - (risk_dist * 5.0)
+                be_tgt = entry - (risk_dist * cfg['be_r'])
+                tp = entry - (risk_dist * cfg['tp_r'])
 
-            if sig and risk_dist > 0:
-                qty = (wallet * RISK_PCT) / risk_dist
-                if (qty * entry) > (wallet * MAX_LEVERAGE):
-                    qty = (wallet * MAX_LEVERAGE) / entry
-                pos = {
-                    'side': sig, 'entry': entry, 'sl': sl,
-                    'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
+            if sig_side and risk_dist > 0:
+                qty = (wallets['LOGIC_BREAKOUT'] * RISK_PCT) / risk_dist
+                if (qty * entry) > (wallets['LOGIC_BREAKOUT'] * MAX_LEVERAGE):
+                    qty = (wallets['LOGIC_BREAKOUT'] * MAX_LEVERAGE) / entry
+
+                positions['LOGIC_BREAKOUT'] = {
+                    'side': sig_side, 'entry': entry, 'sl': sl,
+                    'tp': tp, 'be_target': be_tgt, 'is_be_moved': False, 'qty': qty
                 }
 
-    total_trades = len(trades)
-    win_trades = sum(1 for p in trades if p > 0)
-    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
-    roi_pct = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
+        # [邏輯 B] 4H SNR 互換回踩確認 (1.5R 保本 / 3.5R 止盈)
+        if positions['LOGIC_SNR_RETEST'] is None and wallets['LOGIC_SNR_RETEST'] > 5.0:
+            cfg = LOGIC_CONFIGS['LOGIC_SNR_RETEST']
+            sig_side, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
 
-    report = (
+            # 多頭回踩：日線偏多，曾突破高點阻力，當前棒最低價回踩該阻力位附近 (0.5 ATR 緩衝區) 且收陽線反彈
+            if macro_trend == 1 and recent_sr_high is not None:
+                retest_zone_top = recent_sr_high + (current_atr * 0.5)
+                retest_zone_bot = recent_sr_high - (current_atr * 0.3)
+                if (bar['l'] <= retest_zone_top) and (bar['c'] > recent_sr_high) and (bar['c'] > bar['o']):
+                    sig_side = 'LONG'
+                    entry = bar['c']
+                    sl = bar['l'] - (current_atr * 0.8) # 緊湊止損 (放在回踩針尖下方)
+                    risk_dist = entry - sl
+                    if risk_dist > (current_atr * 0.4): # 確保不是微小無效 K 棒
+                        be_tgt = entry + (risk_dist * cfg['be_r'])
+                        tp = entry + (risk_dist * cfg['tp_r'])
+                        recent_sr_high = None # 消耗該支撐位
+
+            # 空頭回抽：日線偏空，曾跌破低點支撐，當前棒最高價回抽該支撐位附近且收陰線受阻
+            elif macro_trend == -1 and recent_sr_low is not None:
+                retest_zone_bot = recent_sr_low - (current_atr * 0.5)
+                retest_zone_top = recent_sr_low + (current_atr * 0.3)
+                if (bar['h'] >= retest_zone_bot) and (bar['c'] < recent_sr_low) and (bar['c'] < bar['o']):
+                    sig_side = 'SHORT'
+                    entry = bar['c']
+                    sl = bar['h'] + (current_atr * 0.8) # 緊湊止損 (放在回抽針尖上方)
+                    risk_dist = sl - entry
+                    if risk_dist > (current_atr * 0.4):
+                        be_tgt = entry - (risk_dist * cfg['be_r'])
+                        tp = entry - (risk_dist * cfg['tp_r'])
+                        recent_sr_low = None # 消耗該阻力位
+
+            if sig_side and risk_dist > 0:
+                qty = (wallets['LOGIC_SNR_RETEST'] * RISK_PCT) / risk_dist
+                if (qty * entry) > (wallets['LOGIC_SNR_RETEST'] * MAX_LEVERAGE):
+                    qty = (wallets['LOGIC_SNR_RETEST'] * MAX_LEVERAGE) / entry
+
+                positions['LOGIC_SNR_RETEST'] = {
+                    'side': sig_side, 'entry': entry, 'sl': sl,
+                    'tp': tp, 'be_target': be_tgt, 'is_be_moved': False, 'qty': qty
+                }
+
+    # ---------------- 3. 輸出雙邏輯獨立報表 ----------------
+    lines = []
+    for l_key, name in [('LOGIC_BREAKOUT', '邏輯 A：4H 順勢結構突破 (2.0R保本 / 5.0R止盈)'),
+                        ('LOGIC_SNR_RETEST', '邏輯 B：4H SNR 互換回踩 (1.5R保本 / 3.5R止盈)')]:
+        tr = completed_trades[l_key]
+        w = wallets[l_key]
+        total_t = len(tr)
+        win_t = sum(1 for x in tr if x['pnl'] > 0)
+        wr = (win_t / total_t * 100) if total_t > 0 else 0.0
+        roi = ((w - INITIAL_WALLET_PER_LOGIC) / INITIAL_WALLET_PER_LOGIC) * 100
+        lines.append(
+            f"【{name}】\n"
+            f"• 結餘: ${format_full_num(w, 2)} USD ({roi:+.2f}%)\n"
+            f"• 交易: {str(total_t).rjust(2)} 次 | 勝率: {wr:5.2f}%\n"
+        )
+
+    report_text = (
         "```text\n"
-        "【XAU/USD 現貨黃金專屬 (日線定錨 + Donchian + 1:5.0 RR高賠率版)】\n"
-        f"回測週期: {period_title} ({df.iloc[0]['time'].strftime('%Y-%m-%d')} ~ {df.iloc[-1]['time'].strftime('%Y-%m-%d')})\n"
-        f"初始資金: ${INITIAL_WALLET:.1f} USD\n"
-        f"最終結餘: ${wallet:.2f} USD ({roi_pct:+.2f}%)\n"
-        f"總交易次數: {total_trades} 次 | 策略勝率: {win_rate:.2f}%\n"
-        f"單筆風險: {RISK_PCT*100:.1f}% | 風報比: 1:5.0 (2.0R保本) | 槓桿: 10x\n"
+        "【XAU/USD 現貨黃金 - SNR 雙邏輯獨立測試報表】\n"
+        f"回測週期: {period_title} ({start_date} ~ {end_date})\n"
+        f"初始本金: ${format_full_num(INITIAL_WALLET_PER_LOGIC)} USD (每套邏輯獨立 $100)\n"
+        "----------------------------------------------------\n"
+        + "\n".join(lines) +
         "```"
     )
-    print(report)
-    send_discord(report)
 
+    print(report_text)
+    print(">>> 正在發送至 Discord...", end=" ", flush=True)
+    send_discord_safe(report_text)
+    print("完成！\n")
+
+# ==================== 4. 主執行入口 ====================
 if __name__ == '__main__':
-    run_exact_gold_backtest(days=30)
-    time.sleep(1.5)
-    run_exact_gold_backtest(days=365)
+    run_snr_backtest(days=30)
+    time.sleep(2)
+    run_snr_backtest(days=365)
