@@ -4,11 +4,8 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
-# Discord Webhook
-WEBHOOK_URL = os.getenv(
-    "DISCORD_WEBHOOK_URL",
-    "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
-)
+# 直接寫死指定之 Discord Webhook
+WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 GLOBAL_SYMBOLS = {
     "^GSPC": ("S&P 500", "美股大盤基準"),
