@@ -1,5 +1,5 @@
 """
-XAU & MSFT Tri-Track Production Engine
+XAU & MSFT Tri-Track Production Engine (Cleaned & Verified)
 - Track 1: XAU Swing (4H)  | 1D MA60 + 4H Donchian(20) | 2.0R BE -> 5.0R TP
 - Track 2: XAU Fast  (1H)  | 1D MA60 + 1H Donchian(20) | 1.5R BE -> 3.0R TP
 - Track 3: MSFT Swing (4H) | 1D MA60 + 4H Donchian(20) | 1.5R BE -> 3.0R TP
