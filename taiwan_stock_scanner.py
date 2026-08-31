@@ -121,9 +121,6 @@ def calculate_atr(df, period=14):
     return float(atr_val) if not pd.isna(atr_val) else float(high.iloc[-1] - low.iloc[-1])
 
 def analyze_pattern_stages(df, sid, theme_str):
-    """
-    形態學 4 步驟 ＋ 結構深度解析 ＋ 每檔獨立動態 TP/SL
-    """
     try:
         close_s = df['Close']
         high_s = df['High']
@@ -191,19 +188,17 @@ def analyze_pattern_stages(df, sid, theme_str):
         if is_target_theme:
             score += 15
 
-        # ----------------- 每檔個股獨立動態 SL -----------------
-        # 防守依據：回測頸線不破、近5日低點或 1.5 倍 ATR 波動空間（取最近支撐 max）
+        # 每檔獨立動態 SL（取最貼近之有效支撐 max）
         support_levels = [recent_low_5d * 0.992, c_price - atr_14 * 1.5]
         if c_price >= neck_low:
             support_levels.append(neck_low * 0.988)
             
         sl_price = round(max(support_levels), 2)
-        # 安全防護邊界：限制在 -2.5% ~ -8.0%
         sl_price = min(sl_price, round(c_price * 0.975, 2))
         sl_price = max(sl_price, round(c_price * 0.920, 2))
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
-        # ----------------- 每檔個股獨立動態 TP（純形態學 1:1 等幅測幅）-----------------
+        # 每檔獨立動態 TP（純形態學等幅測幅）
         box_height = neck_high - right_foot
         pattern_target = round(c_price + max(box_height, atr_14 * 2.2), 2)
         tp_price = pattern_target
@@ -234,7 +229,6 @@ def parse_price(val, default_val=0.0):
         return default_val
 
 def get_taifex_quotes():
-    """解析期交所 API：提取台指期與個股期貨遠月合約行情"""
     tx_quote = None
     stock_futures = {}
     try:
@@ -287,7 +281,6 @@ def get_taifex_quotes():
     return tx_quote, stock_futures
 
 def get_spot_orderbook(ticker_list):
-    """自證交所即時 MIS 獲取現貨最佳委賣價 (Ask 1)"""
     book_dict = {}
     if not ticker_list:
         return book_dict
@@ -408,11 +401,10 @@ def main():
                     today_vol = float(vol_s.iloc[-1])
                     vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
 
-                    # 1. 排除死鎖漲停
                     if is_limit_up_locked_over_hour(df, today_close, prev_close):
                         continue
 
-                    # 2. 全域掃描：遠月期現貨實質正價差
+                    # 遠月正價差全域掃描
                     if sid in stock_futures and today_close > 0:
                         f_dict = stock_futures[sid]
                         far_f = f_dict.get("far")
@@ -422,7 +414,6 @@ def main():
                             spot_ask = book_info.get('ask1', today_close)
                             fut_bid = far_f['bid']
                             
-                            # 正價差：遠月期貨買價(Bid) - 現貨最佳賣價(Ask)
                             pos_diff = fut_bid - spot_ask
                             
                             if pos_diff >= 0:
@@ -460,7 +451,7 @@ def main():
                     if gain_5d > 25.0 and yesterday_pct >= 9.0:
                         continue
 
-                    # 3. 全域推薦（飆股狂飆預警）
+                    # 全域推薦
                     recent_high_20d = float(high_s.iloc[-21:-1].max())
                     recent_low_20d = float(low_s.iloc[-21:-1].min())
                     box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -483,7 +474,7 @@ def main():
                             "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                         })
 
-                    # 4. 形態 ＋ 結構深度判讀
+                    # 波段評分
                     p_res = analyze_pattern_stages(df, sid, theme_str)
                     if p_res:
                         scored_results.append({
@@ -498,7 +489,6 @@ def main():
         except Exception:
             continue
 
-    # 核心族群鎖定篩選 Top 6
     target_results = [x for x in scored_results if x["is_target_theme"]]
     if len(target_results) < 6:
         target_results += [x for x in scored_results if not x["is_target_theme"]]
@@ -516,7 +506,6 @@ def main():
         if len(top_picks) >= 6:
             break
 
-    # 正價差 Top 4
     top_4_spreads = sorted(spread_candidates, key=lambda x: x['net_pct'], reverse=True)[:4]
 
     fields = []
@@ -535,7 +524,7 @@ def main():
             "inline": False
         })
     
-    # 2. 波段精選 Top 6
+    # 2. 波段精選 Top 6（已將族群移至標題列）
     fields.append({
         "name": f"───────── 🎯 {session_name}波段精選 Top 6 (核心族群) ─────────",
         "value": "\u200b",
@@ -544,9 +533,8 @@ def main():
     
     for i, item in enumerate(top_picks):
         fields.append({
-            "name": f"📌 {item['sid']} {item['name']}  現價 : {item['close']}",
+            "name": f"📌 {item['sid']} {item['name']} ｜ {item['industry']}  現價 : {item['close']}",
             "value": (
-                f"> **核心族群**: `{item['industry']}`\n"
                 f"> **進場區間**: `{item['entry']}`\n"
                 f"> **動態止盈 (TP)**: `{item['tp']}`\n"
                 f"> **動態止損 (SL)**: `{item['sl']}`\n"
@@ -564,7 +552,7 @@ def main():
                 "inline": False
             })
 
-    # 3. 全域推薦（狂飆預警）
+    # 3. 全域推薦
     fields.append({
         "name": "───────── 🚨 全域推薦 (飆股狂飆預警) ─────────",
         "value": "\u200b",
@@ -575,9 +563,9 @@ def main():
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
         for m in top_monsters:
             fields.append({
-                "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
+                "name": f"🔥 {m['sid']} {m['name']} ｜ {m['industry']}  現價 : {m['close']}",
                 "value": (
-                    f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
+                    f"> **爆量倍數**: `{m['vol_ratio']}x`\n"
                     f"> **進場**: `{m['entry']}`\n"
                     f"> **止盈 (TP)**: `{m['tp']}`\n"
                     f"> **止損 (SL)**: `{m['sl']}`"
