@@ -118,13 +118,6 @@ def get_dynamic_all_stocks():
     return stock_dict
 
 def analyze_pattern_stages(df):
-    """
-    4 步驟型態學分析模組：
-    1. 底部型態與轉折（左腳、頭部、右腳）
-    2. 左右腳是否形成＋定性型態
-    3. 頸線區域判定
-    4. 左側 vs 右側策略分流
-    """
     try:
         close_s = df['Close']
         high_s = df['High']
@@ -196,11 +189,41 @@ def analyze_pattern_stages(df):
     except Exception:
         return None
 
+def get_taifex_quotes():
+    """直接從期交所官方 API 獲取即時台指期與個股期行情"""
+    tx_quote = None
+    stock_futures = {}
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Content-Type": "application/json"
+        }
+        r = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=6)
+        if r.status_code == 200:
+            data = r.json().get('RtData', {}).get('QuoteList', [])
+            for item in data:
+                sym = item.get('SymbolID', '')
+                price = float(item.get('CLastPrice', 0))
+                diff = float(item.get('CDiff', 0))
+                rate = float(item.get('CDiffRate', 0))
+                
+                # 台指期主力
+                if sym.startswith('TX') and '-' not in sym and price > 5000 and not tx_quote:
+                    tx_quote = {"price": price, "diff": diff, "rate": rate}
+
+                # 個股期貨 (兩位英文字母開頭，如 CDF:台積電, DHF:聯發科)
+                sid = item.get('UnderlyingId', '')
+                if sid and len(sid) == 4 and price > 0 and '-' not in sym:
+                    if sid not in stock_futures:
+                        stock_futures[sid] = {"f_price": price, "f_diff": diff, "f_rate": rate}
+    except Exception as e:
+        print(f"期交所 API 獲取失敗: {e}")
+    return tx_quote, stock_futures
+
 def get_market_and_futures():
     res = {}
     spot_close = 0.0
     
-    # 1. 現貨大盤
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d")
@@ -220,54 +243,25 @@ def get_market_and_futures():
             res['emoji'] = emoji
             res['ma20'] = ma20
     except Exception as e:
-        print(f"大盤獲取失敗: {e}")
+        print(f"大盤現貨獲取失敗: {e}")
 
-    # 2. 台指期貨
-    f_price, f_pts, f_pct = 0.0, 0.0, 0.0
-    futures_found = False
+    tx_quote, stock_futures = get_taifex_quotes()
 
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=5)
-        if r.status_code == 200:
-            data = r.json().get('RtData', {}).get('QuoteList', [])
-            tx = next((x for x in data if x.get('SymbolID', '').startswith('TX') and '-' not in x.get('SymbolID', '')), None)
-            if tx and float(tx.get('CLastPrice', 0)) > 5000:
-                f_price = float(tx.get('CLastPrice'))
-                f_pts = float(tx.get('CDiff', 0))
-                f_pct = float(tx.get('CDiffRate', 0))
-                futures_found = True
-    except Exception:
-        pass
-
-    if not futures_found:
-        for sym in ["TX=F", "WTX&", "^TWII"]:
-            try:
-                tx = yf.Ticker(sym)
-                df_f = tx.history(period="5d", interval="1d")
-                if not df_f.empty and len(df_f) >= 2:
-                    f_price = float(df_f['Close'].iloc[-1])
-                    f_prev = float(df_f['Close'].iloc[-2])
-                    f_pts = f_price - f_prev
-                    f_pct = (f_pts / f_prev) * 100
-                    if f_price > 5000:
-                        futures_found = True
-                        break
-            except Exception:
-                continue
-
-    if futures_found and spot_close > 0:
+    if tx_quote and spot_close > 0:
+        f_price = tx_quote['price']
+        f_pts = tx_quote['diff']
+        f_pct = tx_quote['rate']
         diff = f_price - spot_close
         dtype = "正價差" if diff >= 0 else "逆價差"
         res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f} / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
     else:
         res['futures_str'] = "即時撮合中"
 
-    return res
+    return res, stock_futures
 
 def main():
     session_name, title_suffix, date_str = get_session_info()
-    market_info = get_market_and_futures()
+    market_info, stock_futures = get_market_and_futures()
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
@@ -278,6 +272,7 @@ def main():
     chunk_size = 200
     scored_results = []
     monster_stocks = []
+    spread_candidates = []
 
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
@@ -306,6 +301,25 @@ def main():
                 est_money_mil = (today_close * today_vol) / 100_000_000
                 if est_money_mil < 0.8:
                     continue
+
+                # 個股期現價差計算
+                if sid in stock_futures:
+                    f_info = stock_futures[sid]
+                    f_p = f_info['f_price']
+                    s_p = today_close
+                    diff_val = f_p - s_p
+                    diff_pct = (diff_val / s_p) * 100
+                    spread_candidates.append({
+                        "sid": sid,
+                        "name": name,
+                        "industry": industry,
+                        "spot_p": f"{s_p:,.2f}",
+                        "fut_p": f"{f_p:,.2f}",
+                        "diff_val": diff_val,
+                        "diff_pct": diff_pct,
+                        "diff_str": f"{'+' if diff_val>=0 else ''}{diff_val:.2f} ({'+' if diff_pct>=0 else ''}{diff_pct:.2f}%)",
+                        "dtype": "🟢 正價差" if diff_val >= 0 else "🔴 逆價差"
+                    })
 
                 gain_5d = ((today_close - float(close_s.iloc[-6])) / float(close_s.iloc[-6])) * 100
                 yesterday_pct = ((prev_close - float(close_s.iloc[-3])) / float(close_s.iloc[-3])) * 100
@@ -361,6 +375,11 @@ def main():
         if len(top_picks) >= 10:
             break
 
+    # 期現價差 Top 4 篩選（正價差前 2 + 逆價差前 2）
+    pos_spreads = sorted([s for s in spread_candidates if s['diff_val'] > 0], key=lambda x: x['diff_pct'], reverse=True)[:2]
+    neg_spreads = sorted([s for s in spread_candidates if s['diff_val'] < 0], key=lambda x: x['diff_pct'])[:2]
+    top_4_spreads = pos_spreads + neg_spreads
+
     fields = []
     
     # 1. 大盤與台指期
@@ -377,7 +396,7 @@ def main():
             "inline": False
         })
     
-    # 2. 精選 Top 10（含型態、頸線、左右側策略與狀態）
+    # 2. 精選 Top 10
     fields.append({
         "name": f"───────── 🎯 {session_name}精選 Top 10 ─────────",
         "value": "\u200b",
@@ -406,7 +425,39 @@ def main():
                 "inline": False
             })
 
-    # 3. 妖股獵人
+    # 3. 個股期現價差焦點 Top 4（正價差前 2 ＋ 逆價差前 2）
+    fields.append({
+        "name": "───────── ⚡ 個股期現價差焦點 Top 4 ─────────",
+        "value": "\u200b",
+        "inline": False
+    })
+
+    if top_4_spreads:
+        for i, item in enumerate(top_4_spreads):
+            signal = "期貨強軋空/追價強" if "正價差" in item['dtype'] else "期貨避險/偏折價"
+            fields.append({
+                "name": f"⚡ {item['sid']} {item['name']} ｜ {item['industry']}",
+                "value": (
+                    f"> **現貨/期貨**: `{item['spot_p']}` / `{item['fut_p']}`\n"
+                    f"> **價差幅度**: {item['dtype']} `{item['diff_str']}`\n"
+                    f"> **訊號解讀**: `{signal}`"
+                ),
+                "inline": True
+            })
+            if (i + 1) % 2 == 0 and (i + 1) < len(top_4_spreads):
+                fields.append({
+                    "name": "\u200b",
+                    "value": "\u200b",
+                    "inline": False
+                })
+    else:
+        fields.append({
+            "name": "⚡ 狀態提示",
+            "value": "> 盤後或未獲取到顯著價差標的",
+            "inline": False
+        })
+
+    # 4. 妖股獵人
     fields.append({
         "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
         "value": "\u200b",
