@@ -236,11 +236,13 @@ def main():
                 vol_s = df['Volume']
 
                 today_close = float(close_s.iloc[-1])
+                prev_close = float(close_s.iloc[-2])
                 today_high = float(high_s.iloc[-1])
                 today_low = float(low_s.iloc[-1])
                 today_open = float(open_s.iloc[-1])
                 today_vol = float(vol_s.iloc[-1])
 
+                today_pct = ((today_close - prev_close) / prev_close) * 100
                 ma5 = float(close_s.rolling(5).mean().iloc[-1])
                 ma10 = float(close_s.rolling(10).mean().iloc[-1])
                 ma20_s = close_s.rolling(20).mean()
@@ -250,12 +252,21 @@ def main():
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # 妖股邏輯
+                # ----------------- 漲停延續性與初升段過濾 -----------------
+                # 計算過去 5 天累計漲幅
+                gain_5d = ((today_close - float(close_s.iloc[-6])) / float(close_s.iloc[-6])) * 100
+                
+                # 排除已連續噴出（5天漲幅>25% 或 昨天也漲停>9.5% 且連漲過高）的過熱股
+                yesterday_pct = ((prev_close - float(close_s.iloc[-3])) / float(close_s.iloc[-3])) * 100
+                if gain_5d > 25.0 and yesterday_pct >= 9.0:
+                    continue  # 已漲多，剔除
+
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
-                
-                if est_money_mil >= 0.8 and box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98:
+
+                # ----------------- 妖股邏輯（嚴格起跑點） -----------------
+                if est_money_mil >= 0.8 and box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98 and gain_5d <= 22.0:
                     m_entry_low = round(today_close * 0.99, 2)
                     m_entry_high = round(today_close * 1.003, 2)
                     m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
@@ -273,7 +284,7 @@ def main():
                         "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                     })
 
-                # 精選 Top 10 常規篩選與計分
+                # ----------------- 精選 Top 10（初升起漲結構） -----------------
                 if est_money_mil < 0.8 or today_close < ma20 or today_close < today_open * 0.99:
                     continue
 
@@ -284,11 +295,13 @@ def main():
                     score += 25
                     reasons.append("均線多頭")
 
-                if today_close > recent_high_20d:
+                # 第一根突破20日整理高點
+                if today_close >= recent_high_20d:
                     score += 20
                     reasons.append("突破20日高")
 
-                if vol_ma5 > 0 and (today_vol / vol_ma5) >= 1.2:
+                # 初升量增 (1.2x ~ 4.0x，排除失控爆量倒貨)
+                if vol_ma5 > 0 and 1.2 <= (today_vol / vol_ma5) <= 4.0:
                     score += 20
                     reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
 
@@ -299,9 +312,14 @@ def main():
 
                 rsi = float(calculate_rsi(close_s).iloc[-1])
                 _, _, hist = calculate_macd(close_s)
-                if 50 <= rsi <= 75 and hist.iloc[-1] > 0:
+                if 50 <= rsi <= 78 and hist.iloc[-1] > 0:
                     score += 20
                     reasons.append("MACD偏多")
+
+                # 剛起漲加分（5天漲幅在 3% ~ 15% 最佳起漲區）
+                if 3.0 <= gain_5d <= 15.0:
+                    score += 10
+                    reasons.append("剛起漲點")
 
                 entry_low = round(today_close * 0.99, 2)
                 entry_high = round(today_close * 1.003, 2)
@@ -359,7 +377,7 @@ def main():
             "inline": False
         })
     
-    # 2. 精選 Top 10（完美還原雙欄並排卡片）
+    # 2. 精選 Top 10（動態時段標題）
     fields.append({
         "name": f"───────── 🎯 {session_name}精選 Top 10 ─────────",
         "value": "\u200b",
