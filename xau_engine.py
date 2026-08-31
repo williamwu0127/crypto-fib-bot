@@ -1,7 +1,7 @@
 """
-XAU/USD SNR Multi-Logic Dedicated Quant Engine
+XAU/USD SNR Dedicated Quant Engine - Optimization #1 (Pinbar Rejection)
 - Logic A: 4H Donchian Breakout (Exact 409.92% Original Match) | 2.0R BE -> 5.0R TP
-- Logic B: 4H SNR Flip Retest   | 1.5R BE -> 3.5R TP
+- Logic B: 4H SNR Rejection Retest (Pinbar Filter)            | 2.0R BE -> 4.0R TP
 Capital: $100 Isolated per Logic | 5% Risk per Trade | 10x Max Leverage
 """
 
@@ -37,11 +37,9 @@ def send_discord(text):
         except Exception:
             pass
 
-# ==================== 2. 原版黃金數據與指標計算 ====================
+# ==================== 2. 數據獲取與指標計算 ====================
 def get_gold_dataframe(days=365):
     ticker = yf.Ticker("GC=F")
-    
-    # 抓取 1H 並合成標準 4H K 線
     df_1h = ticker.history(period="2y", interval="1h").reset_index()
     if df_1h.empty:
         return None
@@ -49,12 +47,12 @@ def get_gold_dataframe(days=365):
     df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
     df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
     df_1h = df_1h.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
-    
+
     df_4h = df_1h.set_index('time').resample('4h').agg({
         'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
     }).dropna().reset_index()
 
-    # 抓取日線 MA60
+    # 日線 MA60
     df_1d = ticker.history(period="2y", interval="1d").reset_index()
     date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
     df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
@@ -67,7 +65,7 @@ def get_gold_dataframe(days=365):
     d_map = df_1d.drop_duplicates('d_date').set_index('d_date')['macro_trend'].to_dict()
     df_4h['macro_filter'] = df_4h['d_date'].map(d_map).ffill().fillna(0)
 
-    # 4H 唐奇安(20) & ATR(14)
+    # 唐奇安(20) & ATR(14)
     df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
     df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
     tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
@@ -75,7 +73,7 @@ def get_gold_dataframe(days=365):
 
     return df_4h
 
-# ==================== 3. 獨立回測撮合器 ====================
+# ==================== 3. 獨立撮合邏輯 ====================
 def run_exact_logic_a(df):
     wallet = float(INITIAL_WALLET)
     pos = None
@@ -152,7 +150,7 @@ def run_exact_logic_a(df):
     roi_pct = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
     return wallet, roi_pct, total_trades, win_rate
 
-def run_exact_logic_b(df):
+def run_pinbar_snr_logic_b(df):
     wallet = float(INITIAL_WALLET)
     pos = None
     trades = []
@@ -201,7 +199,7 @@ def run_exact_logic_b(df):
                     pos = None
                     continue
 
-        # 更新支撐阻力位
+        # 更新支撐阻力參考位
         if prev_bar['c'] > prev_bar['dc_high']:
             recent_sr_high = prev_bar['dc_high']
         if prev_bar['c'] < prev_bar['dc_low']:
@@ -212,26 +210,34 @@ def run_exact_logic_b(df):
             atr_val = bar['atr']
             sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
 
+            body = abs(bar['c'] - bar['o'])
+            lower_shadow = min(bar['c'], bar['o']) - bar['l']
+            upper_shadow = bar['h'] - max(bar['c'], bar['o'])
+
+            # 多頭：回踩支撐位 + 拒絕下影線 (Pinbar)
             if trend == 1 and recent_sr_high is not None:
-                retest_top = recent_sr_high + (atr_val * 0.5)
-                if (bar['l'] <= retest_top) and (bar['c'] > recent_sr_high) and (bar['c'] > bar['o']):
+                retest_top = recent_sr_high + (atr_val * 0.6)
+                is_bull_pinbar = (lower_shadow >= 1.2 * body) and (bar['c'] >= (bar['h'] + bar['l']) / 2)
+                if (bar['l'] <= retest_top) and (bar['c'] > recent_sr_high) and is_bull_pinbar:
                     sig, entry = 'LONG', bar['c']
-                    sl = bar['l'] - (atr_val * 0.8)
+                    sl = bar['l'] - (atr_val * 1.0)
                     risk_dist = entry - sl
                     if risk_dist > (atr_val * 0.4):
-                        be_tgt = entry + (risk_dist * 1.5)
-                        tp = entry + (risk_dist * 3.5)
+                        be_tgt = entry + (risk_dist * 2.0)
+                        tp = entry + (risk_dist * 4.0)
                         recent_sr_high = None
 
+            # 空頭：回抽阻力位 + 拒絕上影線 (Pinbar)
             elif trend == -1 and recent_sr_low is not None:
-                retest_bot = recent_sr_low - (atr_val * 0.5)
-                if (bar['h'] >= retest_bot) and (bar['c'] < recent_sr_low) and (bar['c'] < bar['o']):
+                retest_bot = recent_sr_low - (atr_val * 0.6)
+                is_bear_pinbar = (upper_shadow >= 1.2 * body) and (bar['c'] <= (bar['h'] + bar['l']) / 2)
+                if (bar['h'] >= retest_bot) and (bar['c'] < recent_sr_low) and is_bear_pinbar:
                     sig, entry = 'SHORT', bar['c']
-                    sl = bar['h'] + (atr_val * 0.8)
+                    sl = bar['h'] + (atr_val * 1.0)
                     risk_dist = sl - entry
                     if risk_dist > (atr_val * 0.4):
-                        be_tgt = entry - (risk_dist * 1.5)
-                        tp = entry - (risk_dist * 3.5)
+                        be_tgt = entry - (risk_dist * 2.0)
+                        tp = entry - (risk_dist * 4.0)
                         recent_sr_low = None
 
             if sig and risk_dist > 0:
@@ -256,7 +262,6 @@ def run_snr_backtest(days=365):
     if df_4h is None:
         return
 
-    # 精確錨定回測時間
     now_ms = int(time.time() * 1000)
     start_filter_time = pd.to_datetime(now_ms - (days * 86400000), unit='ms')
     df = df_4h[df_4h['time'] >= start_filter_time].reset_index(drop=True)
@@ -267,18 +272,18 @@ def run_snr_backtest(days=365):
     end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
 
     w_a, roi_a, t_a, wr_a = run_exact_logic_a(df.copy())
-    w_b, roi_b, t_b, wr_b = run_exact_logic_b(df.copy())
+    w_b, roi_b, t_b, wr_b = run_pinbar_snr_logic_b(df.copy())
 
     report_text = (
         "```text\n"
-        "【XAU/USD 現貨黃金 - SNR 雙邏輯獨立測試報表】\n"
+        "【XAU/USD 現貨黃金 - SNR 優化版 (Pinbar 形態過濾)】\n"
         "回測週期: " + period_title + " (" + str(start_date) + " ~ " + str(end_date) + ")\n"
         "初始本金: $" + format_full_num(INITIAL_WALLET) + " USD (每套邏輯獨立 $100)\n"
         "----------------------------------------------------\n"
         "【邏輯 A：4H 順勢結構突破 (2.0R保本 / 5.0R止盈)】\n"
         "• 結餘: $" + format_full_num(w_a, 2) + " USD (" + f"{roi_a:+.2f}" + "%)\n"
         "• 交易: " + str(t_a).rjust(2) + " 次 | 勝率: " + f"{wr_a:5.2f}" + "%\n\n"
-        "【邏輯 B：4H SNR 互換回踩 (1.5R保本 / 3.5R止盈)】\n"
+        "【邏輯 B：4H SNR 拒絕針回踩 (2.0R保本 / 4.0R止盈)】\n"
         "• 結餘: $" + format_full_num(w_b, 2) + " USD (" + f"{roi_b:+.2f}" + "%)\n"
         "• 交易: " + str(t_b).rjust(2) + " 次 | 勝率: " + f"{wr_b:5.2f}" + "%\n"
         "```"
