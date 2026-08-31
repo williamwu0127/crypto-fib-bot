@@ -1,9 +1,10 @@
 import os
+import re
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
@@ -17,10 +18,33 @@ def send_msg(payload):
     except Exception as e:
         print(f"發送失敗: {e}")
 
+def get_session_info():
+    """判斷觸發來源與當前台股交易時段 (UTC+8)"""
+    tz_tw = timezone(timedelta(hours=8))
+    now_tw = datetime.now(tz_tw)
+    
+    # GitHub Actions 排程與事件判斷
+    event_name = os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    trigger_type = "排程推播" if event_name == "schedule" else "手動觸發"
+
+    hour = now_tw.hour
+    minute = now_tw.minute
+    time_val = hour * 100 + minute
+
+    if time_val < 900:
+        session = "盤前掃描"
+    elif 900 <= time_val <= 1330:
+        session = "盤中分析"
+    else:
+        session = "盤後總結"
+
+    date_str = now_tw.strftime("%Y-%m-%d %H:%M")
+    return f"{session} ｜ {trigger_type}", date_str
+
 def refine_industry(name, original_industry):
-    """智慧細分產業：若原產業為其他或未分類，透過名稱關鍵字進行精準歸類"""
+    """智慧細分產業"""
     orig_str = str(original_industry).strip() if original_industry else ""
-    if orig_str and orig_str != "其他" and orig_str != "nan" and orig_str != "其他業":
+    if orig_str and orig_str not in ["其他", "nan", "其他業"]:
         return orig_str
         
     name_str = str(name)
@@ -42,7 +66,7 @@ def refine_industry(name, original_industry):
     return "一般產業"
 
 def get_dynamic_all_stocks():
-    """動態向台灣證交所官方 ISIN 系統抓取全部現存上市與上櫃普通股及所屬產業（具備多重防護）"""
+    """動態向證交所抓取台股全市場清單（雙重防護）"""
     stock_dict = {}
     urls = [
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "TW"),
@@ -51,7 +75,6 @@ def get_dynamic_all_stocks():
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     for url, market in urls:
-        print(f"正在獲取 {market} 市場股票名冊...")
         success = False
         for parser in ["lxml", "html5lib"]:
             try:
@@ -84,44 +107,85 @@ def get_dynamic_all_stocks():
                                     ind_str = refine_industry(name, original_ind)
                                     stock_dict[ticker] = (sid, name, ind_str)
                 success = True
-                print(f"透過 parser ({parser}) 成功解析 {market}，共 {len([k for k in stock_dict if k.endswith(market)] )} 檔")
                 break
-            except Exception as e:
+            except Exception:
                 continue
                 
         if not success:
-            print(f"警告: 透過 pandas 解析 {market} 失敗，改用備用正規表達式提取...")
             try:
                 resp = requests.get(url, headers=headers, timeout=15)
                 resp.encoding = "big5-hkscs"
-                import re
                 matches = re.findall(r'>(\d{4})&#12288;([^<]+)</td>', resp.text)
                 for sid, name in matches:
                     ticker = f"{sid}.{market}"
                     stock_dict[ticker] = (sid, name.strip(), "一般產業")
-                print(f"備用正則提取 {market} 成功，共 {len([k for k in stock_dict if k.endswith(market)] )} 檔")
-            except Exception as e2:
-                print(f"動態獲取 {market} 股票名冊完全失敗: {e2}")
+            except Exception as e:
+                print(f"獲取 {market} 清單失敗: {e}")
                 
     return stock_dict
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+def analyze_pattern_stages(df):
+    """型態學判讀：找尋左腳、最低點（頭部）、右腳、頸線與交易策略"""
+    try:
+        close_s = df['Close']
+        high_s = df['High']
+        low_s = df['Low']
+        
+        c_price = float(close_s.iloc[-1])
+        ma20 = float(close_s.rolling(20).mean().iloc[-1])
+        
+        # 尋找過去 40 天內的結構特徵
+        low_40d = low_s.iloc[-40:]
+        head_idx = low_40d.idxmin()
+        head_pos = low_40d.index.get_loc(head_idx)
+        head_price = float(low_40d.min())
+        
+        # 需預留足夠空間形成左右腳
+        if head_pos < 5 or head_pos > len(low_40d) - 4:
+            return None
+            
+        left_foot = float(low_40d.iloc[:head_pos].min())
+        right_foot = float(low_40d.iloc[head_pos+1:].min())
+        neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
+        
+        neck_low = round(neck_high * 0.985, 2)
+        neck_zone = f"{neck_low:.2f}～{neck_high:.2f}"
+        stop_loss = round(head_price * 0.97, 2)
+        
+        # 判斷型態完成度與階段
+        if c_price >= neck_high:
+            stage = "🟢 突破頸線"
+            strategy = f"右側突破 {neck_high:.2f} 站穩加碼，回測 {neck_low:.2f} 不破承接"
+            score = 95
+        elif c_price >= neck_low and c_price < neck_high:
+            stage = "🟡 突破後回測"
+            strategy = f"等待回測 {neck_low:.2f} 支撐不破進場，跌破則放棄"
+            score = 88
+        elif right_foot >= head_price and c_price > ma20:
+            stage = "🟢 左右腳完成 (W底)"
+            left_entry = round(right_foot * 1.01, 2)
+            strategy = f"左側 {left_entry:.2f} 附近試單，右側突破 {neck_high:.2f} 順勢加碼"
+            score = 82
+        elif right_foot >= head_price:
+            stage = "🟡 右腳形成中"
+            left_entry = round(right_foot * 1.01, 2)
+            strategy = f"左側 {left_entry:.2f} 附近分批低接，右側等突破 {neck_high:.2f} 確認"
+            score = 75
+        else:
+            return None
 
-def calculate_macd(series, fast=12, slow=26, signal=9):
-    exp1 = series.ewm(span=fast, adjust=False).mean()
-    exp2 = series.ewm(span=slow, adjust=False).mean()
-    dif = exp1 - exp2
-    dea = dif.ewm(span=signal, adjust=False).mean()
-    hist = (dif - dea) * 2
-    return dif, dea, hist
+        return {
+            "stage": stage,
+            "neck_zone": neck_zone,
+            "stop_loss": f"{stop_loss:.2f}",
+            "strategy": strategy,
+            "score": score
+        }
+    except Exception:
+        return None
 
 def get_market_analysis():
-    """獲取加權指數大盤資訊"""
+    """獲取加權指數大盤解析"""
     try:
         twii = yf.Ticker("^TWII")
         df = twii.history(period="1mo", interval="1d")
@@ -133,45 +197,37 @@ def get_market_analysis():
         change_pts = c_close - p_close
         change_pct = (change_pts / p_close) * 100
         
-        c_vol_bn = float(df['Volume'].iloc[-1]) / 100_000_000 if float(df['Volume'].iloc[-1]) > 0 else 0
-        
         ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
         ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
         
         trend = "🟢 多頭控盤" if c_close > ma20 and ma5 > ma20 else "🔴 空頭弱勢" if c_close < ma20 else "🟡 震盪整理"
-        emoji = "📈" if change_pts > 0 else "📉"
         
         return {
-            "close": round(c_close, 2),
-            "change_pts": round(change_pts, 2),
-            "change_pct": round(change_pct, 2),
-            "vol_bn": round(c_vol_bn, 2) if c_vol_bn > 0 else "無資料",
-            "ma20": round(ma20, 2),
-            "trend": trend,
-            "emoji": emoji
+            "close": f"{c_close:,.2f}",
+            "change_pts": f"{change_pts:+,.2f}",
+            "change_pct": f"{change_pct:+.2f}%",
+            "ma20": f"{ma20:,.2f}",
+            "trend": trend
         }
     except Exception as e:
         print(f"大盤資料獲取失敗: {e}")
         return None
 
 def main():
-    print("【步驟 1】獲取大盤行情...")
+    session_title, date_time_str = get_session_info()
+    print(f"啟動台股掃描：{session_title} ({date_time_str})")
+    
     market_data = get_market_analysis()
-
-    print("【步驟 2】即時動態向證交所抓取台股全市場名單與智慧產業別...")
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
-    print(f"總共獲取到 {len(all_tickers)} 檔有效台股標的。")
     
     if not all_tickers:
         print("未獲取到股票清單，結束執行。")
         return
 
-    print("【步驟 3】批次下載全市場歷史量價進行快篩...")
     chunk_size = 200
     scored_results = []
     monster_stocks = []
-    latest_trade_date = datetime.now().strftime("%Y-%m-%d")
 
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
@@ -183,229 +239,117 @@ def main():
                     continue
                 
                 df = df_batch[ticker].dropna()
-                if len(df) < 60:
+                if len(df) < 45:
                     continue
 
-                latest_trade_date = df.index[-1].strftime("%Y-%m-%d")
                 sid, name, industry = stock_dict[ticker]
+                c_price = float(df['Close'].iloc[-1])
+                c_vol = float(df['Volume'].iloc[-1])
+                vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1])
+                est_money_mil = (c_price * c_vol) / 100_000_000
+                
+                # 基礎流動性過濾 (成交值 >= 8000 萬)
+                if est_money_mil < 0.8:
+                    continue
 
-                close_s = df['Close']
-                high_s = df['High']
-                low_s = df['Low']
-                open_s = df['Open']
-                vol_s = df['Volume']
-
-                today_close = float(close_s.iloc[-1])
-                today_high = float(high_s.iloc[-1])
-                today_low = float(low_s.iloc[-1])
-                today_open = float(open_s.iloc[-1])
-                today_vol = float(vol_s.iloc[-1])
-
-                ma5 = float(close_s.rolling(5).mean().iloc[-1])
-                ma10 = float(close_s.rolling(10).mean().iloc[-1])
-                ma20_s = close_s.rolling(20).mean()
-                ma20 = float(ma20_s.iloc[-1])
-                ma20_slope = ma20 - float(ma20_s.iloc[-2])
-                vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
-
-                est_money_mil = (today_close * today_vol) / 100_000_000
-
-                # ----------------- 妖股獵人判斷 (嚴格條件) -----------------
-                recent_high_20d = float(high_s.iloc[-21:-1].max())
-                recent_low_20d = float(low_s.iloc[-21:-1].min())
+                # 妖股判斷（嚴格爆量緊縮突破）
+                recent_high_20d = float(df['High'].iloc[-21:-1].max())
+                recent_low_20d = float(df['Low'].iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
                 
-                is_accumulating_box = box_range_pct <= 0.25
-                is_pre_monster_vol = vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5
-                is_breakout_edge = today_close >= recent_high_20d * 0.98
-                
-                if est_money_mil >= 0.8 and is_accumulating_box and is_pre_monster_vol and is_breakout_edge:
-                    m_entry_low = round(today_close * 0.99, 2)
-                    m_entry_high = round(today_close * 1.003, 2)
-                    m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
-                    
-                    box_height = recent_high_20d - recent_low_20d
-                    m_tp = round(max(today_close + box_height * 3.0, today_close * 1.22), 2)
-
-                    m_tp_pct = round(((m_tp - today_close) / today_close) * 100, 2)
-                    m_sl_pct = round(((m_sl - today_close) / today_close) * 100, 2)
-
+                if box_range_pct <= 0.25 and vol_ma5 > 0 and (c_vol / vol_ma5) >= 2.5 and c_price >= recent_high_20d * 0.98:
                     monster_stocks.append({
                         "sid": sid,
                         "name": name,
                         "industry": industry,
-                        "close": f"{today_close:.2f}",
-                        "vol_ratio": round(today_vol / vol_ma5, 1),
-                        "entry": f"{m_entry_low} ~ {m_entry_high}",
-                        "tp": f"{m_tp} (+{m_tp_pct}%)",
-                        "sl": f"{m_sl} ({m_sl_pct}%)"
+                        "close": f"{c_price:,.2f}",
+                        "vol_ratio": round(c_vol / vol_ma5, 1)
                     })
 
-                # ----------------- 常規強勢股判斷 -----------------
-                if est_money_mil < 0.8 or today_close < ma20 or today_close < today_open * 0.99:
-                    continue
-
-                score = 0
-                reasons = []
-
-                if today_close > ma5 > ma10 > ma20 and ma20_slope > 0:
-                    score += 25
-                    reasons.append("均線多頭")
-
-                high_20d = float(high_s.iloc[-21:-1].max())
-                if today_close > high_20d:
-                    score += 20
-                    reasons.append("突破20日高")
-
-                if vol_ma5 > 0 and (today_vol / vol_ma5) >= 1.2:
-                    score += 20
-                    reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
-
-                k_range = today_high - today_low
-                if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
-                    score += 15
-                    reasons.append("紅K實體強")
-
-                rsi = float(calculate_rsi(close_s).iloc[-1])
-                _, _, hist = calculate_macd(close_s)
-                if 50 <= rsi <= 75 and hist.iloc[-1] > 0:
-                    score += 20
-                    reasons.append("MACD偏多")
-
-                if k_range > 0 and (today_high - today_close) / k_range > 0.4:
-                    score -= 15
-
-                entry_low = round(today_close * 0.99, 2)
-                entry_high = round(today_close * 1.003, 2)
-
-                support_low = min(float(low_s.iloc[-5:].min()), ma10)
-                sl_price = round(max(support_low * 0.99, entry_low * 0.925), 2)
-                if sl_price > entry_low * 0.94:
-                    sl_price = round(entry_low * 0.935, 2)
-
-                if recent_high_20d > today_close * 1.04:
-                    tp_price = round(recent_high_20d, 2)
-                else:
-                    swing_range = today_close - float(low_s.iloc[-15:].min())
-                    tp_price = round(today_close + max(swing_range, (entry_high - sl_price) * 1.8), 2)
-
-                tp_pct = round(((tp_price - today_close) / today_close) * 100, 2)
-                sl_pct = round(((sl_price - today_close) / today_close) * 100, 2)
-
-                scored_results.append({
-                    "sid": sid,
-                    "name": name,
-                    "industry": industry,
-                    "close": f"{today_close:.2f}",
-                    "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
-                    "tp": f"{tp_price} (+{tp_pct}%)",
-                    "sl": f"{sl_price} ({sl_pct}%)",
-                    "score": score,
-                    "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
-                })
-
-        except Exception as e:
-            print(f"處理批次出錯: {e}")
+                # 型態學結構分析
+                p_res = analyze_pattern_stages(df)
+                if p_res:
+                    scored_results.append({
+                        "sid": sid,
+                        "name": name,
+                        "industry": industry,
+                        "close": f"{c_price:,.2f}",
+                        **p_res
+                    })
+        except Exception:
             continue
 
-    print("【步驟 4】執行產業分散與過濾...")
+    # 產業分散篩選前 10 檔
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
-    
     industry_count = {}
     top_picks = []
     
     for item in sorted_all:
         ind = item["industry"]
-        if ind not in industry_count:
-            industry_count[ind] = 0
-            
-        if industry_count[ind] < 2:
-            industry_count[ind] += 1
+        if industry_count.get(ind, 0) < 2:
+            industry_count[ind] = industry_count.get(ind, 0) + 1
             top_picks.append(item)
             
         if len(top_picks) >= 10:
             break
 
+    # 構建精簡 Discord Embed
     fields = []
     
+    # 1. 大盤解析
     if market_data:
-        sign = "+" if market_data['change_pts'] > 0 else ""
         fields.append({
-            "name": f"📊 加權指數大盤解析 ({market_data['trend']})",
+            "name": "📊 加權指數大盤解析",
             "value": (
-                f"> **收盤點位**: `{market_data['close']}`\n"
-                f"> **單日漲跌**: `{sign}{market_data['change_pts']}` ({sign}{market_data['change_pct']}%) {market_data['emoji']}\n"
+                f"> **指數與狀態**: `{market_data['close']}` ({market_data['change_pct']}) ｜ {market_data['trend']}\n"
                 f"> **防守月線**: `{market_data['ma20']}`"
             ),
             "inline": False
         })
-    
-    fields.append({
-        "name": "───────── 🎯 盤後精選 Top 10 ─────────",
-        "value": "\u200b",
-        "inline": False
-    })
-    
-    for i, item in enumerate(top_picks):
-        fields.append({
-            "name": f"📌 {item['sid']} {item['name']}  現價 : {item['close']}",
-            "value": (
-                f"> **產業**: `{item['industry']}`\n"
-                f"> **進場**: `{item['entry']}`\n"
-                f"> **止盈 (TP)**: `{item['tp']}`\n"
-                f"> **止損 (SL)**: `{item['sl']}`\n"
-                f"> **特徵**: `{item['tags']}`"
-            ),
-            "inline": True  # 恢復左右並排網格
-        })
-        if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
-            fields.append({
-                "name": "\u200b",
-                "value": "\u200b",
-                "inline": False
-            })
 
-    # ----------------- 妖股獵人區塊（帶有未找到時的提示） -----------------
+    # 2. 精選 Top 10
     fields.append({
-        "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
+        "name": "🎯 精選 Top 10（型態與左右側策略）",
         "value": "\u200b",
         "inline": False
     })
     
-    if monster_stocks:
-        top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
-        for m in top_monsters:
-            fields.append({
-                "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
-                "value": (
-                    f"> **產業**: `{m['industry']}` | 爆量 `{m['vol_ratio']}x`\n"
-                    f"> **進場**: `{m['entry']}`\n"
-                    f"> **止盈 (TP)**: `{m['tp']}`\n"
-                    f"> **止損 (SL)**: `{m['sl']}`"
-                ),
-                "inline": True
-            })
-    else:
+    for item in top_picks:
         fields.append({
-            "name": "⚡ 狀態提示",
-            "value": "> 今日全市場暫無符合「箱體緊縮 + 2.5倍爆量突破」之極端潛伏標的，持續沉澱觀察中。",
+            "name": f"📌 {item['sid']} {item['name']} ｜ {item['industry']} ｜ 現價：{item['close']}",
+            "value": (
+                f"> **型態階段**：{item['stage']}\n"
+                f"> **頸線與防守**：頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
+                f"> **交易策略**：{item['strategy']}"
+            ),
             "inline": False
         })
 
-    hour_utc = datetime.utcnow().hour
-    session_title = "盤前掃描" if hour_utc < 5 else "盤後分析"
+    # 3. 妖股獵人區塊（精簡提示）
+    if monster_stocks:
+        m_lines = "\n".join([f"> 🔥 **{m['sid']} {m['name']}** ｜ 現價 `{m['close']}` ｜ 爆量 `{m['vol_ratio']}x`" for m in monster_stocks[:3]])
+        fields.append({
+            "name": "🚨 妖股獵人 (飆股狂飆預警)",
+            "value": m_lines,
+            "inline": False
+        })
+    else:
+        fields.append({
+            "name": "🚨 妖股獵人 (飆股狂飆預警)",
+            "value": "> **狀態**：暫無符合",
+            "inline": False
+        })
 
     payload = {
-        "username": "台股全市場量化選股",
+        "username": "台股型態量化監控",
         "embeds": [{
-            "title": f"📈 台股全方位{session_title}報告 ({latest_trade_date})",
-            "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
+            "title": f"📈 台股型態量化監控報告（{session_title}）",
+            "description": f"**資料時間**：`{date_time_str}`",
             "color": 3447003,
             "fields": fields
         }]
     }
 
-    print("發送 Discord 訊息...")
     send_msg(payload)
 
 if __name__ == "__main__":
