@@ -1,8 +1,10 @@
 """
-XAU/USD Macro Swing (4H) + High-Frequency Scalping (15m) Engine
-- Macro 4H Track: 1D MA60 + 4H Breakout | 5% Risk | 10x Lev | 2.0R BE -> 5.0R TP
-- Scalp 15m Track: 1D Trend + 15m EMA9/21 Momentum | 3% Risk | 20x Lev | 1.0R BE -> 2.5R TP
-Wallet: Shared Compounding Pool ($100 Starting Capital)
+XAU/USD Dual-Track Multi-Pool Comparison Engine
+- Macro 4H Track: 10% Risk | 10x Leverage | 2.0R BE -> 5.0R TP (Dominant)
+- Micro 1H Track:  4% Risk |  8x Leverage | 2.0R BE -> 4.0R TP (SNR Pinbar Retest)
+Comparison Modes:
+1. 'ISOLATED': $100 per track (Total $200) - Risk Isolated
+2. 'COMBINED': $100 Shared Dynamic Compounding Pool
 """
 
 import os
@@ -13,14 +15,13 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-# ==================== 1. Webhook 與交易風控配置 ====================
 DISCORD_WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
-INITIAL_WALLET = 100.0
-FEE_RATE = 0.0004  # 萬分之四
+INITIAL_PER_TRACK = 100.0
+FEE_RATE = 0.0004
 
 def format_full_num(val, max_dec=4):
     try:
@@ -36,99 +37,101 @@ def send_discord(text):
         except Exception:
             pass
 
-# ==================== 2. 數據獲取與多週期指標 ====================
-def fetch_scalp_data(days=60):
+def fetch_gold_data(days=365):
     try:
-        # yfinance 15m 支援長度通常在 60 天以內
-        period_str = f"{days + 10}d" if days <= 55 else "60d"
+        period_str = f"{days + 90}d" if days <= 600 else "2y"
         ticker = yf.Ticker("GC=F")
 
-        # 1. 抓取 15m K 線
-        df_15m = ticker.history(period=period_str, interval="15m").reset_index()
-        if df_15m.empty:
+        df_1h = ticker.history(period=period_str, interval="1h").reset_index()
+        if df_1h.empty:
             return None, None
 
-        date_col = 'Datetime' if 'Datetime' in df_15m.columns else 'Date'
-        df_15m['time'] = pd.to_datetime(df_15m[date_col]).dt.tz_localize(None)
-        df_15m.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-        df_15m = df_15m.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
+        date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
+        df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
+        df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
+        df_1h = df_1h.dropna(subset=['c']).sort_values('time').reset_index(drop=True)
 
-        # 2. 合成 4H K 線
-        df_4h = df_15m.set_index('time').resample('4h').agg({
+        df_4h = df_1h.set_index('time').resample('4h').agg({
             'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
         }).dropna().reset_index()
 
-        # 3. 日線 MA60
-        df_1d = ticker.history(period="1y", interval="1d").reset_index()
+        df_1d = ticker.history(period=period_str, interval="1d").reset_index()
         date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
         df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
         df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c'}, inplace=True)
         df_1d['ma60'] = df_1d['c'].rolling(60).mean()
         df_1d['macro_trend'] = np.where(df_1d['c'] > df_1d['ma60'], 1, -1)
 
-        # 4. 對齊大趨勢
         df_4h['d_date'] = df_4h['time'].dt.floor('D')
-        df_15m['d_date'] = df_15m['time'].dt.floor('D')
+        df_1h['d_date'] = df_1h['time'].dt.floor('D')
         df_1d['d_date'] = df_1d['time'].dt.floor('D')
         d_map = df_1d.drop_duplicates('d_date').set_index('d_date')['macro_trend'].to_dict()
         df_4h['macro_filter'] = df_4h['d_date'].map(d_map).ffill().fillna(0)
-        df_15m['macro_filter'] = df_15m['d_date'].map(d_map).ffill().fillna(0)
+        df_1h['macro_filter'] = df_1h['d_date'].map(d_map).ffill().fillna(0)
 
-        # 5. 4H 指標 (長線突破)
+        # 4H 指標
         df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
         df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
         tr_4h = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
         df_4h['atr'] = tr_4h.rolling(14).mean().fillna(df_4h['c'] * 0.015)
 
-        # 6. 15m 高頻指標 (EMA9/21 + 5棒極值 + ATR)
-        df_15m['ema9'] = df_15m['c'].ewm(span=9, adjust=False).mean()
-        df_15m['ema21'] = df_15m['c'].ewm(span=21, adjust=False).mean()
-        df_15m['local_high'] = df_15m['h'].shift(1).rolling(5).max()
-        df_15m['local_low'] = df_15m['l'].shift(1).rolling(5).min()
-        tr_15m = np.maximum(df_15m['h'] - df_15m['l'], np.maximum(abs(df_15m['h'] - df_15m['c'].shift(1)), abs(df_15m['l'] - df_15m['c'].shift(1))))
-        df_15m['atr'] = tr_15m.rolling(14).mean().fillna(df_15m['c'] * 0.005)
+        # 1H 指標
+        df_1h['dc_high'] = df_1h['h'].shift(1).rolling(20).max()
+        df_1h['dc_low'] = df_1h['l'].shift(1).rolling(20).min()
+        tr_1h = np.maximum(df_1h['h'] - df_1h['l'], np.maximum(abs(df_1h['h'] - df_1h['c'].shift(1)), abs(df_1h['l'] - df_1h['c'].shift(1))))
+        df_1h['atr'] = tr_1h.rolling(14).mean().fillna(df_1h['c'] * 0.01)
 
-        return df_4h, df_15m
+        return df_4h, df_1h
     except Exception as e:
         print(f"[!] 數據抓取失敗: {e}")
         return None, None
 
-# ==================== 3. 雙軌撮合引擎 ====================
-def run_high_frequency_engine(days=30):
-    period_title = f"{days} 天期"
-    df_4h, df_15m = fetch_scalp_data(days=days)
-    if df_4h is None or df_15m is None:
+def run_backtest_pool(days=365, mode='COMBINED'):
+    period_title = "1 年期" if days >= 365 else f"{days} 天期"
+    df_4h, df_1h = fetch_gold_data(days=days)
+    if df_4h is None or df_1h is None:
         return
 
     now_ms = int(time.time() * 1000)
     start_filter_time = pd.to_datetime(now_ms - (days * 86400000), unit='ms')
 
     df_4h = df_4h[df_4h['time'] >= start_filter_time].reset_index(drop=True)
-    df_15m = df_15m[df_15m['time'] >= start_filter_time].reset_index(drop=True)
-    if df_4h.empty or df_15m.empty:
+    df_1h = df_1h[df_1h['time'] >= start_filter_time].reset_index(drop=True)
+    if df_4h.empty or df_1h.empty:
         return
 
-    start_date = df_15m.iloc[0]['time'].strftime("%Y-%m-%d")
-    end_date = df_15m.iloc[-1]['time'].strftime("%Y-%m-%d")
+    start_date = df_1h.iloc[0]['time'].strftime("%Y-%m-%d")
+    end_date = df_1h.iloc[-1]['time'].strftime("%Y-%m-%d")
 
     events = []
     for idx in range(1, len(df_4h)):
         events.append((df_4h.iloc[idx]['time'], 'TRACK_4H', idx))
-    for idx in range(1, len(df_15m)):
-        events.append((df_15m.iloc[idx]['time'], 'TRACK_15M', idx))
+    for idx in range(1, len(df_1h)):
+        events.append((df_1h.iloc[idx]['time'], 'TRACK_1H', idx))
     events.sort(key=lambda x: x[0])
 
-    wallet = float(INITIAL_WALLET)
+    if mode == 'COMBINED':
+        total_wallet = float(INITIAL_PER_TRACK)
+        wallets = {}
+    else:
+        total_wallet = 0.0
+        wallets = {'TRACK_4H': float(INITIAL_PER_TRACK), 'TRACK_1H': float(INITIAL_PER_TRACK)}
+
     pos_4h = None
-    pos_15m = None
+    pos_1h = None
+    recent_1h_high = None
+    recent_1h_low = None
 
     stats = {
         'TRACK_4H': {'trades': 0, 'wins': 0, 'pnl': 0.0},
-        'TRACK_15M': {'trades': 0, 'wins': 0, 'pnl': 0.0}
+        'TRACK_1H': {'trades': 0, 'wins': 0, 'pnl': 0.0}
     }
 
     for event_time, track_type, idx in events:
-        # ----------------- 長線 4H 波段 -----------------
+        cur_w_4h = total_wallet if mode == 'COMBINED' else wallets['TRACK_4H']
+        cur_w_1h = total_wallet if mode == 'COMBINED' else wallets['TRACK_1H']
+
+        # ---------------- 4H 長線模組 (10% 風險 / 10x 槓桿) ----------------
         if track_type == 'TRACK_4H':
             bar = df_4h.iloc[idx]
             if pos_4h is not None:
@@ -142,14 +145,16 @@ def run_high_frequency_engine(days=30):
                         pos_4h['is_be_moved'] = True
                     if bar['l'] <= pos_4h['sl']:
                         pnl = qty * (pos_4h['sl'] - entry) - qty * (entry + pos_4h['sl']) * FEE_RATE
-                        wallet += pnl
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_4H'] += pnl
                         stats['TRACK_4H']['trades'] += 1
                         stats['TRACK_4H']['pnl'] += pnl
                         if pnl > 0: stats['TRACK_4H']['wins'] += 1
                         pos_4h = None
                     elif bar['h'] >= tp:
                         pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
-                        wallet += pnl
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_4H'] += pnl
                         stats['TRACK_4H']['trades'] += 1
                         stats['TRACK_4H']['wins'] += 1
                         stats['TRACK_4H']['pnl'] += pnl
@@ -160,23 +165,27 @@ def run_high_frequency_engine(days=30):
                         pos_4h['is_be_moved'] = True
                     if bar['h'] >= pos_4h['sl']:
                         pnl = qty * (entry - pos_4h['sl']) - qty * (entry + pos_4h['sl']) * FEE_RATE
-                        wallet += pnl
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_4H'] += pnl
                         stats['TRACK_4H']['trades'] += 1
                         stats['TRACK_4H']['pnl'] += pnl
                         if pnl > 0: stats['TRACK_4H']['wins'] += 1
                         pos_4h = None
                     elif bar['l'] <= tp:
                         pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
-                        wallet += pnl
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_4H'] += pnl
                         stats['TRACK_4H']['trades'] += 1
                         stats['TRACK_4H']['wins'] += 1
                         stats['TRACK_4H']['pnl'] += pnl
                         pos_4h = None
 
-            if pos_4h is None and wallet > 5.0:
+            cur_w_4h = total_wallet if mode == 'COMBINED' else wallets['TRACK_4H']
+            if pos_4h is None and cur_w_4h > 5.0:
                 trend = bar['macro_filter']
                 atr_val = bar['atr']
                 sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
+
                 if trend == 1 and bar['c'] > bar['dc_high']:
                     sig, entry = 'LONG', bar['c']
                     sl = entry - (atr_val * 1.5)
@@ -191,108 +200,135 @@ def run_high_frequency_engine(days=30):
                     tp = entry - (risk_dist * 5.0)
 
                 if sig and risk_dist > 0:
-                    qty = (wallet * 0.05) / risk_dist
-                    if (qty * entry) > (wallet * 10.0):
-                        qty = (wallet * 10.0) / entry
+                    qty = (cur_w_4h * 0.10) / risk_dist # 長線提升至 10% 風險
+                    if (qty * entry) > (cur_w_4h * 10.0): # 10x 槓桿限制
+                        qty = (cur_w_4h * 10.0) / entry
                     pos_4h = {
                         'side': sig, 'entry': entry, 'sl': sl,
                         'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
                     }
 
-        # ----------------- 高頻 15m 狙擊 -----------------
-        elif track_type == 'TRACK_15M':
-            bar = df_15m.iloc[idx]
-            prev_bar = df_15m.iloc[idx - 1]
+        # ---------------- 1H 短線模組 (4% 風險 / 8x 槓桿) ----------------
+        elif track_type == 'TRACK_1H':
+            bar = df_1h.iloc[idx]
+            prev_bar = df_1h.iloc[idx - 1]
 
-            if pos_15m is not None:
+            if pos_1h is not None:
                 side, entry, sl, tp, be_tgt, qty, be_done = (
-                    pos_15m['side'], pos_15m['entry'], pos_15m['sl'], pos_15m['tp'],
-                    pos_15m['be_target'], pos_15m['qty'], pos_15m['is_be_moved']
+                    pos_1h['side'], pos_1h['entry'], pos_1h['sl'], pos_1h['tp'],
+                    pos_1h['be_target'], pos_1h['qty'], pos_1h['is_be_moved']
                 )
-
                 if side == 'LONG':
                     if not be_done and bar['h'] >= be_tgt:
-                        pos_15m['sl'] = entry
-                        pos_15m['is_be_moved'] = True
-                    if bar['l'] <= pos_15m['sl']:
-                        pnl = qty * (pos_15m['sl'] - entry) - qty * (entry + pos_15m['sl']) * FEE_RATE
-                        wallet += pnl
-                        stats['TRACK_15M']['trades'] += 1
-                        stats['TRACK_15M']['pnl'] += pnl
-                        if pnl > 0: stats['TRACK_15M']['wins'] += 1
-                        pos_15m = None
+                        pos_1h['sl'] = entry
+                        pos_1h['is_be_moved'] = True
+                    if bar['l'] <= pos_1h['sl']:
+                        pnl = qty * (pos_1h['sl'] - entry) - qty * (entry + pos_1h['sl']) * FEE_RATE
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_1H'] += pnl
+                        stats['TRACK_1H']['trades'] += 1
+                        stats['TRACK_1H']['pnl'] += pnl
+                        if pnl > 0: stats['TRACK_1H']['wins'] += 1
+                        pos_1h = None
                     elif bar['h'] >= tp:
                         pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
-                        wallet += pnl
-                        stats['TRACK_15M']['trades'] += 1
-                        stats['TRACK_15M']['wins'] += 1
-                        stats['TRACK_15M']['pnl'] += pnl
-                        pos_15m = None
-
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_1H'] += pnl
+                        stats['TRACK_1H']['trades'] += 1
+                        stats['TRACK_1H']['wins'] += 1
+                        stats['TRACK_1H']['pnl'] += pnl
+                        pos_1h = None
                 elif side == 'SHORT':
                     if not be_done and bar['l'] <= be_tgt:
-                        pos_15m['sl'] = entry
-                        pos_15m['is_be_moved'] = True
-                    if bar['h'] >= pos_15m['sl']:
-                        pnl = qty * (entry - pos_15m['sl']) - qty * (entry + pos_15m['sl']) * FEE_RATE
-                        wallet += pnl
-                        stats['TRACK_15M']['trades'] += 1
-                        stats['TRACK_15M']['pnl'] += pnl
-                        if pnl > 0: stats['TRACK_15M']['wins'] += 1
-                        pos_15m = None
+                        pos_1h['sl'] = entry
+                        pos_1h['is_be_moved'] = True
+                    if bar['h'] >= pos_1h['sl']:
+                        pnl = qty * (entry - pos_1h['sl']) - qty * (entry + pos_1h['sl']) * FEE_RATE
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_1H'] += pnl
+                        stats['TRACK_1H']['trades'] += 1
+                        stats['TRACK_1H']['pnl'] += pnl
+                        if pnl > 0: stats['TRACK_1H']['wins'] += 1
+                        pos_1h = None
                     elif bar['l'] <= tp:
                         pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
-                        wallet += pnl
-                        stats['TRACK_15M']['trades'] += 1
-                        stats['TRACK_15M']['wins'] += 1
-                        stats['TRACK_15M']['pnl'] += pnl
-                        pos_15m = None
+                        if mode == 'COMBINED': total_wallet += pnl
+                        else: wallets['TRACK_1H'] += pnl
+                        stats['TRACK_1H']['trades'] += 1
+                        stats['TRACK_1H']['wins'] += 1
+                        stats['TRACK_1H']['pnl'] += pnl
+                        pos_1h = None
 
-            # 15m 開倉 (歐美時段 12:00 ~ 21:00 UTC)
+            if prev_bar['c'] > prev_bar['dc_high']:
+                recent_1h_high = prev_bar['dc_high']
+            if prev_bar['c'] < prev_bar['dc_low']:
+                recent_1h_low = prev_bar['dc_low']
+
             hour_utc = bar['time'].hour
-            is_active_session = 12 <= hour_utc <= 21
+            is_active_session = 6 <= hour_utc <= 20
 
-            if pos_15m is None and wallet > 5.0 and is_active_session:
+            cur_w_1h = total_wallet if mode == 'COMBINED' else wallets['TRACK_1H']
+            if pos_1h is None and cur_w_1h > 5.0 and is_active_session:
                 trend = bar['macro_filter']
                 atr_val = bar['atr']
+                body = abs(bar['c'] - bar['o'])
+                lower_shadow = min(bar['c'], bar['o']) - bar['l']
+                upper_shadow = bar['h'] - max(bar['c'], bar['o'])
                 sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
 
-                # 多頭動能狙擊：EMA9 > EMA21 + 突破前 5 根 15m 高點
-                if trend == 1 and (pos_4h is None or pos_4h['side'] == 'LONG'):
-                    if bar['ema9'] > bar['ema21'] and bar['c'] > bar['local_high'] and prev_bar['c'] <= prev_bar['local_high']:
+                if trend == 1 and (pos_4h is None or pos_4h['side'] == 'LONG') and recent_1h_high is not None:
+                    retest_top = recent_1h_high + (atr_val * 0.6)
+                    is_bull_pinbar = (lower_shadow >= 1.2 * body) and (bar['c'] >= (bar['h'] + bar['l']) / 2)
+                    if (bar['l'] <= retest_top) and (bar['c'] > recent_1h_high) and is_bull_pinbar:
                         sig, entry = 'LONG', bar['c']
-                        sl = entry - (atr_val * 1.2) # 緊湊窄止損
+                        sl = bar['l'] - (atr_val * 0.9)
                         risk_dist = entry - sl
-                        be_tgt = entry + (risk_dist * 1.0) # 1.0R 快速移保本
-                        tp = entry + (risk_dist * 2.5)     # 2.5R 快速收割
+                        if risk_dist > (atr_val * 0.35):
+                            be_tgt = entry + (risk_dist * 2.0)
+                            tp = entry + (risk_dist * 4.0)
+                            recent_1h_high = None
 
-                # 空頭動能狙擊：EMA9 < EMA21 + 跌破前 5 根 15m 低點
-                elif trend == -1 and (pos_4h is None or pos_4h['side'] == 'SHORT'):
-                    if bar['ema9'] < bar['ema21'] and bar['c'] < bar['local_low'] and prev_bar['c'] >= prev_bar['local_low']:
+                elif trend == -1 and (pos_4h is None or pos_4h['side'] == 'SHORT') and recent_1h_low is not None:
+                    retest_bot = recent_1h_low - (atr_val * 0.6)
+                    is_bear_pinbar = (upper_shadow >= 1.2 * body) and (bar['c'] <= (bar['h'] + bar['l']) / 2)
+                    if (bar['h'] >= retest_bot) and (bar['c'] < recent_1h_low) and is_bear_pinbar:
                         sig, entry = 'SHORT', bar['c']
-                        sl = entry + (atr_val * 1.2)
+                        sl = bar['h'] + (atr_val * 0.9)
                         risk_dist = sl - entry
-                        be_tgt = entry - (risk_dist * 1.0)
-                        tp = entry - (risk_dist * 2.5)
+                        if risk_dist > (atr_val * 0.35):
+                            be_tgt = entry - (risk_dist * 2.0)
+                            tp = entry - (risk_dist * 4.0)
+                            recent_1h_low = None
 
                 if sig and risk_dist > 0:
-                    qty = (wallet * 0.03) / risk_dist # 3% 單筆風險
-                    if (qty * entry) > (wallet * 20.0): # 最高拉到 20x 槓桿
-                        qty = (wallet * 20.0) / entry
-                    pos_15m = {
+                    qty = (cur_w_1h * 0.04) / risk_dist # 短線 4% 風險
+                    if (qty * entry) > (cur_w_1h * 8.0): # 短線 8x 槓桿
+                        qty = (cur_w_1h * 8.0) / entry
+                    pos_1h = {
                         'side': sig, 'entry': entry, 'sl': sl,
                         'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
                     }
 
     # 輸出報表
-    total_trades = stats['TRACK_4H']['trades'] + stats['TRACK_15M']['trades']
-    total_wins = stats['TRACK_4H']['wins'] + stats['TRACK_15M']['wins']
+    total_trades = stats['TRACK_4H']['trades'] + stats['TRACK_1H']['trades']
+    total_wins = stats['TRACK_4H']['wins'] + stats['TRACK_1H']['wins']
     overall_wr = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
-    total_roi = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
+
+    if mode == 'COMBINED':
+        total_roi = ((total_wallet - INITIAL_PER_TRACK) / INITIAL_PER_TRACK) * 100
+        mode_title = "【雙軌合併共享複利池 (長線 10% / 短線 4%)】"
+        init_str = f"${format_full_num(INITIAL_PER_TRACK)} USD"
+        final_str = f"${format_full_num(total_wallet, 2)} USD ({total_roi:+.2f}%)"
+    else:
+        tot_final = wallets['TRACK_4H'] + wallets['TRACK_1H']
+        total_roi = ((tot_final - 200.0) / 200.0) * 100
+        mode_title = "【雙軌獨立分池帳戶 (各 $100 完全隔離)】"
+        init_str = "$200.00 USD (長線 $100 / 短線 $100)"
+        final_str = f"${format_full_num(tot_final, 2)} USD ({total_roi:+.2f}%)\n(各軌結餘: 長線4H=${wallets['TRACK_4H']:.2f} \vert{} 短線1H=${wallets['TRACK_1H']:.2f})"
 
     track_lines = []
-    for t_key, name in [('TRACK_4H', '4H 長線波段 (5%風險 / 10x槓桿 / 5.0R)'),
-                        ('TRACK_15M', '15m 高頻狙擊 (3%風險 / 20x槓桿 / 2.5R快打)')]:
+    for t_key, name in [('TRACK_4H', '4H 長線波段 (10%風險 / 10x槓桿 / 5.0R)'),
+                        ('TRACK_1H', '1H 歐美短線 ( 4%風險 /  8x槓桿 / 4.0R全平)')]:
         st = stats[t_key]
         c, w, pnl = st['trades'], st['wins'], st['pnl']
         wr = (w / c * 100) if c > 0 else 0.0
@@ -300,10 +336,10 @@ def run_high_frequency_engine(days=30):
 
     report_text = (
         "```text\n"
-        "【XAU/USD 現貨黃金 - 4H長線 + 15m高頻狙擊系統 (共享池)】\n"
+        f"判定邏輯: {mode_title}\n"
         f"回測週期: {period_title} ({start_date} ~ {end_date})\n"
-        f"初始本金: ${format_full_num(INITIAL_WALLET)} USD\n"
-        f"最終結餘: ${format_full_num(wallet, 2)} USD ({total_roi:+.2f}%)\n"
+        f"初始本金: {init_str}\n"
+        f"最終結餘: {final_str}\n"
         f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_wr:.2f}%\n"
         "----------------------------------------------------\n"
         + "\n".join(track_lines) + "\n"
@@ -314,6 +350,13 @@ def run_high_frequency_engine(days=30):
     send_discord(report_text)
 
 if __name__ == '__main__':
-    run_high_frequency_engine(days=30)
+    # 1. 執行獨立分池回測 (30 天 & 365 天)
+    run_backtest_pool(days=30, mode='ISOLATED')
     time.sleep(2)
-    run_high_frequency_engine(days=60)
+    run_backtest_pool(days=365, mode='ISOLATED')
+    time.sleep(2)
+
+    # 2. 執行合併共享池回測 (30 天 & 365 天)
+    run_backtest_pool(days=30, mode='COMBINED')
+    time.sleep(2)
+    run_backtest_pool(days=365, mode='COMBINED')
