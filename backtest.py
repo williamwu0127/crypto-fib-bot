@@ -1,6 +1,7 @@
 """
-Top 5 Trend Performers Dedicated Engine (XAU + MSFT + MU + GLW + SNDK)
-Strategy: 1D MA60 Macro Filter + 4H Donchian(20) Breakout + 1.5 ATR Dynamic SL + 1.5R BE + 3.0R TP
+Top 5 Trend Performers High-RR Engine (XAU + MSFT + MU + GLW + SNDK)
+Strategy: 1D MA60 Macro Filter + 4H Donchian(20) Breakout + 1.5 ATR Dynamic SL
+Exit Logic: 2.0R Breakeven -> 5.0R High-RR Full Take Profit
 Risk: 5% per trade | 10x Max Leverage | Discord Notification
 """
 
@@ -107,11 +108,11 @@ def prepare_indicators(df_4h, df_1d):
     return df_4h
 
 # ==================== 4. 撮合回測程序 ====================
-def run_top5_backtest(days=365):
+def run_top5_rr5_backtest(days=365):
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 65)
-    print(f">>> 啟動【XAU + MSFT + MU + GLW + SNDK】精選 5 標的 {period_title}回測")
-    print(f">>> 初始本金: ${INITIAL_WALLET} USD | 風控: {RISK_PCT*100}% | 出場: 1.5R保本 -> 3.0R止盈")
+    print(f">>> 啟動【精選 5 大標的 (XAU + MSFT + MU + GLW + SNDK | 1:5.0 RR版)】{period_title}回測")
+    print(f">>> 初始本金: ${INITIAL_WALLET} USD | 風控: {RISK_PCT*100}% | 出場: 2.0R保本 -> 5.0R止盈")
     print("=" * 65 + "\n")
 
     dfs_trade = {}
@@ -157,7 +158,7 @@ def run_top5_backtest(days=365):
         df = dfs_trade[sym]
         bar = df.iloc[idx]
 
-        # 1. 持倉處理 (1.5R 移保本，3.0R 止盈)
+        # 1. 持倉處理 (2.0R 移保本，5.0R 止盈)
         if sym in positions:
             pos = positions[sym]
             side = pos['side']
@@ -190,7 +191,7 @@ def run_top5_backtest(days=365):
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['wins'] += 1
                     symbol_stats[sym]['pnl'] += pnl
-                    completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP (3.0R)', 'time': event_time})
+                    completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP (5.0R)', 'time': event_time})
                     del positions[sym]
                     continue
 
@@ -217,7 +218,7 @@ def run_top5_backtest(days=365):
                     symbol_stats[sym]['trades'] += 1
                     symbol_stats[sym]['wins'] += 1
                     symbol_stats[sym]['pnl'] += pnl
-                    completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP (3.0R)', 'time': event_time})
+                    completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP (5.0R)', 'time': event_time})
                     del positions[sym]
                     continue
 
@@ -232,16 +233,16 @@ def run_top5_backtest(days=365):
                 entry = bar['c']
                 sl = entry - (bar['atr'] * 1.5)
                 risk_dist = entry - sl
-                be_target = entry + (risk_dist * 1.5)
-                tp = entry + (risk_dist * 3.0)
+                be_target = entry + (risk_dist * 2.0)
+                tp = entry + (risk_dist * 5.0)
 
             elif macro_trend == -1 and bar['c'] < bar['dc_low']:
                 sig_side = 'SHORT'
                 entry = bar['c']
                 sl = entry + (bar['atr'] * 1.5)
                 risk_dist = sl - entry
-                be_target = entry - (risk_dist * 1.5)
-                tp = entry - (risk_dist * 3.0)
+                be_target = entry - (risk_dist * 2.0)
+                tp = entry - (risk_dist * 5.0)
 
             if sig_side and risk_dist > 0:
                 qty = (current_wallet * RISK_PCT) / risk_dist
@@ -272,7 +273,7 @@ def run_top5_backtest(days=365):
 
     report_text = (
         "```text\n"
-        f"判定邏輯: 精選5大標的 (XAU + MSFT + MU + GLW + SNDK | 1:3.0 RR版)\n"
+        f"判定邏輯: 精選5大標的 (XAU + MSFT + MU + GLW + SNDK | 1:5.0 RR高賠率版)\n"
         f"回測週期: {period_title} ({earliest_start} ~ {latest_end})\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USD\n"
         f"最終結餘: ${format_full_num(current_wallet, 4)} USD ({roi_pct:+.2f}%)\n"
@@ -289,6 +290,6 @@ def run_top5_backtest(days=365):
 
 if __name__ == '__main__':
     # 執行 30 天與 365 天回測
-    run_top5_backtest(days=30)
+    run_top5_rr5_backtest(days=30)
     time.sleep(2)
-    run_top5_backtest(days=365)
+    run_top5_rr5_backtest(days=365)
