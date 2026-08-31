@@ -4,7 +4,10 @@ import logging
 import requests
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from datetime import datetime, timezone, timedelta
+
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 FRICTION_COST_PCT = 0.40
@@ -94,66 +97,12 @@ def get_dynamic_all_stocks():
                                 original_ind = val_str
                                 break
                         theme_str = identify_theme(sid, original_ind)
-                        ticker = f"{sid}.{market}"
-                        stock_dict[ticker] = (sid, name, theme_str, original_ind)
+                        # 正確對應 Yahoo 股價代號尾綴 (.TW / .TWO)
+                        yf_suffix = "TW" if market == "TW" else "TWO"
+                        stock_dict[sid] = (sid, name, theme_str, original_ind, yf_suffix)
         except Exception:
             continue
     return stock_dict
-
-def get_official_market_index():
-    """從證交所官方 API 抓取加權指數真實點位"""
-    try:
-        url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=json"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            tables = data.get("tables", [])
-            for table in tables:
-                if "發行量加權股價指數" in str(table):
-                    for row in table.get("data", []):
-                        if "發行量加權股價指數" in str(row[0]):
-                            close_p = float(str(row[1]).replace(",", ""))
-                            change_p = float(str(row[3]).replace(",", ""))
-                            pct_p = float(str(row[4]).replace(",", ""))
-                            return {"close": close_p, "pts": change_p, "pct": pct_p}
-    except Exception:
-        pass
-    return {"close": 22500.0, "pts": 0.0, "pct": 0.0} # Fallback 預設值
-
-def get_official_historical_klines(sid):
-    """透過證交所 OpenAPI 抓取個股真實歷史日 K (最近 60 天)"""
-    try:
-        now = datetime.now()
-        date_str = now.strftime("%Y%m01") # 當月月初
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={date_str}&stockNo={sid}&response=json"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            res = r.json()
-            if res.get("stat") == "OK":
-                raw_data = res.get("data", [])
-                rows = []
-                for row in raw_data:
-                    # 日期格式: 113/05/01 -> 轉換
-                    parts = row[0].split('/')
-                    year = int(parts[0]) + 1911
-                    d_obj = datetime(year, int(parts[1]), int(parts[2]))
-                    
-                    # 欄位: 日期, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, 漲跌價差, 成交筆數
-                    op = float(str(row[3]).replace(",", ""))
-                    hi = float(str(row[4]).replace(",", ""))
-                    lo = float(str(row[5]).replace(",", ""))
-                    cl = float(str(row[6]).replace(",", ""))
-                    vo = float(str(row[1]).replace(",", ""))
-                    rows.append({"Date": d_obj, "Open": op, "High": hi, "Low": lo, "Close": cl, "Volume": vo})
-                
-                df = pd.DataFrame(rows)
-                df.set_index("Date", inplace=True)
-                return df
-    except Exception:
-        pass
-    return pd.DataFrame()
 
 def get_large_shareholders_data():
     holders_dict = {}
@@ -417,28 +366,32 @@ def get_spot_orderbook(ticker_list):
 def main():
     session_name, title_suffix, date_str, is_chips_session = get_session_info()
     
-    # 官方大盤指數
-    mkt_idx = get_official_market_index()
-    spot_close = mkt_idx["close"]
-    ma20_dummy = spot_close * 0.98 # 簡易月線防守
-    trend = "🟢 多頭控盤" if spot_close >= ma20_dummy else "🔴 弱勢整理"
-    emoji = "📈" if mkt_idx["pts"] >= 0 else "📉"
+    # 穩定抓取大盤指數
+    market_info = {}
+    try:
+        twii = yf.Ticker("^TWII")
+        df_t = twii.history(period="5d", interval="1d")
+        if not df_t.empty:
+            spot_close = float(df_t['Close'].iloc[-1])
+            p_close = float(df_t['Close'].iloc[-2]) if len(df_t) >= 2 else spot_close
+            pts = spot_close - p_close
+            pct = (pts / p_close) * 100 if p_close > 0 else 0.0
+            ma20 = spot_close * 0.98
+            trend = "🟢 多頭控盤" if spot_close >= ma20 else "🔴 弱勢整理"
+            emoji = "📈" if pts >= 0 else "📉"
+            market_info = {'spot_close': spot_close, 'pts': pts, 'pct': pct, 'trend': trend, 'emoji': emoji, 'ma20': ma20}
+    except Exception:
+        pass
     
-    market_info = {
-        'spot_close': spot_close,
-        'pts': mkt_idx["pts"],
-        'pct': mkt_idx["pct"],
-        'trend': trend,
-        'emoji': emoji,
-        'ma20': ma20_dummy
-    }
+    if not market_info:
+        market_info = {'spot_close': 22500.0, 'pts': 0.0, 'pct': 0.0, 'trend': "🟢 多頭控盤", 'emoji': "📈", 'ma20': 22000.0}
 
     tx_quote, stock_futures = get_taifex_quotes()
-    if tx_quote and spot_close > 0:
+    if tx_quote and market_info['spot_close'] > 0:
         f_price = tx_quote['price']
         f_pts = tx_quote['diff']
         f_pct = tx_quote['rate']
-        diff = f_price - spot_close
+        diff = f_price - market_info['spot_close']
         dtype = "正價差" if diff >= 0 else "逆價差"
         market_info['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f} / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
     else:
@@ -449,16 +402,19 @@ def main():
     market_chips, stock_chips = get_institutional_data(date_str)
 
     futures_sids = list(stock_futures.keys())
-    target_spot_tickers = [t for t, (sid, _, _, _) in stock_dict.items() if sid in futures_sids]
+    target_spot_tickers = [f"{sid}.{mkt}" for sid, (s, _, _, _, mkt) in stock_dict.items() if s in futures_sids]
     spot_book = get_spot_orderbook(target_spot_tickers)
 
     scored_results = []
     monster_stocks = []
     spread_candidates = []
 
-    for ticker, (sid, name, theme_str, original_ind) in stock_dict.items():
+    # 逐一安全下載個股資料，確保不發生 MultiIndex 錯誤
+    for sid, (s, name, theme_str, original_ind, mkt) in stock_dict.items():
+        ticker_symbol = f"{sid}.{mkt}"
         try:
-            df = get_official_historical_klines(sid)
+            t_obj = yf.Ticker(ticker_symbol)
+            df = t_obj.history(period="3mo", interval="1d")
             if df.empty or len(df) < 30:
                 continue
 
@@ -468,11 +424,11 @@ def main():
             vol_s = df['Volume']
 
             today_close = float(close_s.iloc[-1])
-            prev_close = float(close_s.iloc[-2])
+            prev_close = float(close_s.iloc[-2]) if len(close_s) >= 2 else today_close
             today_vol = float(vol_s.iloc[-1])
-            vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
+            vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1]) if len(vol_s) >= 5 else today_vol
             atr_14 = calculate_atr(df, 14)
-            atr_pct = (atr_14 / today_close) * 100
+            atr_pct = (atr_14 / today_close) * 100 if today_close > 0 else 0.0
 
             if is_limit_up_locked_over_hour(df, today_close, prev_close):
                 continue
@@ -505,12 +461,12 @@ def main():
             if est_money_mil < 0.8:
                 continue
 
-            gain_5d = ((today_close - float(close_s.iloc[-6])) / float(close_s.iloc[-6])) * 100
+            gain_5d = ((today_close - float(close_s.iloc[-6])) / float(close_s.iloc[-6])) * 100 if len(close_s) >= 6 else 0.0
             if gain_5d > 25.0:
                 continue
 
-            recent_high_20d = float(high_s.iloc[-21:-1].max())
-            recent_low_20d = float(low_s.iloc[-21:-1].min())
+            recent_high_20d = float(high_s.iloc[-21:-1].max()) if len(high_s) >= 21 else float(high_s.max())
+            recent_low_20d = float(low_s.iloc[-21:-1].min()) if len(low_s) >= 21 else float(low_s.min())
             box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
             
             is_excluded_industry = (original_ind in NON_MONSTER_INDUSTRIES) or (theme_str in ["金融保險業", "水泥工業", "食品工業"])
@@ -614,7 +570,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股{title_suffix} ({date_str})",
-            "description": "已透過證交所官方 OpenAPI 完成精準行情與結構掃描：",
+            "description": "已完成大盤、個股即時行情與結構深度掃描：",
             "color": 3447003,
             "fields": fields
         }]
