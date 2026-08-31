@@ -1,4 +1,5 @@
 import os
+import urllib.parse
 import requests
 import pandas as pd
 import yfinance as yf
@@ -26,6 +27,22 @@ def send_msg(payload):
         print(f"Discord 狀態碼: {r.status_code}")
     except Exception as e:
         print(f"發送失敗: {e}")
+
+def translate_to_zh(text):
+    """將英文新聞標題即時翻譯為繁體中文"""
+    if not text:
+        return ""
+    try:
+        encoded_text = urllib.parse.quote(text)
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={encoded_text}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=4)
+        if r.status_code == 200:
+            res = r.json()
+            return "".join([part[0] for part in res[0] if part[0]])
+    except Exception:
+        pass
+    return text
 
 def get_market_analysis(symbol, name, role):
     try:
@@ -71,6 +88,7 @@ def get_market_analysis(symbol, name, role):
         return None
 
 def fetch_macro_news():
+    """抓取美股焦點新聞，進行中文翻譯並附上超連結"""
     news_items = []
     try:
         t = yf.Ticker("^GSPC")
@@ -78,16 +96,30 @@ def fetch_macro_news():
         if raw_news:
             for item in raw_news[:4]:
                 content = item.get('content', {})
-                title = content.get('title') or item.get('title', '')
+                title_en = content.get('title') or item.get('title', '')
                 provider = content.get('provider', {}).get('displayName', '國際財經')
-                if title:
-                    news_items.append(f"• **{title}** ({provider})")
+                
+                # 提取連結
+                link = item.get('link', '')
+                if not link:
+                    canonical_url = content.get('canonicalUrl', {})
+                    link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
+
+                if title_en:
+                    # 翻譯成繁體中文
+                    title_zh = translate_to_zh(title_en)
+                    
+                    # 組合 Markdown 超連結
+                    if link:
+                        news_items.append(f"• [{title_zh}]({link})  `({provider})`")
+                    else:
+                        news_items.append(f"• **{title_zh}** `({provider})`")
     except Exception:
         pass
         
     if not news_items:
-        news_items.append("• 國際市場隔夜數據平穩，無重大黑天鵝突發事件。")
-        news_items.append("• 資金焦點聚焦聯準會利率路徑與半導體供應鏈財報動向。")
+        news_items.append("• [國際市場隔夜數據平穩，無重大黑天鵝突發事件。](https://finance.yahoo.com)")
+        news_items.append("• [資金焦點聚焦聯準會利率路徑與半導體供應鏈財報動向。](https://finance.yahoo.com)")
         
     return news_items
 
@@ -128,7 +160,7 @@ def main():
 
     news_list = fetch_macro_news()
     fields.append({
-        "name": "───────── 📰 隔夜全球重磅財經快訊 ─────────",
+        "name": "───────── 📰 隔夜全球重磅財經快訊 (點擊看原文) ─────────",
         "value": "\n".join([f"> {n}" for n in news_list]),
         "inline": False
     })
