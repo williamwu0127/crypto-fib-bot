@@ -26,7 +26,7 @@ FEE_RATE = 0.0004
 def format_full_num(val, max_dec=4):
     try:
         f = float(val)
-        return f"{f:.{max_dec}f}".rstrip('0').rstrip('.')
+        return ("{:.%df}" % max_dec).format(f).rstrip('0').rstrip('.')
     except Exception:
         return str(val)
 
@@ -39,7 +39,7 @@ def send_discord(text):
 
 def fetch_gold_data(days=365):
     try:
-        period_str = f"{days + 90}d" if days <= 600 else "2y"
+        period_str = str(days + 90) + "d" if days <= 600 else "2y"
         ticker = yf.Ticker("GC=F")
 
         df_1h = ticker.history(period=period_str, interval="1h").reset_index()
@@ -83,11 +83,11 @@ def fetch_gold_data(days=365):
 
         return df_4h, df_1h
     except Exception as e:
-        print(f"[!] 數據抓取失敗: {e}")
+        print("[!] 數據抓取失敗: " + str(e))
         return None, None
 
 def run_backtest_pool(days=365, mode='COMBINED'):
-    period_title = "1 年期" if days >= 365 else f"{days} 天期"
+    period_title = "1 年期" if days >= 365 else str(days) + " 天期"
     df_4h, df_1h = fetch_gold_data(days=days)
     if df_4h is None or df_1h is None:
         return
@@ -200,8 +200,8 @@ def run_backtest_pool(days=365, mode='COMBINED'):
                     tp = entry - (risk_dist * 5.0)
 
                 if sig and risk_dist > 0:
-                    qty = (cur_w_4h * 0.10) / risk_dist # 長線提升至 10% 風險
-                    if (qty * entry) > (cur_w_4h * 10.0): # 10x 槓桿限制
+                    qty = (cur_w_4h * 0.10) / risk_dist
+                    if (qty * entry) > (cur_w_4h * 10.0):
                         qty = (cur_w_4h * 10.0) / entry
                     pos_4h = {
                         'side': sig, 'entry': entry, 'sl': sl,
@@ -301,8 +301,8 @@ def run_backtest_pool(days=365, mode='COMBINED'):
                             recent_1h_low = None
 
                 if sig and risk_dist > 0:
-                    qty = (cur_w_1h * 0.04) / risk_dist # 短線 4% 風險
-                    if (qty * entry) > (cur_w_1h * 8.0): # 短線 8x 槓桿
+                    qty = (cur_w_1h * 0.04) / risk_dist
+                    if (qty * entry) > (cur_w_1h * 8.0):
                         qty = (cur_w_1h * 8.0) / entry
                     pos_1h = {
                         'side': sig, 'entry': entry, 'sl': sl,
@@ -317,14 +317,16 @@ def run_backtest_pool(days=365, mode='COMBINED'):
     if mode == 'COMBINED':
         total_roi = ((total_wallet - INITIAL_PER_TRACK) / INITIAL_PER_TRACK) * 100
         mode_title = "【雙軌合併共享複利池 (長線 10% / 短線 4%)】"
-        init_str = f"${format_full_num(INITIAL_PER_TRACK)} USD"
-        final_str = f"${format_full_num(total_wallet, 2)} USD ({total_roi:+.2f}%)"
+        init_str = "$" + format_full_num(INITIAL_PER_TRACK) + " USD"
+        final_str = "$" + format_full_num(total_wallet, 2) + " USD (" + ("%+0.2f" % total_roi) + "%)"
     else:
         tot_final = wallets['TRACK_4H'] + wallets['TRACK_1H']
         total_roi = ((tot_final - 200.0) / 200.0) * 100
         mode_title = "【雙軌獨立分池帳戶 (各 $100 完全隔離)】"
         init_str = "$200.00 USD (長線 $100 / 短線 $100)"
-        final_str = f"${format_full_num(tot_final, 2)} USD ({total_roi:+.2f}%)\n(各軌結餘: 長線4H=${wallets['TRACK_4H']:.2f} \vert{} 短線1H=${wallets['TRACK_1H']:.2f})"
+        w_4h_str = "%.2f" % wallets['TRACK_4H']
+        w_1h_str = "%.2f" % wallets['TRACK_1H']
+        final_str = "$" + format_full_num(tot_final, 2) + " USD (" + ("%+0.2f" % total_roi) + "%)\n(各軌結餘: 長線4H=$" + w_4h_str + " \vert{} 短線1H=$" + w_1h_str + ")"
 
     track_lines = []
     for t_key, name in [('TRACK_4H', '4H 長線波段 (10%風險 / 10x槓桿 / 5.0R)'),
@@ -332,31 +334,30 @@ def run_backtest_pool(days=365, mode='COMBINED'):
         st = stats[t_key]
         c, w, pnl = st['trades'], st['wins'], st['pnl']
         wr = (w / c * 100) if c > 0 else 0.0
-        track_lines.append(f"• {name}\n  └ 交易: {str(c).rjust(2)}次 | 勝率: {wr:5.2f}% | 收益貢獻: {pnl:+10.2f}")
+        pnl_str = "%+0.2f" % pnl
+        wr_str = "%5.2f" % wr
+        track_lines.append("• " + name + "\n  └ 交易: " + str(c).rjust(2) + "次 | 勝率: " + wr_str + "% | 收益貢獻: " + pnl_str)
 
     report_text = (
         "```text\n"
-        f"判定邏輯: {mode_title}\n"
-        f"回測週期: {period_title} ({start_date} ~ {end_date})\n"
-        f"初始本金: {init_str}\n"
-        f"最終結餘: {final_str}\n"
-        f"總交易次數: {total_trades} 次 | 綜合勝率: {overall_wr:.2f}%\n"
-        "----------------------------------------------------\n"
+        + "判定邏輯: " + mode_title + "\n"
+        + "回測週期: " + period_title + " (" + str(start_date) + " ~ " + str(end_date) + ")\n"
+        + "初始資金: " + init_str + "\n"
+        + "最終結餘: " + final_str + "\n"
+        + "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + ("%.2f" % overall_wr) + "%\n"
+        + "----------------------------------------------------\n"
         + "\n".join(track_lines) + "\n"
-        "```"
+        + "```"
     )
 
     print(report_text)
     send_discord(report_text)
 
 if __name__ == '__main__':
-    # 1. 執行獨立分池回測 (30 天 & 365 天)
     run_backtest_pool(days=30, mode='ISOLATED')
     time.sleep(2)
     run_backtest_pool(days=365, mode='ISOLATED')
     time.sleep(2)
-
-    # 2. 執行合併共享池回測 (30 天 & 365 天)
     run_backtest_pool(days=30, mode='COMBINED')
     time.sleep(2)
     run_backtest_pool(days=365, mode='COMBINED')
