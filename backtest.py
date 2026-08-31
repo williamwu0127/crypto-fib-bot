@@ -60,11 +60,10 @@ def fetch_raw_data(ticker_sym, days=365):
         ticker = yf.Ticker(ticker_sym)
 
         # 抓取 1H K 線
-        df_1h = ticker.history(period=period_str, interval="1h")
+        df_1h = ticker.history(period=period_str, interval="1h").reset_index()
         if df_1h.empty:
             return None, None, None
 
-        df_1h = df_1h.reset_index()
         date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
         df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
         df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
