@@ -117,20 +117,84 @@ def get_dynamic_all_stocks():
                 
     return stock_dict
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+def analyze_pattern_stages(df):
+    """
+    4 步驟型態學分析模組：
+    1. 底部型態與轉折（左腳、頭部、右腳）
+    2. 左右腳是否形成＋定性型態
+    3. 頸線區域判定
+    4. 左側 vs 右側策略分流
+    """
+    try:
+        close_s = df['Close']
+        high_s = df['High']
+        low_s = df['Low']
+        
+        c_price = float(close_s.iloc[-1])
+        ma20 = float(close_s.rolling(20).mean().iloc[-1])
+        
+        low_40d = low_s.iloc[-40:]
+        head_idx = low_40d.idxmin()
+        head_pos = low_40d.index.get_loc(head_idx)
+        head_price = float(low_40d.min())
+        
+        if head_pos < 4 or head_pos > len(low_40d) - 3:
+            return None
+            
+        left_foot = float(low_40d.iloc[:head_pos].min())
+        right_foot = float(low_40d.iloc[head_pos+1:].min())
+        neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
+        neck_low = round(neck_high * 0.985, 2)
+        neck_zone = f"{neck_low:.2f} ~ {neck_high:.2f}"
+        stop_loss = round(head_price * 0.97, 2)
+        
+        if abs(left_foot - right_foot) / left_foot <= 0.03:
+            pattern_name = "W底"
+        elif right_foot > left_foot:
+            pattern_name = "雙重底(右腳墊高)"
+        else:
+            pattern_name = "箱型築底"
 
-def calculate_macd(series, fast=12, slow=26, signal=9):
-    exp1 = series.ewm(span=fast, adjust=False).mean()
-    exp2 = series.ewm(span=slow, adjust=False).mean()
-    dif = exp1 - exp2
-    dea = dif.ewm(span=signal, adjust=False).mean()
-    hist = (dif - dea) * 2
-    return dif, dea, hist
+        if c_price >= neck_high:
+            status_text = "🟢 突破頸線"
+            left_strat = f"`{right_foot*1.01:.2f}` 已過"
+            right_strat = f"突破 `{neck_high:.2f}` 追價 ｜ 回測 `{neck_low:.2f}` 承接"
+            score = 95
+        elif c_price >= neck_low and c_price < neck_high:
+            status_text = "🟡 突破後回測"
+            left_strat = f"`{neck_low:.2f}` 支撐小量試單"
+            right_strat = f"回測 `{neck_low:.2f}` 不破進場 ｜ 跌破放棄"
+            score = 88
+        elif right_foot >= head_price and c_price > ma20:
+            status_text = f"🟢 左右腳完成 ({pattern_name})"
+            left_strat = f"`{right_foot*1.01:.2f}` 附近試單"
+            right_strat = f"帶量突破 `{neck_high:.2f}` 順勢加碼"
+            score = 82
+        elif right_foot >= head_price:
+            status_text = "🟡 右腳形成中"
+            left_strat = f"`{right_foot*1.01:.2f}` 分批承接"
+            right_strat = f"等待突破 `{neck_high:.2f}` 確認"
+            score = 75
+        else:
+            return None
+
+        h_pattern = neck_high - head_price
+        tp_price = round(max(c_price + h_pattern * 1.5, c_price * 1.15), 2)
+        tp_pct = round(((tp_price - c_price) / c_price) * 100, 2)
+        sl_pct = round(((stop_loss - c_price) / c_price) * 100, 2)
+
+        return {
+            "status_text": status_text,
+            "neck_zone": neck_zone,
+            "left_strat": left_strat,
+            "right_strat": right_strat,
+            "tp": f"{tp_price} (+{tp_pct}%)",
+            "sl": f"{stop_loss} ({sl_pct}%)",
+            "entry": f"{round(c_price*0.99, 2):.2f} ~ {round(c_price*1.003, 2):.2f}",
+            "score": score
+        }
+    except Exception:
+        return None
 
 def get_market_and_futures():
     res = {}
@@ -197,7 +261,7 @@ def get_market_and_futures():
         dtype = "正價差" if diff >= 0 else "逆價差"
         res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f} / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
     else:
-        res['futures_str'] = "即時連線中"
+        res['futures_str'] = "即時撮合中"
 
     return res
 
@@ -232,41 +296,28 @@ def main():
                 close_s = df['Close']
                 high_s = df['High']
                 low_s = df['Low']
-                open_s = df['Open']
                 vol_s = df['Volume']
 
                 today_close = float(close_s.iloc[-1])
                 prev_close = float(close_s.iloc[-2])
-                today_high = float(high_s.iloc[-1])
-                today_low = float(low_s.iloc[-1])
-                today_open = float(open_s.iloc[-1])
                 today_vol = float(vol_s.iloc[-1])
-
-                today_pct = ((today_close - prev_close) / prev_close) * 100
-                ma5 = float(close_s.rolling(5).mean().iloc[-1])
-                ma10 = float(close_s.rolling(10).mean().iloc[-1])
-                ma20_s = close_s.rolling(20).mean()
-                ma20 = float(ma20_s.iloc[-1])
-                ma20_slope = ma20 - float(ma20_s.iloc[-2])
                 vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
+                if est_money_mil < 0.8:
+                    continue
 
-                # ----------------- 漲停延續性與初升段過濾 -----------------
-                # 計算過去 5 天累計漲幅
                 gain_5d = ((today_close - float(close_s.iloc[-6])) / float(close_s.iloc[-6])) * 100
-                
-                # 排除已連續噴出（5天漲幅>25% 或 昨天也漲停>9.5% 且連漲過高）的過熱股
                 yesterday_pct = ((prev_close - float(close_s.iloc[-3])) / float(close_s.iloc[-3])) * 100
                 if gain_5d > 25.0 and yesterday_pct >= 9.0:
-                    continue  # 已漲多，剔除
+                    continue
 
+                # 妖股判斷
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
-
-                # ----------------- 妖股邏輯（嚴格起跑點） -----------------
-                if est_money_mil >= 0.8 and box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98 and gain_5d <= 22.0:
+                
+                if box_range_pct <= 0.25 and vol_ma5 > 0 and (today_vol / vol_ma5) >= 2.5 and today_close >= recent_high_20d * 0.98 and gain_5d <= 22.0:
                     m_entry_low = round(today_close * 0.99, 2)
                     m_entry_high = round(today_close * 1.003, 2)
                     m_sl = round(max(recent_low_20d * 0.99, m_entry_low * 0.94), 2)
@@ -284,67 +335,16 @@ def main():
                         "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                     })
 
-                # ----------------- 精選 Top 10（初升起漲結構） -----------------
-                if est_money_mil < 0.8 or today_close < ma20 or today_close < today_open * 0.99:
-                    continue
-
-                score = 0
-                reasons = []
-
-                if today_close > ma5 > ma10 > ma20 and ma20_slope > 0:
-                    score += 25
-                    reasons.append("均線多頭")
-
-                # 第一根突破20日整理高點
-                if today_close >= recent_high_20d:
-                    score += 20
-                    reasons.append("突破20日高")
-
-                # 初升量增 (1.2x ~ 4.0x，排除失控爆量倒貨)
-                if vol_ma5 > 0 and 1.2 <= (today_vol / vol_ma5) <= 4.0:
-                    score += 20
-                    reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
-
-                k_range = today_high - today_low
-                if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
-                    score += 15
-                    reasons.append("紅K實體強")
-
-                rsi = float(calculate_rsi(close_s).iloc[-1])
-                _, _, hist = calculate_macd(close_s)
-                if 50 <= rsi <= 78 and hist.iloc[-1] > 0:
-                    score += 20
-                    reasons.append("MACD偏多")
-
-                # 剛起漲加分（5天漲幅在 3% ~ 15% 最佳起漲區）
-                if 3.0 <= gain_5d <= 15.0:
-                    score += 10
-                    reasons.append("剛起漲點")
-
-                entry_low = round(today_close * 0.99, 2)
-                entry_high = round(today_close * 1.003, 2)
-                support_low = min(float(low_s.iloc[-5:].min()), ma10)
-                sl_price = round(max(support_low * 0.99, entry_low * 0.925), 2)
-                if sl_price > entry_low * 0.94:
-                    sl_price = round(entry_low * 0.935, 2)
-
-                if recent_high_20d > today_close * 1.04:
-                    tp_price = round(recent_high_20d, 2)
-                else:
-                    swing_r = today_close - float(low_s.iloc[-15:].min())
-                    tp_price = round(today_close + max(swing_r, (entry_high - sl_price) * 1.8), 2)
-
-                scored_results.append({
-                    "sid": sid,
-                    "name": name,
-                    "industry": industry,
-                    "close": f"{today_close:.2f}",
-                    "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
-                    "tp": f"{tp_price} (+{round(((tp_price-today_close)/today_close)*100, 2)}%)",
-                    "sl": f"{sl_price} ({round(((sl_price-today_close)/today_close)*100, 2)}%)",
-                    "score": score,
-                    "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
-                })
+                # 4 步驟型態篩選
+                p_res = analyze_pattern_stages(df)
+                if p_res:
+                    scored_results.append({
+                        "sid": sid,
+                        "name": name,
+                        "industry": industry,
+                        "close": f"{today_close:.2f}",
+                        **p_res
+                    })
         except Exception:
             continue
 
@@ -365,7 +365,7 @@ def main():
     
     # 1. 大盤與台指期
     if 'spot_close' in market_info:
-        fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時連線中')}"
+        fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時撮合中')}"
         fields.append({
             "name": f"📊 加權指數大盤解析 ({market_info['trend']})",
             "value": (
@@ -377,7 +377,7 @@ def main():
             "inline": False
         })
     
-    # 2. 精選 Top 10（動態時段標題）
+    # 2. 精選 Top 10（含型態、頸線、左右側策略與狀態）
     fields.append({
         "name": f"───────── 🎯 {session_name}精選 Top 10 ─────────",
         "value": "\u200b",
@@ -392,7 +392,10 @@ def main():
                 f"> **進場**: `{item['entry']}`\n"
                 f"> **止盈 (TP)**: `{item['tp']}`\n"
                 f"> **止損 (SL)**: `{item['sl']}`\n"
-                f"> **特徵**: `{item['tags']}`"
+                f"> **頸線區間**: `{item['neck_zone']}`\n"
+                f"> **左側策略**: {item['left_strat']}\n"
+                f"> **右側策略**: {item['right_strat']}\n"
+                f"> **狀態**: {item['status_text']}"
             ),
             "inline": True
         })
