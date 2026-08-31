@@ -1,7 +1,21 @@
 """
 Multi-Asset Quantitative Backtest Engine (30 Days & 365 Days)
-- BTC/ETH: 1D EMA50 -> 4H EMA20/50 -> 15m Fib (1% Risk)
-- XAU (PAXG): 1D MA60 -> 4H Donchian(20) -> 1.5 ATR (5% Risk / 10x)
+============================================================
+【實盤策略規則說明】
+1. BTC / ETH 實盤策略 (1% 動態風控):
+   - 宏觀定錨: 1D 日線 EMA50 (價格 >= EMA50 僅做多，反之僅做空)
+   - 趨勢過濾: 4H 均線趨勢 (EMA20 vs EMA50 銅牆鐵壁過濾)
+   - 微觀進場: 15m 斐波 0.618 回踩 + RSI 動能確認
+   - 出場機制: 分批止盈 (TP1 達成平倉 50% 並移止損至 TP1，TP2 達斐波 1.272 擴展)
+   - 結構防守: 實體跌破/突破關鍵 EMA50 或起漲點立即平倉
+
+2. XAU (黃金) 實盤策略 (5% 風控 / 10x 槓桿):
+   - 宏觀定錨: 1D 日線 MA60 (價格 > MA60 僅做多，反之僅做空)
+   - 突破進場: 4H 唐奇安通道 (Donchian 20) 突破進場
+   - 風控防守: 1.5 ATR 初始止損
+   - 動態保本: 浮盈達到 2.0R 時自動將止損平移至開倉價 (保本)
+   - 終極止盈: 達到 5.0R 盈虧比全額止盈
+============================================================
 """
 
 import os
@@ -256,17 +270,33 @@ def run_backtest(days=365):
 
     total_trades = len(completed_trades)
     win_trades = sum(1 for t in completed_trades if t['pnl'] > 0)
+    loss_trades = total_trades - win_trades
     win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
     roi = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
 
     report = (
         f"```text\n"
-        f"【量化回測報告 - {period_title}】\n"
+        f"【量化策略回測報告 - {period_title}】\n"
+        f"----------------------------------------------------\n"
+        f"策略架構:\n"
+        f" - BTC/ETH: 1D EMA50 -> 4H EMA 趨勢 -> 15m 斐波 (1% 風控)\n"
+        f" - XAU(黃金): 1D MA60 -> 4H 唐奇安突破 -> 1.5 ATR (5% 風控/10x)\n"
+        f"----------------------------------------------------\n"
         f"初始資金: ${INITIAL_WALLET:.2f} USDT\n"
         f"最終結餘: ${wallet:.2f} USDT ({roi:+.2f}%)\n"
-        f"總成交段: {total_trades} 筆 | 勝率: {win_rate:.2f}%\n"
-        f"```"
+        f"總成交次數: {total_trades} 次\n"
+        f"勝場數: {win_trades} 次 | 敗場數: {loss_trades} 次\n"
+        f"策略勝率: {win_rate:.2f}%\n"
+        f"----------------------------------------------------\n"
+        f"詳細成交記錄 (最近 10 筆):\n"
     )
+    
+    for t in completed_trades[-10:]:
+        pnl_sign = "+" if t['pnl'] >= 0 else ""
+        report += f" - 標的: {t['sym'].ljust(4)} | 盈虧: {pnl_sign}{t['pnl']:.2f} USDT\n"
+    
+    report += "```"
+    
     print(report)
     send_discord(report)
 
