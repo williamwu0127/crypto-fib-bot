@@ -1,8 +1,6 @@
 """
-XAU/USD Dual-Track Dedicated Backtest Engine
-Track 1 (4H Swing Track) : 1D MA60 + 4H Donchian(20) | 2.0R Breakeven -> 5.0R Take Profit ($100 USD)
-Track 2 (1H Fast Track)  : 1D MA60 + 1H Donchian(20) | 1.5R Breakeven -> 3.0R Take Profit ($100 USD)
-Risk: 5% Dynamic Risk per Track | 10x Max Real Leverage | Isolated Wallets
+XAU/USD Gold Dedicated Quant Engine (Clean & Production-Ready)
+Strategy: 1D MA60 Macro + 4H Donchian(20) Breakout + 1.5 ATR SL -> 2.0R BE -> 5.0R TP
 """
 
 import os
@@ -11,279 +9,181 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
 
-# ==================== 1. Webhook 與風控配置 ====================
+# ==================== 1. 核心參數與 Webhook ====================
 DISCORD_WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
-INITIAL_WALLET_PER_TRACK = 100.0
-RISK_PCT = 0.05        # 單筆固定承擔 5% 風險
-FEE_RATE = 0.0004      # 黃金現貨綜合點差與手續費 (萬分之四)
-MAX_LEVERAGE = 10.0    # 10 倍實質槓桿保護上限
+INITIAL_WALLET = 100.0  # 初始本金
+RISK_PCT = 0.05         # 單筆風險 5%
+FEE_RATE = 0.0004       # 點差與手續費 (萬分之四)
+MAX_LEVERAGE = 10.0     # 槓桿上限 10x
 
-# 雙軌參數配置
-TRACK_CONFIGS = {
-    'TRACK_4H': {
-        'name': '4H 長線大波段軌',
-        'itv': '4h',
-        'dc_w': 20,
-        'be_r': 2.0,   # 2.0R 移保本
-        'tp_r': 5.0    # 5.0R 止盈 (高賠率版)
-    },
-    'TRACK_1H': {
-        'name': '1H 短線高頻優化軌',
-        'itv': '1h',
-        'dc_w': 20,
-        'be_r': 1.5,   # 1.5R 移保本
-        'tp_r': 3.0    # 3.0R 止盈 (高勝率版)
-    }
-}
+def send_discord(text):
+    if DISCORD_WEBHOOK_URL:
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=8)
+        except Exception:
+            pass
 
-def format_full_num(val, max_dec=4):
-    try:
-        f = float(val)
-        return f"{f:.{max_dec}f}".rstrip('0').rstrip('.')
-    except Exception:
-        return str(val)
+# ==================== 2. 數據獲取與指標計算 ====================
+def get_gold_dataframe(days=365):
+    period = f"{days + 90}d" if days <= 600 else "2y"
+    ticker = yf.Ticker("GC=F")
 
-def send_discord_safe(content):
-    if not DISCORD_WEBHOOK_URL:
-        return
-    try:
-        if len(content) <= 1900:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
-        else:
-            parts = [content[i:i+1800] for i in range(0, len(content), 1800)]
-            for p in parts:
-                requests.post(DISCORD_WEBHOOK_URL, json={"content": p}, timeout=8)
-                time.sleep(0.5)
-    except Exception:
-        pass
-
-# ==================== 2. 黃金數據抓取模組 ====================
-def fetch_gold_data(days=365):
-    try:
-        period_str = f"{days + 90}d" if days <= 600 else "2y"
-        ticker = yf.Ticker("GC=F")
-
-        # 1. 抓取 1H K 線
-        df_1h = ticker.history(period=period_str, interval="1h")
-        if df_1h.empty:
-            return None, None, None
-
-        df_1h = df_1h.reset_index()
-        date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
-        df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
-        df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-        df_1h = df_1h.sort_values('time').reset_index(drop=True)
-
-        # 2. 合成 4H K 線
-        df_1h_indexed = df_1h.set_index('time')
-        df_4h = df_1h_indexed.resample('4h').agg({
-            'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
-        }).dropna().reset_index()
-
-        # 3. 抓取日線 (1D 宏觀趨勢濾網)
-        df_1d = ticker.history(period=period_str, interval="1d").reset_index()
-        date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
-        df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
-        df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-        df_1d = df_1d.sort_values('time').reset_index(drop=True)
-
-        return df_1h[['time', 'o', 'h', 'l', 'c', 'v']], df_4h[['time', 'o', 'h', 'l', 'c', 'v']], df_1d[['time', 'o', 'h', 'l', 'c', 'v']]
-    except Exception as e:
-        print(f"[!] 黃金數據拉取失敗: {e}")
-        return None, None, None
-
-# ==================== 3. 指標計算模組 ====================
-def prepare_indicators(df_trade, df_1d, dc_window=20):
-    # 1. 日線 MA60 大趨勢濾網
-    df_1d['daily_ma60'] = df_1d['c'].rolling(60).mean()
-    df_1d['daily_trend'] = np.where(df_1d['c'] > df_1d['daily_ma60'], 1, -1)
-
-    df_trade['daily_date'] = df_trade['time'].dt.floor('D')
-    df_1d['daily_date'] = df_1d['time'].dt.floor('D')
-    daily_map = df_1d.drop_duplicates(subset=['daily_date']).set_index('daily_date')['daily_trend'].to_dict()
-    df_trade['macro_filter'] = df_trade['daily_date'].map(daily_map).ffill().fillna(0)
-
-    # 2. 唐奇安通道
-    df_trade['dc_high'] = df_trade['h'].shift(1).rolling(dc_window).max()
-    df_trade['dc_low'] = df_trade['l'].shift(1).rolling(dc_window).min()
-
-    # 3. ATR(14) 計算
-    tr = np.maximum(df_trade['h'] - df_trade['l'], np.maximum(abs(df_trade['h'] - df_trade['c'].shift(1)), abs(df_trade['l'] - df_trade['c'].shift(1))))
-    df_trade['atr'] = tr.rolling(14).mean().fillna(df_trade['c'] * 0.01)
-
-    return df_trade
-
-# ==================== 4. 單軌回測撮合器 ====================
-def run_single_track(df, cfg, days=365):
-    now_ms = int(time.time() * 1000)
-    start_filter_time = pd.to_datetime(now_ms - (days * 24 * 60 * 60 * 1000), unit='ms')
-    df = df[df['time'] >= start_filter_time].reset_index(drop=True)
-
-    if df.empty:
+    # 1. 抓取 1H 並重採樣為 4H K 線
+    df_1h = ticker.history(period=period, interval="1h").reset_index()
+    if df_1h.empty:
         return None
+    date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
+    df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
+    df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
+    df_4h = df_1h.set_index('time').resample('4h').agg({
+        'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
+    }).dropna().reset_index()
 
-    start_date = df.iloc[0]['time'].strftime("%Y-%m-%d")
-    end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
+    # 2. 抓取 1D 日線計算 MA60 大趨勢
+    df_1d = ticker.history(period=period, interval="1d").reset_index()
+    date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
+    df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
+    df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c'}, inplace=True)
+    df_1d['ma60'] = df_1d['c'].rolling(60).mean()
+    df_1d['macro_trend'] = np.where(df_1d['c'] > df_1d['ma60'], 1, -1)
 
-    current_wallet = float(INITIAL_WALLET_PER_TRACK)
-    position = None
-    completed_trades = []
+    # 3. 對齊宏觀濾網
+    df_4h['d_date'] = df_4h['time'].dt.floor('D')
+    df_1d['d_date'] = df_1d['time'].dt.floor('D')
+    d_map = df_1d.drop_duplicates('d_date').set_index('d_date')['macro_trend'].to_dict()
+    df_4h['macro_filter'] = df_4h['d_date'].map(d_map).ffill().fillna(0)
 
-    for idx in range(1, len(df)):
-        bar = df.iloc[idx]
+    # 4. 4H 唐奇安通道(20) & ATR(14)
+    df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
+    df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
+    tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
+    df_4h['atr'] = tr.rolling(14).mean().fillna(df_4h['c'] * 0.015)
 
-        # 1. 持倉處理 (移保本 + 止盈)
-        if position is not None:
-            side = position['side']
-            entry = position['entry']
-            tp = position['tp']
-            be_target = position['be_target']
-            qty = position['qty']
-            is_be_moved = position['is_be_moved']
+    return df_4h
 
+# ==================== 3. 撮合回測主引擎 ====================
+def run_backtest(days=365):
+    period_title = "1 年期" if days >= 365 else f"{days} 天期"
+    df = get_gold_dataframe(days)
+    if df is None:
+        print("[!] 獲取黃金數據失敗")
+        return
+
+    # 截取指定天數區間
+    start_time = pd.to_datetime(int(time.time() * 1000) - (days * 86400000), unit='ms')
+    df = df[df['time'] >= start_time].reset_index(drop=True)
+    if df.empty:
+        return
+
+    wallet = float(INITIAL_WALLET)
+    pos = None
+    trades = []
+
+    for i in range(1, len(df)):
+        bar = df.iloc[i]
+
+        # 1. 持倉處理 (2.0R 移保本 / 5.0R 止盈 / 止損出場)
+        if pos is not None:
+            side, entry, sl, tp, be_tgt, qty, be_done = (
+                pos['side'], pos['entry'], pos['sl'], pos['tp'],
+                pos['be_target'], pos['qty'], pos['is_be_moved']
+            )
+
+            # 多頭檢查
             if side == 'LONG':
-                if not is_be_moved and bar['h'] >= be_target:
-                    position['sl'] = entry
-                    position['is_be_moved'] = True
+                if not be_done and bar['h'] >= be_tgt:
+                    pos['sl'] = entry
+                    pos['is_be_moved'] = True
 
-                if bar['l'] <= position['sl']:
-                    exit_price = position['sl']
-                    pnl = qty * (exit_price - entry) - (qty * (entry + exit_price) * FEE_RATE)
-                    current_wallet += pnl
-                    completed_trades.append({'side': 'LONG', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
-                    position = None
+                if bar['l'] <= pos['sl']:
+                    pnl = qty * (pos['sl'] - entry) - qty * (entry + pos['sl']) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
                     continue
 
                 if bar['h'] >= tp:
-                    pnl = qty * (tp - entry) - (qty * (entry + tp) * FEE_RATE)
-                    current_wallet += pnl
-                    completed_trades.append({'side': 'LONG', 'pnl': pnl, 'type': 'TP', 'time': bar['time']})
-                    position = None
+                    pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
                     continue
 
+            # 空頭檢查
             elif side == 'SHORT':
-                if not is_be_moved and bar['l'] <= be_target:
-                    position['sl'] = entry
-                    position['is_be_moved'] = True
+                if not be_done and bar['l'] <= be_tgt:
+                    pos['sl'] = entry
+                    pos['is_be_moved'] = True
 
-                if bar['h'] >= position['sl']:
-                    exit_price = position['sl']
-                    pnl = qty * (entry - exit_price) - (qty * (entry + exit_price) * FEE_RATE)
-                    current_wallet += pnl
-                    completed_trades.append({'side': 'SHORT', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
-                    position = None
+                if bar['h'] >= pos['sl']:
+                    pnl = qty * (entry - pos['sl']) - qty * (entry + pos['sl']) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
                     continue
 
                 if bar['l'] <= tp:
-                    pnl = qty * (entry - tp) - (qty * (entry + tp) * FEE_RATE)
-                    current_wallet += pnl
-                    completed_trades.append({'side': 'SHORT', 'pnl': pnl, 'type': 'TP', 'time': bar['time']})
-                    position = None
+                    pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
                     continue
 
-        # 2. 開倉判定 (4H 或 1H 收盤突破 Donchian 20 + 1.5 ATR 止損)
-        if position is None and current_wallet > 5.0:
-            macro_trend = bar['macro_filter']
-            sig_side = None
-            entry, sl, tp, be_target = 0.0, 0.0, 0.0, 0.0
+        # 2. 開倉判定 (4H 突破 Donchian + 1.5 ATR 止損)
+        if pos is None and wallet > 5.0:
+            trend = bar['macro_filter']
+            sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
 
-            if macro_trend == 1 and bar['c'] > bar['dc_high']:
-                sig_side = 'LONG'
-                entry = bar['c']
+            if trend == 1 and bar['c'] > bar['dc_high']:  # 多頭突破
+                sig, entry = 'LONG', bar['c']
                 sl = entry - (bar['atr'] * 1.5)
                 risk_dist = entry - sl
-                be_target = entry + (risk_dist * cfg['be_r'])
-                tp = entry + (risk_dist * cfg['tp_r'])
+                be_tgt = entry + (risk_dist * 2.0)
+                tp = entry + (risk_dist * 5.0)
 
-            elif macro_trend == -1 and bar['c'] < bar['dc_low']:
-                sig_side = 'SHORT'
-                entry = bar['c']
+            elif trend == -1 and bar['c'] < bar['dc_low']:  # 空頭跌破
+                sig, entry = 'SHORT', bar['c']
                 sl = entry + (bar['atr'] * 1.5)
                 risk_dist = sl - entry
-                be_target = entry - (risk_dist * cfg['be_r'])
-                tp = entry - (risk_dist * cfg['tp_r'])
+                be_tgt = entry - (risk_dist * 2.0)
+                tp = entry - (risk_dist * 5.0)
 
-            if sig_side and risk_dist > 0:
-                qty = (current_wallet * RISK_PCT) / risk_dist
-                if (qty * entry) > (current_wallet * MAX_LEVERAGE):
-                    qty = (current_wallet * MAX_LEVERAGE) / entry
-
-                position = {
-                    'side': sig_side, 'entry': entry, 'sl': sl,
-                    'tp': tp, 'be_target': be_target, 'is_be_moved': False, 'qty': qty
+            if sig and risk_dist > 0:
+                qty = (wallet * RISK_PCT) / risk_dist
+                if (qty * entry) > (wallet * MAX_LEVERAGE):
+                    qty = (wallet * MAX_LEVERAGE) / entry
+                pos = {
+                    'side': sig, 'entry': entry, 'sl': sl,
+                    'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
                 }
 
-    df_res = pd.DataFrame(completed_trades)
-    total_trades = len(df_res)
-    win_trades = len(df_res[df_res['pnl'] > 0]) if total_trades > 0 else 0
+    # 3. 輸出報表
+    total_trades = len(trades)
+    win_trades = sum(1 for p in trades if p > 0)
     win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
-    roi_pct = ((current_wallet - INITIAL_WALLET_PER_TRACK) / INITIAL_WALLET_PER_TRACK) * 100
+    roi_pct = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
 
-    return {
-        'start_date': start_date, 'end_date': end_date,
-        'final_wallet': current_wallet, 'roi_pct': roi_pct,
-        'total_trades': total_trades, 'win_rate': win_rate
-    }
-
-# ==================== 5. 雙軌回測與推播主程序 ====================
-def run_gold_dual_track(days=365):
-    period_title = "1 年期" if days >= 365 else f"{days} 天期"
-    print("=" * 65)
-    print(f">>> 啟動【XAU/USD 現貨黃金 - 純黃金雙軌並行系統】{period_title}回測")
-    print("=" * 65 + "\n")
-
-    df_1h, df_4h, df_1d = fetch_gold_data(days=days)
-    if df_1h is None or df_4h is None or df_1d is None:
-        print("[!] 黃金走勢數據拉取異常。")
-        return
-
-    # 分別準備 4H 與 1H 指標
-    df_4h_prep = prepare_indicators(df_4h.copy(), df_1d.copy(), dc_window=TRACK_CONFIGS['TRACK_4H']['dc_w'])
-    df_1h_prep = prepare_indicators(df_1h.copy(), df_1d.copy(), dc_window=TRACK_CONFIGS['TRACK_1H']['dc_w'])
-
-    res_4h = run_single_track(df_4h_prep, TRACK_CONFIGS['TRACK_4H'], days=days)
-    res_1h = run_single_track(df_1h_prep, TRACK_CONFIGS['TRACK_1H'], days=days)
-
-    if not res_4h or not res_1h:
-        print("[!] 回測失敗。")
-        return
-
-    combined_start = INITIAL_WALLET_PER_TRACK * 2
-    combined_end = res_4h['final_wallet'] + res_1h['final_wallet']
-    combined_roi = ((combined_end - combined_start) / combined_start) * 100
-    combined_trades = res_4h['total_trades'] + res_1h['total_trades']
-
-    report_text = (
+    report = (
         "```text\n"
-        f"【XAU/USD 現貨黃金 - 雙軌並行量化系統 (升級版)】\n"
-        f"回測週期: {period_title} ({res_4h['start_date']} ~ {res_4h['end_date']})\n"
-        f"總投入本金: ${format_full_num(combined_start)} USD (每軌各 $100)\n"
-        f"雙軌合併結餘: ${format_full_num(combined_end, 2)} USD ({combined_roi:+.2f}%)\n"
-        f"全系統總交易: {combined_trades} 次\n"
-        "----------------------------------------------------\n"
-        f"【軌道 1：4H 長線大波段軌】(2.0R保本 / 5.0R止盈)\n"
-        f"• 結餘: ${format_full_num(res_4h['final_wallet'], 2)} USD ({res_4h['roi_pct']:+.2f}%)\n"
-        f"• 交易: {res_4h['total_trades']} 次 | 勝率: {res_4h['win_rate']:.2f}%\n"
-        "\n"
-        f"【軌道 2：1H 短線高頻優化軌】(1.5R保本 / 3.0R止盈)\n"
-        f"• 結餘: ${format_full_num(res_1h['final_wallet'], 2)} USD ({res_1h['roi_pct']:+.2f}%)\n"
-        f"• 交易: {res_1h['total_trades']} 次 | 勝率: {res_1h['win_rate']:.2f}%\n"
+        "【XAU/USD 現貨黃金專屬 (日線定錨 + Donchian + 1:5.0 RR高賠率版)】\n"
+        f"回測週期: {period_title} ({df.iloc[0]['time'].strftime('%Y-%m-%d')} ~ {df.iloc[-1]['time'].strftime('%Y-%m-%d')})\n"
+        f"初始資金: ${INITIAL_WALLET:.1f} USD\n"
+        f"最終結餘: ${wallet:.2f} USD ({roi_pct:+.2f}%)\n"
+        f"總交易次數: {total_trades} 次 | 策略勝率: {win_rate:.2f}%\n"
+        f"單筆風險: {RISK_PCT*100:.1f}% | 風報比: 1:5.0 (2.0R保本) | 槓桿: 10x\n"
         "```"
     )
 
-    print(report_text)
-    print(">>> 正在發送至 Discord...", end=" ", flush=True)
-    send_discord_safe(report_text)
-    print("完成！\n")
+    print(report)
+    send_discord(report)
 
+# ==================== 4. 執行入口 ====================
 if __name__ == '__main__':
-    # 執行 30 天期與 365 天期回測
-    run_gold_dual_track(days=30)
-    time.sleep(2)
-    run_gold_dual_track(days=365)
+    run_backtest(days=30)
+    time.sleep(1.5)
+    run_backtest(days=365)
