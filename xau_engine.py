@@ -1,6 +1,7 @@
 """
-XAU/USD (Gold) Dedicated Engine: 10x Leverage + 5% Risk + Scale-Out (2.5R/5.0R)
-Strategy: 1D Trend Filter + 4H Donchian Breakout + 1.5 ATR Dynamic SL + 2.0R BE
+XAU/USD (Gold) Pure Structural Stop-Loss Engine
+Strategy: 1D Trend Filter + 4H Donchian Breakout + Breakout Candle Structural Low/High SL
+Exit: 2.0R Breakeven -> 2.5R Scale-out (30%) -> 5.0R Full Exit (70%) | Risk: 5%
 """
 
 import os
@@ -18,9 +19,9 @@ DISCORD_WEBHOOK_URL = os.getenv(
 )
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.05        # 單筆風險 5%
+RISK_PCT = 0.05        # 單筆固定承擔 5% 結構風險
 FEE_RATE = 0.0004      # 黃金現貨/期貨綜合滑價與手續費 (萬分之四)
-MAX_LEVERAGE = 10.0    # 槓桿上限改回 10 倍保護
+MAX_LEVERAGE = 10.0    # 10 倍實質槓桿保護上限
 
 def format_full_num(val, max_dec=4):
     try:
@@ -49,7 +50,7 @@ def fetch_gold_data(days=365):
         period_str = f"{days + 90}d" if days <= 600 else "2y"
         ticker = yf.Ticker("GC=F")
         
-        # 1. 抓取 1H 並重採樣合成 4H K 線
+        # 抓取 1H 並重採樣合成 4H K 線
         df_1h = ticker.history(period=period_str, interval="1h")
         if df_1h.empty:
             return None, None
@@ -64,7 +65,7 @@ def fetch_gold_data(days=365):
             'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
         }).dropna().reset_index()
 
-        # 2. 抓取日線數據
+        # 抓取日線數據 (1D)
         df_1d = ticker.history(period=period_str, interval="1d").reset_index()
         date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
         df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
@@ -72,11 +73,11 @@ def fetch_gold_data(days=365):
 
         return df_4h[['time', 'o', 'h', 'l', 'c', 'v']], df_1d[['time', 'o', 'h', 'l', 'c', 'v']]
     except Exception as e:
-        print(f"[!] 黃金數據拉取失敗: {e}")
+        print(f"[!] 數據抓取失敗: {e}")
         return None, None
 
 def prepare_indicators(df_4h, df_1d):
-    # 1. 日線 MA60 大趨勢濾網
+    # 1. 日線 MA60 趨勢定錨
     df_1d['daily_ma60'] = df_1d['c'].rolling(60).mean()
     df_1d['daily_trend'] = np.where(df_1d['c'] > df_1d['daily_ma60'], 1, -1)
     
@@ -85,27 +86,27 @@ def prepare_indicators(df_4h, df_1d):
     daily_map = df_1d.drop_duplicates(subset=['daily_date']).set_index('daily_date')['daily_trend'].to_dict()
     df_4h['macro_filter'] = df_4h['daily_date'].map(daily_map).ffill().fillna(0)
 
-    # 2. 4H 唐奇安通道 (前 20 期極值)
+    # 2. 4H 唐奇安通道 (前 20 期高低點)
     df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
     df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
 
-    # 3. 4H ATR(14) 計算
-    tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
-    df_4h['atr'] = tr.rolling(14).mean().fillna(df_4h['c'] * 0.015)
+    # 3. 前 3 根 K 棒的局部結構低點與高點 (避免單根突破 K 實體過小)
+    df_4h['swing_low_3'] = df_4h['l'].rolling(3).min()
+    df_4h['swing_high_3'] = df_4h['h'].rolling(3).max()
 
     return df_4h
 
 # ==================== 3. 撮合回測程序 ====================
-def run_gold_scaleout_backtest(days=365):
+def run_gold_structural_backtest(days=365):
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 65)
-    print(f">>> 啟動【XAU/USD 現貨黃金 (10x槓桿 + 5%風控 + 階梯平倉版)】{period_title}回測")
-    print(f">>> 初始本金: ${INITIAL_WALLET} USD | 規則: 2.0R保本 -> 2.5R平30% -> 5.0R平70%")
+    print(f">>> 啟動【XAU/USD 現貨黃金 (純進場結構止損 + 5%風控 + 階梯平倉)】{period_title}回測")
+    print(f">>> 止損邏輯: 突破發動結構低/高點 | 階梯: 2.0R保本 -> 2.5R平30% -> 5.0R平70%")
     print("=" * 65 + "\n")
 
     df_4h, df_1d = fetch_gold_data(days=days)
     if df_4h is None or len(df_4h) < 60:
-        print("[!] 無法獲取足夠的黃金歷史走勢數據。")
+        print("[!] 無法獲取足夠數據。")
         return
 
     df = prepare_indicators(df_4h, df_1d)
@@ -128,11 +129,13 @@ def run_gold_scaleout_backtest(days=365):
 
     for idx in range(1, len(df)):
         bar = df.iloc[idx]
+        prev_bar = df.iloc[idx - 1]
 
-        # 1. 持倉處理 (2.0R 移保本，2.5R 平 30%，5.0R 平 70%)
+        # 1. 持倉處理 (結構止損 + 階梯鎖利)
         if position is not None:
             side = position['side']
             entry = position['entry']
+            sl = position['sl']
             tp1 = position['tp1']
             tp2 = position['tp2']
             be_target = position['be_target']
@@ -146,17 +149,17 @@ def run_gold_scaleout_backtest(days=365):
                     position['sl'] = entry
                     position['is_be_moved'] = True
 
-                # (2) 止損 / 保本損觸發
+                # (2) 結構止損 / 保本損觸發 (以 K 棒最低價觸及判定)
                 if bar['l'] <= position['sl']:
                     exit_price = position['sl']
                     rem_qty = qty * 0.7 if tp1_hit else qty
                     pnl = rem_qty * (exit_price - entry) - (rem_qty * (entry + exit_price) * FEE_RATE)
                     current_wallet += pnl
-                    completed_trades.append({'side': 'LONG', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
+                    completed_trades.append({'side': 'LONG', 'pnl': pnl, 'type': 'Structural SL/BE', 'time': bar['time']})
                     position = None
                     continue
 
-                # (3) 觸發 TP1 (2.5R 平倉 30%，同時鎖定保本)
+                # (3) 觸發 TP1 (2.5R 平倉 30%，強制鎖定保本)
                 if not tp1_hit and bar['h'] >= tp1:
                     position['tp1_hit'] = True
                     position['sl'] = entry
@@ -184,7 +187,7 @@ def run_gold_scaleout_backtest(days=365):
                     rem_qty = qty * 0.7 if tp1_hit else qty
                     pnl = rem_qty * (entry - exit_price) - (rem_qty * (entry + exit_price) * FEE_RATE)
                     current_wallet += pnl
-                    completed_trades.append({'side': 'SHORT', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
+                    completed_trades.append({'side': 'SHORT', 'pnl': pnl, 'type': 'Structural SL/BE', 'time': bar['time']})
                     position = None
                     continue
 
@@ -204,35 +207,48 @@ def run_gold_scaleout_backtest(days=365):
                     position = None
                     continue
 
-        # 2. 開倉判定 (4H Donchian 突破)
+        # 2. 開倉判定 (4H 收盤突破唐奇安 + 結構低/高點設定止損)
         if position is None and current_wallet > 5.0:
             macro_trend = bar['macro_filter']
             sig_side = None
             entry, sl, tp1, tp2, be_target = 0.0, 0.0, 0.0, 0.0, 0.0
 
-            # 多頭突破
+            # 做多突破：收盤突破前 20 期高點
             if macro_trend == 1 and bar['c'] > bar['dc_high']:
                 sig_side = 'LONG'
                 entry = bar['c']
-                sl = entry - (bar['atr'] * 1.5)
+                # 結構止損：取該根突破 K 棒最低點，若過近則取前 3 根最低點
+                structural_low = min(bar['l'], bar['swing_low_3'])
+                sl = structural_low * 0.998  # 預留 0.2% 結構防守緩衝
                 risk_dist = entry - sl
-                be_target = entry + (risk_dist * 2.0)
-                tp1 = entry + (risk_dist * 2.5)  # 2.5R 平 30%
-                tp2 = entry + (risk_dist * 5.0)  # 5.0R 平 70%
 
-            # 空頭跌破
+                if risk_dist > 0 and (risk_dist / entry) >= 0.002:
+                    be_target = entry + (risk_dist * 2.0)
+                    tp1 = entry + (risk_dist * 2.5)  # 2.5R 平 30%
+                    tp2 = entry + (risk_dist * 5.0)  # 5.0R 平 70%
+                else:
+                    sig_side = None
+
+            # 做空跌破：收盤跌破前 20 期低點
             elif macro_trend == -1 and bar['c'] < bar['dc_low']:
                 sig_side = 'SHORT'
                 entry = bar['c']
-                sl = entry + (bar['atr'] * 1.5)
+                # 結構止損：取該根跌破 K 棒最高點
+                structural_high = max(bar['h'], bar['swing_high_3'])
+                sl = structural_high * 1.002
                 risk_dist = sl - entry
-                be_target = entry - (risk_dist * 2.0)
-                tp1 = entry - (risk_dist * 2.5)
-                tp2 = entry - (risk_dist * 5.0)
 
+                if risk_dist > 0 and (risk_dist / entry) >= 0.002:
+                    be_target = entry - (risk_dist * 2.0)
+                    tp1 = entry - (risk_dist * 2.5)
+                    tp2 = entry - (risk_dist * 5.0)
+                else:
+                    sig_side = None
+
+            # 依 5% 固定風險反推合約顆數
             if sig_side and risk_dist > 0:
                 qty = (current_wallet * RISK_PCT) / risk_dist
-                # 10 倍槓桿保護上限
+                # 10 倍實質槓桿保護上限
                 if (qty * entry) > (current_wallet * MAX_LEVERAGE):
                     qty = (current_wallet * MAX_LEVERAGE) / entry
 
@@ -242,7 +258,7 @@ def run_gold_scaleout_backtest(days=365):
                     'tp1_hit': False, 'is_be_moved': False, 'qty': qty
                 }
 
-    # 輸出報表
+    # 輸出績效
     df_res = pd.DataFrame(completed_trades)
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0]) if total_trades > 0 else 0
@@ -251,12 +267,12 @@ def run_gold_scaleout_backtest(days=365):
 
     report_text = (
         "```text\n"
-        "【XAU/USD 現貨黃金專屬 (10x槓桿 + 5%風控 + 階梯平倉版)】\n"
+        "【XAU/USD 現貨黃金專屬 (純進場結構止損 + 5%風控版)】\n"
         f"回測週期: {period_title} ({start_date} ~ {end_date})\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USD\n"
         f"最終結餘: ${format_full_num(current_wallet, 2)} USD ({roi_pct:+.2f}%)\n"
         f"總交易次數: {total_trades} 次 | 策略勝率: {win_rate:.2f}%\n"
-        f"規則: 2.0R保本 -> 2.5R平30% -> 5.0R平70% | 槓桿: 10x\n"
+        f"止損設定: 突破發動結構低/高點 (動態5%風控) | 槓桿: 10x\n"
         "```"
     )
 
@@ -266,8 +282,7 @@ def run_gold_scaleout_backtest(days=365):
     print("完成！\n")
 
 if __name__ == '__main__':
-    # 執行 1 個月 (30天) 回測
-    run_gold_scaleout_backtest(days=30)
+    # 執行 1 個月與 1 年回測
+    run_gold_structural_backtest(days=30)
     time.sleep(2)
-    # 執行 1 年 (365天) 回測
-    run_gold_scaleout_backtest(days=365)
+    run_gold_structural_backtest(days=365)
