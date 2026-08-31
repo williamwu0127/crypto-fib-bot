@@ -2,33 +2,36 @@ name: Taiwan Stock Scanner
 
 on:
   schedule:
-    # 台灣時間週一至週五：
-    # 1. 盤前掃描: 08:30 (UTC 00:30)
+    # 台灣時間 08:30 (UTC 00:30) - 盤前
     - cron: '30 0 * * 1-5'
-    # 2. 盤中掃描: 12:00 (UTC 04:00)
+    # 台灣時間 12:00 (UTC 04:00) - 盤中
     - cron: '0 4 * * 1-5'
-    # 3. 盤後總結: 16:30 (UTC 08:30)
-    - cron: '30 8 * * 1-5'
-  workflow_dispatch: # 支援手動一鍵執行
+    # 台灣時間 15:00 (UTC 07:00) - 盤後
+    - cron: '0 7 * * 1-5'
+    # 台灣時間 18:00 (UTC 10:00) - 籌碼夜盤 (三大法人買賣超分析)
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch: # 支援手動一鍵觸發
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: 檢出專案代碼
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
-      - name: Install Dependencies
+      - name: 安裝相依套件
         run: |
-          pip install --upgrade pip
-          pip install requests pandas numpy yfinance
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy yfinance lxml html5lib
 
-      - name: Run Scanner
+      - name: 執行量化掃描與籌碼分析
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python taiwan_stock_scanner.py
