@@ -210,7 +210,7 @@ def main():
 
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # ----------------- 妖股獵人判斷 -----------------
+                # ----------------- 妖股獵人判斷 (嚴格條件) -----------------
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -356,7 +356,7 @@ def main():
                 f"> **止損 (SL)**: `{item['sl']}`\n"
                 f"> **特徵**: `{item['tags']}`"
             ),
-            "inline": True
+            "inline": True  # 恢復左右並排網格
         })
         if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
             fields.append({
@@ -365,13 +365,15 @@ def main():
                 "inline": False
             })
 
+    # ----------------- 妖股獵人區塊（帶有未找到時的提示） -----------------
+    fields.append({
+        "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
+        "value": "\u200b",
+        "inline": False
+    })
+    
     if monster_stocks:
         top_monsters = sorted(monster_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:3]
-        fields.append({
-            "name": "───────── 🚨 妖股獵人 (飆股狂飆預警) ─────────",
-            "value": "\u200b",
-            "inline": False
-        })
         for m in top_monsters:
             fields.append({
                 "name": f"🔥 {m['sid']} {m['name']}  現價 : {m['close']}",
@@ -383,6 +385,12 @@ def main():
                 ),
                 "inline": True
             })
+    else:
+        fields.append({
+            "name": "⚡ 狀態提示",
+            "value": "> 今日全市場暫無符合「箱體緊縮 + 2.5倍爆量突破」之極端潛伏標的，持續沉澱觀察中。",
+            "inline": False
+        })
 
     hour_utc = datetime.utcnow().hour
     session_title = "盤前掃描" if hour_utc < 5 else "盤後分析"
@@ -393,7 +401,7 @@ def main():
             "title": f"📈 台股全方位{session_title}報告 ({latest_trade_date})",
             "description": "已完成大盤結構判定、全市場動態掃描與飆股潛伏預警：",
             "color": 3447003,
-            "fields": fields if fields else [{"name": "提示", "value": "今日無符合條件個股"}]
+            "fields": fields
         }]
     }
 
