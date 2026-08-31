@@ -28,7 +28,7 @@ SYMBOLS = {
 }
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.03       # 單筆風險 3%
+RISK_PCT = 0.05       # 單筆風險 5%
 FEE_RATE = 0.0005     # 綜合滑價與手續費
 MAX_LEVERAGE = 10.0   # 槓桿保護上限
 
