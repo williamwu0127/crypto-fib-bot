@@ -1,8 +1,9 @@
 """
-XAU/USD 4H Macro Trend Breakout - Leverage Sweep Engine
+XAU/USD 4H Macro Trend Breakout - True Notional Leverage Sweep
 - Strategy: 1D MA60 + 4H Donchian(20) Breakout | 2.0R BE -> 5.0R TP
+- Mode: Direct Full-Notional Sizing (Position Value = Wallet * Leverage)
 - Leverages Tested: 3x, 5x, 10x, 50x, 100x
-- Risk per Trade: 5% (Position sized by Risk / Distance, capped by Leverage)
+- Liquidation Rule: Account wiped if drawdown reaches margin threshold (100% loss)
 """
 
 import os
@@ -19,7 +20,6 @@ DISCORD_WEBHOOK_URL = os.getenv(
 )
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.05
 FEE_RATE = 0.0004
 LEVERAGE_LIST = [3.0, 5.0, 10.0, 50.0, 100.0]
 
@@ -77,7 +77,7 @@ def fetch_gold_data(days=365):
         print("[!] 數據抓取失敗: " + str(e))
         return None
 
-def simulate_single_leverage(df, max_lev):
+def simulate_full_leverage(df, lev):
     wallet = float(INITIAL_WALLET)
     pos = None
     trades = []
@@ -90,16 +90,16 @@ def simulate_single_leverage(df, max_lev):
 
         bar = df.iloc[i]
 
-        # 1. 撮合平倉
+        # 1. 撮合平倉與強平檢查
         if pos is not None:
             side, entry, sl, tp, be_tgt, qty, be_done = (
                 pos['side'], pos['entry'], pos['sl'], pos['tp'],
                 pos['be_target'], pos['qty'], pos['is_be_moved']
             )
 
-            # 強平線判定 (本金虧損達 90% 即強制清算)
+            # 強制平倉判定：逆向波動幅度達到 1/lev (保證金虧損 100%)
             if side == 'LONG':
-                liq_price = entry - (wallet * 0.90 / qty)
+                liq_price = entry * (1.0 - (1.0 / lev))
                 if bar['l'] <= liq_price:
                     wallet = 0.0
                     is_liquidated = True
@@ -125,7 +125,7 @@ def simulate_single_leverage(df, max_lev):
                     continue
 
             elif side == 'SHORT':
-                liq_price = entry + (wallet * 0.90 / qty)
+                liq_price = entry * (1.0 + (1.0 / lev))
                 if bar['h'] >= liq_price:
                     wallet = 0.0
                     is_liquidated = True
@@ -150,8 +150,8 @@ def simulate_single_leverage(df, max_lev):
                     pos = None
                     continue
 
-        # 2. 開倉信號
-        if pos is None and wallet > 5.0:
+        # 2. 開倉信號判定 (直接以全倉槓桿滿開：Position Value = Wallet * Leverage)
+        if pos is None and wallet > 1.0:
             trend = bar['macro_filter']
             atr_val = bar['atr']
             sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
@@ -170,12 +170,9 @@ def simulate_single_leverage(df, max_lev):
                 be_tgt = entry - (risk_dist * 2.0)
                 tp = entry - (risk_dist * 5.0)
 
-            if sig and risk_dist > 0:
-                # 以 5% 風險定部位，並受最大槓桿約束
-                qty = (wallet * RISK_PCT) / risk_dist
-                if (qty * entry) > (wallet * max_lev):
-                    qty = (wallet * max_lev) / entry
-
+            if sig and entry > 0:
+                # 實質滿額開倉：依槓桿直接決定持倉總值
+                qty = (wallet * lev) / entry
                 pos = {
                     'side': sig, 'entry': entry, 'sl': sl,
                     'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
@@ -205,24 +202,24 @@ def run_leverage_sweep(days=365):
 
     result_lines = []
     for lev in LEVERAGE_LIST:
-        wallet, roi_pct, trades, wr, is_liq = simulate_single_leverage(df.copy(), lev)
+        wallet, roi_pct, trades, wr, is_liq = simulate_full_leverage(df.copy(), lev)
         lev_str = (str(int(lev)) + "x").rjust(4)
-        if is_liq or wallet <= 1.0:
-            status_str = "【爆倉破產 LIQUIDATED】"
-            res_str = "結餘: $0.00 (-100.00%) | 交易: " + str(trades).rjust(2) + "次"
-        else:
-            status_str = "結餘: $" + format_full_num(wallet, 2).rjust(8) + " USD (" + ("%+0.2f" % roi_pct).rjust(8) + "%)"
-            res_str = status_str + " | 交易: " + str(trades).rjust(2) + "次 | 勝率: " + ("%5.2f" % wr) + "%"
 
-        result_lines.append("• 槓桿 " + lev_str + " │ " + res_str)
+        if is_liq or wallet <= 1.0:
+            res_str = "結餘: $0.00 (-100.00%) 【爆倉破產 LIQUIDATED】 | 交易: " + str(trades).rjust(2) + "次"
+        else:
+            pnl_sign = "%+0.2f" % roi_pct
+            res_str = "結餘: $" + format_full_num(wallet, 2).rjust(10) + " USD (" + pnl_sign.rjust(9) + "%) | 交易: " + str(trades).rjust(2) + "次 | 勝率: " + ("%5.2f" % wr) + "%"
+
+        result_lines.append("• 實質槓桿 " + lev_str + " │ " + res_str)
 
     report_text = (
         "```text\n"
-        + "【XAU/USD 黃金 4H 長線波段 - 多槓桿倍率壓力回測】\n"
+        + "【XAU/USD 黃金 4H 長線波段 - 真實滿額槓桿壓力回測】\n"
         + "策略邏輯: 1D MA60 + 4H 唐奇安(20) 突破 (2.0R保本 / 5.0R止盈)\n"
+        + "開倉模式: 滿額實質名義價值開倉 (Position Value = Wallet * Leverage)\n"
         + "回測週期: " + period_title + " (" + str(start_date) + " ~ " + str(end_date) + ")\n"
         + "初始本金: $" + format_full_num(INITIAL_WALLET) + " USD (每種槓桿獨立起始)\n"
-        + "單筆風控: 固定 5% 帳戶風險 (受槓桿上限約束)\n"
         + "------------------------------------------------------------\n"
         + "\n".join(result_lines) + "\n"
         + "```"
