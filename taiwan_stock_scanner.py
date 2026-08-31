@@ -29,13 +29,14 @@ def get_session_info():
 
     time_val = now_tw.hour * 100 + now_tw.minute
     if time_val < 900:
-        session = "盤前掃描"
+        session_name = "盤前"
     elif 900 <= time_val <= 1330:
-        session = "盤中分析"
+        session_name = "盤中"
     else:
-        session = "盤後掃描"
+        session_name = "盤後"
 
-    return f"全方位{session}報告 ({trigger_type})", now_tw.strftime("%Y-%m-%d")
+    title_str = f"全方位{session_name}分析報告 ({trigger_type})"
+    return session_name, title_str, now_tw.strftime("%Y-%m-%d")
 
 def refine_industry(name, original_industry):
     orig_str = str(original_industry).strip() if original_industry else ""
@@ -116,64 +117,26 @@ def get_dynamic_all_stocks():
                 
     return stock_dict
 
-def analyze_pattern_stages(df):
-    """4步驟型態學邏輯：底部識別、左右腳判斷、頸線區間與左右側策略"""
-    try:
-        close_s = df['Close']
-        high_s = df['High']
-        low_s = df['Low']
-        
-        c_price = float(close_s.iloc[-1])
-        ma20 = float(close_s.rolling(20).mean().iloc[-1])
-        
-        low_40d = low_s.iloc[-40:]
-        head_idx = low_40d.idxmin()
-        head_pos = low_40d.index.get_loc(head_idx)
-        head_price = float(low_40d.min())
-        
-        if head_pos < 4 or head_pos > len(low_40d) - 3:
-            return None
-            
-        right_foot = float(low_40d.iloc[head_pos+1:].min())
-        neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
-        neck_low = round(neck_high * 0.985, 2)
-        stop_loss = round(head_price * 0.97, 2)
-        
-        if c_price >= neck_high:
-            stage = "🟢 突破頸線"
-            strategy = f"右側破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
-            score = 95
-        elif c_price >= neck_low and c_price < neck_high:
-            stage = "🟡 突破後回測"
-            strategy = f"回測 `{neck_low:.2f}` 不破進場 ｜ 跌破放棄"
-            score = 88
-        elif right_foot >= head_price and c_price > ma20:
-            stage = "🟢 左右腳完成 (W底)"
-            strategy = f"左側 `{right_foot*1.01:.2f}` 試單 ｜ 突破 `{neck_high:.2f}` 加碼"
-            score = 82
-        elif right_foot >= head_price:
-            stage = "🟡 右腳形成中"
-            strategy = f"左側 `{right_foot*1.01:.2f}` 分批接 ｜ 破 `{neck_high:.2f}` 確認"
-            score = 75
-        else:
-            return None
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-        return {
-            "stage": stage,
-            "neck_zone": f"{neck_low:.2f} ~ {neck_high:.2f}",
-            "stop_loss": f"{stop_loss:.2f}",
-            "strategy": strategy,
-            "score": score
-        }
-    except Exception:
-        return None
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    dif = exp1 - exp2
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = (dif - dea) * 2
+    return dif, dea, hist
 
 def get_market_and_futures():
-    """多備援獲取大盤與台指期即時行情及正逆價差"""
     res = {}
     spot_close = 0.0
     
-    # 1. 加權指數現貨
+    # 1. 現貨大盤
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d")
@@ -195,12 +158,12 @@ def get_market_and_futures():
     except Exception as e:
         print(f"大盤獲取失敗: {e}")
 
-    # 2. 台指期貨（雙重備援：Taifex API + yfinance）
+    # 2. 台指期貨
     f_price, f_pts, f_pct = 0.0, 0.0, 0.0
     futures_found = False
 
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=5)
         if r.status_code == 200:
             data = r.json().get('RtData', {}).get('QuoteList', [])
@@ -232,14 +195,14 @@ def get_market_and_futures():
     if futures_found and spot_close > 0:
         diff = f_price - spot_close
         dtype = "正價差" if diff >= 0 else "逆價差"
-        res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f}點 / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}`點"
+        res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f} / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
     else:
         res['futures_str'] = "即時連線中"
 
     return res
 
 def main():
-    title_suffix, date_str = get_session_info()
+    session_name, title_suffix, date_str = get_session_info()
     market_info = get_market_and_futures()
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
@@ -269,14 +232,25 @@ def main():
                 close_s = df['Close']
                 high_s = df['High']
                 low_s = df['Low']
+                open_s = df['Open']
                 vol_s = df['Volume']
 
                 today_close = float(close_s.iloc[-1])
+                today_high = float(high_s.iloc[-1])
+                today_low = float(low_s.iloc[-1])
+                today_open = float(open_s.iloc[-1])
                 today_vol = float(vol_s.iloc[-1])
+
+                ma5 = float(close_s.rolling(5).mean().iloc[-1])
+                ma10 = float(close_s.rolling(10).mean().iloc[-1])
+                ma20_s = close_s.rolling(20).mean()
+                ma20 = float(ma20_s.iloc[-1])
+                ma20_slope = ma20 - float(ma20_s.iloc[-2])
                 vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
+
                 est_money_mil = (today_close * today_vol) / 100_000_000
 
-                # 妖股邏輯（嚴格條件）
+                # 妖股邏輯
                 recent_high_20d = float(high_s.iloc[-21:-1].max())
                 recent_low_20d = float(low_s.iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -299,19 +273,60 @@ def main():
                         "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                     })
 
-                # 型態學結構分析
-                if est_money_mil < 0.8:
+                # 精選 Top 10 常規篩選與計分
+                if est_money_mil < 0.8 or today_close < ma20 or today_close < today_open * 0.99:
                     continue
 
-                p_res = analyze_pattern_stages(df)
-                if p_res:
-                    scored_results.append({
-                        "sid": sid,
-                        "name": name,
-                        "industry": industry,
-                        "close": f"{today_close:.2f}",
-                        **p_res
-                    })
+                score = 0
+                reasons = []
+
+                if today_close > ma5 > ma10 > ma20 and ma20_slope > 0:
+                    score += 25
+                    reasons.append("均線多頭")
+
+                if today_close > recent_high_20d:
+                    score += 20
+                    reasons.append("突破20日高")
+
+                if vol_ma5 > 0 and (today_vol / vol_ma5) >= 1.2:
+                    score += 20
+                    reasons.append(f"爆量 {round(today_vol/vol_ma5, 1)}x")
+
+                k_range = today_high - today_low
+                if k_range > 0 and (today_close - today_low) / k_range >= 0.7:
+                    score += 15
+                    reasons.append("紅K實體強")
+
+                rsi = float(calculate_rsi(close_s).iloc[-1])
+                _, _, hist = calculate_macd(close_s)
+                if 50 <= rsi <= 75 and hist.iloc[-1] > 0:
+                    score += 20
+                    reasons.append("MACD偏多")
+
+                entry_low = round(today_close * 0.99, 2)
+                entry_high = round(today_close * 1.003, 2)
+                support_low = min(float(low_s.iloc[-5:].min()), ma10)
+                sl_price = round(max(support_low * 0.99, entry_low * 0.925), 2)
+                if sl_price > entry_low * 0.94:
+                    sl_price = round(entry_low * 0.935, 2)
+
+                if recent_high_20d > today_close * 1.04:
+                    tp_price = round(recent_high_20d, 2)
+                else:
+                    swing_r = today_close - float(low_s.iloc[-15:].min())
+                    tp_price = round(today_close + max(swing_r, (entry_high - sl_price) * 1.8), 2)
+
+                scored_results.append({
+                    "sid": sid,
+                    "name": name,
+                    "industry": industry,
+                    "close": f"{today_close:.2f}",
+                    "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
+                    "tp": f"{tp_price} (+{round(((tp_price-today_close)/today_close)*100, 2)}%)",
+                    "sl": f"{sl_price} ({round(((sl_price-today_close)/today_close)*100, 2)}%)",
+                    "score": score,
+                    "tags": " ‧ ".join(reasons) if reasons else "多頭結構"
+                })
         except Exception:
             continue
 
@@ -328,10 +343,9 @@ def main():
         if len(top_picks) >= 10:
             break
 
-    # 構造 Embed 欄位
     fields = []
     
-    # 1. 大盤 ＆ 台指期
+    # 1. 大盤與台指期
     if 'spot_close' in market_info:
         fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時連線中')}"
         fields.append({
@@ -347,7 +361,7 @@ def main():
     
     # 2. 精選 Top 10（完美還原雙欄並排卡片）
     fields.append({
-        "name": "───────── 🎯 盤後精選 Top 10 ─────────",
+        "name": f"───────── 🎯 {session_name}精選 Top 10 ─────────",
         "value": "\u200b",
         "inline": False
     })
@@ -357,10 +371,10 @@ def main():
             "name": f"📌 {item['sid']} {item['name']}  現價 : {item['close']}",
             "value": (
                 f"> **產業**: `{item['industry']}`\n"
-                f"> **型態**: {item['stage']}\n"
-                f"> **頸線**: `{item['neck_zone']}`\n"
-                f"> **停損**: `{item['stop_loss']}`\n"
-                f"> **策略**: {item['strategy']}"
+                f"> **進場**: `{item['entry']}`\n"
+                f"> **止盈 (TP)**: `{item['tp']}`\n"
+                f"> **止損 (SL)**: `{item['sl']}`\n"
+                f"> **特徵**: `{item['tags']}`"
             ),
             "inline": True
         })
