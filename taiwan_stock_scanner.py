@@ -11,6 +11,9 @@ WEBHOOK_URL = os.getenv(
     "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 )
 
+# 交易摩擦成本常數（現貨手續費折讓+證交稅 0.385% ＋ 期貨手續費與期交稅 0.024% ≈ 0.40%）
+FRICTION_COST_PCT = 0.40
+
 def send_msg(payload):
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
@@ -190,7 +193,7 @@ def analyze_pattern_stages(df):
         return None
 
 def get_taifex_quotes():
-    """解析期交所 API：同時獲取台指期與個股期貨之「近月份」與「次月（遠月份）」合約"""
+    """解析期交所 API：同時提取台指期與個股期近遠月合約"""
     tx_quote = None
     stock_futures = {}
     try:
@@ -199,7 +202,7 @@ def get_taifex_quotes():
             "Content-Type": "application/json"
         }
         
-        # 1. 抓取期貨即時行情（含台指近遠月）
+        # 1. 抓取期貨即時行情（含台指期）
         r = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=6)
         if r.status_code == 200:
             data = r.json().get('RtData', {}).get('QuoteList', [])
@@ -219,7 +222,7 @@ def get_taifex_quotes():
                     elif stock_futures[und_id]["far"] is None and price != stock_futures[und_id]["near"]["price"]:
                         stock_futures[und_id]["far"] = {"price": price, "diff": diff, "rate": rate}
 
-        # 2. 抓取股票期貨專區（近月與遠月合約補全）
+        # 2. 抓取股票期貨專區
         r_stk = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"S"}, headers=headers, timeout=6)
         if r_stk.status_code == 200:
             data_stk = r_stk.json().get('RtData', {}).get('QuoteList', [])
@@ -318,7 +321,7 @@ def main():
                 today_vol = float(vol_s.iloc[-1])
                 vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1])
 
-                # ----------------- 個股期現價差 ＆ 遠月跨月價差計算 -----------------
+                # ----------------- 個股期現價差 ＆ 手續費成本佔比計算 -----------------
                 if sid in stock_futures and today_close > 0:
                     f_dict = stock_futures[sid]
                     near_f = f_dict.get("near")
@@ -327,7 +330,11 @@ def main():
                     if near_f:
                         near_p = near_f['price']
                         diff_val = near_p - today_close
-                        diff_pct = (diff_val / today_close) * 100
+                        gross_pct = abs(diff_val / today_close) * 100
+                        
+                        # 扣除 0.40% 來回摩擦成本
+                        net_pct = gross_pct - FRICTION_COST_PCT
+                        cost_ratio = (FRICTION_COST_PCT / gross_pct * 100) if gross_pct > 0 else 100.0
                         
                         # 遠月跨月價差 (Calendar Spread)
                         if far_f:
@@ -335,21 +342,19 @@ def main():
                             cal_diff = far_p - near_p
                             cal_pct = (cal_diff / near_p) * 100
                             far_str = f"`{far_p:,.2f}` ｜ 跨月 `{'+' if cal_diff>=0 else ''}{cal_diff:.2f}` ({cal_pct:+.2f}%)"
-                            
-                            # 綜合結構解讀
-                            if diff_val > 0 and cal_diff > 0:
-                                signal = "多頭正價差擴大 ｜ 主力跨月做多強"
-                            elif diff_val > 0 and cal_diff <= 0:
-                                signal = "近月強軋空 ｜ 留意遠月獲利回吐"
-                            elif diff_val <= 0 and cal_diff < 0:
-                                signal = "遠月折價擴大 ｜ 中長線避險空單偏重"
-                            else:
-                                signal = "近月避險折價 ｜ 遠月平水整理"
                         else:
                             far_str = "無遠月撮合"
-                            signal = "期貨強軋空/溢價追買" if diff_val >= 0 else "期貨避險/折價偏弱"
 
-                        if abs(diff_pct) >= 0.35:
+                        # 結構解析
+                        if diff_val > 0 and net_pct >= 0.2:
+                            signal = f"實質淨正價差 +{net_pct:.2f}% (成本佔 {cost_ratio:.0f}%)"
+                        elif diff_val < 0 and net_pct >= 0.2:
+                            signal = f"實質淨逆價差 -{net_pct:.2f}% (成本佔 {cost_ratio:.0f}%)"
+                        else:
+                            signal = f"成本摩擦偏高 (佔 {min(cost_ratio, 99):.0f}%) ｜ 邊際利潤"
+
+                        # 實質過濾門檻：毛價差率 >= 0.45% 且 淨利潤空間 >= 0.10%
+                        if gross_pct >= 0.45:
                             spread_candidates.append({
                                 "sid": sid,
                                 "name": name,
@@ -358,8 +363,10 @@ def main():
                                 "near_p": f"{near_p:,.2f}",
                                 "far_str": far_str,
                                 "diff_val": diff_val,
-                                "diff_pct": diff_pct,
-                                "diff_str": f"{'+' if diff_val>=0 else ''}{diff_val:.2f} ({'+' if diff_pct>=0 else ''}{diff_pct:.2f}%)",
+                                "gross_pct": gross_pct,
+                                "net_pct": net_pct,
+                                "cost_ratio": cost_ratio,
+                                "diff_str": f"{'+' if diff_val>=0 else ''}{diff_val:.2f} ({'+' if diff_val>=0 else ''}{(diff_val/today_close)*100:.2f}%)",
                                 "dtype": "🟢 正價差" if diff_val >= 0 else "🔴 逆價差",
                                 "signal": signal
                             })
@@ -422,9 +429,9 @@ def main():
         if len(top_picks) >= 10:
             break
 
-    # 價差 Top 4 篩選（正價差前 2 + 逆價差前 2）
-    pos_spreads = sorted([s for s in spread_candidates if s['diff_val'] > 0], key=lambda x: x['diff_pct'], reverse=True)[:2]
-    neg_spreads = sorted([s for s in spread_candidates if s['diff_val'] < 0], key=lambda x: x['diff_pct'])[:2]
+    # 價差 Top 4 篩選（依扣除成本後的實質淨價差率降序排序，正價差前 2 ＋ 逆價差前 2）
+    pos_spreads = sorted([s for s in spread_candidates if s['diff_val'] > 0], key=lambda x: x['net_pct'], reverse=True)[:2]
+    neg_spreads = sorted([s for s in spread_candidates if s['diff_val'] < 0], key=lambda x: x['net_pct'], reverse=True)[:2]
     top_4_spreads = pos_spreads + neg_spreads
 
     fields = []
@@ -472,7 +479,7 @@ def main():
                 "inline": False
             })
 
-    # 3. 個股期現價差焦點 Top 4（含遠月跨月比較）
+    # 3. 個股期現 ＆ 跨月價差焦點 Top 4（含手續費與淨價差評估）
     fields.append({
         "name": "───────── ⚡ 個股期現 ＆ 跨月價差焦點 Top 4 ─────────",
         "value": "\u200b",
@@ -487,7 +494,7 @@ def main():
                     f"> **現貨價位**: `{item['spot_p']}`\n"
                     f"> **近月期 / 價差**: `{item['near_p']}` ｜ {item['dtype']} `{item['diff_str']}`\n"
                     f"> **遠月期 / 跨月**: {item['far_str']}\n"
-                    f"> **結構解讀**: `{item['signal']}`"
+                    f"> **成本與實質淨利**: `{item['signal']}`"
                 ),
                 "inline": True
             })
@@ -500,7 +507,7 @@ def main():
     else:
         fields.append({
             "name": "⚡ 狀態提示",
-            "value": "> 今日全市場個股期現價差偏離度均在常態範圍內（< 0.35%）。",
+            "value": "> 今日全市場扣除交易摩擦成本（0.40%）後，暫無顯著超額淨價差標的。",
             "inline": False
         })
 
