@@ -1,6 +1,6 @@
 """
-XAU/USD (Gold) Dedicated 100x Leverage & 5% Risk Backtest Engine
-Strategy: 1D Trend Filter + 4H Donchian Trend Breakout + 1.5 ATR SL + 1:5.0 High RR
+XAU/USD (Gold) Dedicated Engine: 10x Leverage + 5% Risk + Scale-Out (2.5R/5.0R)
+Strategy: 1D Trend Filter + 4H Donchian Breakout + 1.5 ATR Dynamic SL + 2.0R BE
 """
 
 import os
@@ -18,9 +18,9 @@ DISCORD_WEBHOOK_URL = os.getenv(
 )
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.05        # 單筆風險拉至 5%
+RISK_PCT = 0.05        # 單筆風險 5%
 FEE_RATE = 0.0004      # 黃金現貨/期貨綜合滑價與手續費 (萬分之四)
-MAX_LEVERAGE = 100.0   # 支援最高 100 倍名義槓桿上限
+MAX_LEVERAGE = 10.0    # 槓桿上限改回 10 倍保護
 
 def format_full_num(val, max_dec=4):
     try:
@@ -96,11 +96,11 @@ def prepare_indicators(df_4h, df_1d):
     return df_4h
 
 # ==================== 3. 撮合回測程序 ====================
-def run_gold_100x_backtest(days=365):
+def run_gold_scaleout_backtest(days=365):
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 65)
-    print(f">>> 啟動【XAU/USD 現貨黃金 (100倍槓桿 + 5%風控 + 1:5.0 RR)】{period_title}回測")
-    print(f">>> 初始本金: ${INITIAL_WALLET} USD | 風報比: 1:5.0 (2.0R保本) | 槓桿上限: {MAX_LEVERAGE}x")
+    print(f">>> 啟動【XAU/USD 現貨黃金 (10x槓桿 + 5%風控 + 階梯平倉版)】{period_title}回測")
+    print(f">>> 初始本金: ${INITIAL_WALLET} USD | 規則: 2.0R保本 -> 2.5R平30% -> 5.0R平70%")
     print("=" * 65 + "\n")
 
     df_4h, df_1d = fetch_gold_data(days=days)
@@ -129,32 +129,48 @@ def run_gold_100x_backtest(days=365):
     for idx in range(1, len(df)):
         bar = df.iloc[idx]
 
-        # 1. 持倉狀態檢查 (2.0R 移保本，5.0R 止盈)
+        # 1. 持倉處理 (2.0R 移保本，2.5R 平 30%，5.0R 平 70%)
         if position is not None:
             side = position['side']
             entry = position['entry']
-            tp = position['tp']
+            tp1 = position['tp1']
+            tp2 = position['tp2']
             be_target = position['be_target']
             qty = position['qty']
+            tp1_hit = position['tp1_hit']
             is_be_moved = position['is_be_moved']
 
             if side == 'LONG':
+                # (1) 達 2.0R 移動止損至開倉價保本
                 if not is_be_moved and bar['h'] >= be_target:
                     position['sl'] = entry
                     position['is_be_moved'] = True
 
+                # (2) 止損 / 保本損觸發
                 if bar['l'] <= position['sl']:
                     exit_price = position['sl']
-                    pnl = qty * (exit_price - entry) - (qty * (entry + exit_price) * FEE_RATE)
+                    rem_qty = qty * 0.7 if tp1_hit else qty
+                    pnl = rem_qty * (exit_price - entry) - (rem_qty * (entry + exit_price) * FEE_RATE)
                     current_wallet += pnl
                     completed_trades.append({'side': 'LONG', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
                     position = None
                     continue
 
-                if bar['h'] >= tp:
-                    pnl = qty * (tp - entry) - (qty * (entry + tp) * FEE_RATE)
-                    current_wallet += pnl
-                    completed_trades.append({'side': 'LONG', 'pnl': pnl, 'type': 'TP (5.0R)', 'time': bar['time']})
+                # (3) 觸發 TP1 (2.5R 平倉 30%，同時鎖定保本)
+                if not tp1_hit and bar['h'] >= tp1:
+                    position['tp1_hit'] = True
+                    position['sl'] = entry
+                    position['is_be_moved'] = True
+                    pnl_tp1 = (qty * 0.3) * (tp1 - entry) - ((qty * 0.3) * (entry + tp1) * FEE_RATE)
+                    current_wallet += pnl_tp1
+                    completed_trades.append({'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1 (2.5R 30%)', 'time': bar['time']})
+
+                # (4) 觸發 TP2 (5.0R 平剩餘 70%)
+                if position is not None and bar['h'] >= tp2:
+                    rem_qty = qty * 0.7 if tp1_hit else qty
+                    pnl_tp2 = rem_qty * (tp2 - entry) - (rem_qty * (entry + tp2) * FEE_RATE)
+                    current_wallet += pnl_tp2
+                    completed_trades.append({'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2 (5.0R 70%)', 'time': bar['time']})
                     position = None
                     continue
 
@@ -165,16 +181,26 @@ def run_gold_100x_backtest(days=365):
 
                 if bar['h'] >= position['sl']:
                     exit_price = position['sl']
-                    pnl = qty * (entry - exit_price) - (qty * (entry + exit_price) * FEE_RATE)
+                    rem_qty = qty * 0.7 if tp1_hit else qty
+                    pnl = rem_qty * (entry - exit_price) - (rem_qty * (entry + exit_price) * FEE_RATE)
                     current_wallet += pnl
                     completed_trades.append({'side': 'SHORT', 'pnl': pnl, 'type': 'SL/BE', 'time': bar['time']})
                     position = None
                     continue
 
-                if bar['l'] <= tp:
-                    pnl = qty * (entry - tp) - (qty * (entry + tp) * FEE_RATE)
-                    current_wallet += pnl
-                    completed_trades.append({'side': 'SHORT', 'pnl': pnl, 'type': 'TP (5.0R)', 'time': bar['time']})
+                if not tp1_hit and bar['l'] <= tp1:
+                    position['tp1_hit'] = True
+                    position['sl'] = entry
+                    position['is_be_moved'] = True
+                    pnl_tp1 = (qty * 0.3) * (entry - tp1) - ((qty * 0.3) * (entry + tp1) * FEE_RATE)
+                    current_wallet += pnl_tp1
+                    completed_trades.append({'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1 (2.5R 30%)', 'time': bar['time']})
+
+                if position is not None and bar['l'] <= tp2:
+                    rem_qty = qty * 0.7 if tp1_hit else qty
+                    pnl_tp2 = rem_qty * (entry - tp2) - (rem_qty * (entry + tp2) * FEE_RATE)
+                    current_wallet += pnl_tp2
+                    completed_trades.append({'side': 'SHORT', 'pnl': pnl_tp2, 'type': 'TP2 (5.0R 70%)', 'time': bar['time']})
                     position = None
                     continue
 
@@ -182,7 +208,7 @@ def run_gold_100x_backtest(days=365):
         if position is None and current_wallet > 5.0:
             macro_trend = bar['macro_filter']
             sig_side = None
-            entry, sl, tp, be_target = 0.0, 0.0, 0.0, 0.0
+            entry, sl, tp1, tp2, be_target = 0.0, 0.0, 0.0, 0.0, 0.0
 
             # 多頭突破
             if macro_trend == 1 and bar['c'] > bar['dc_high']:
@@ -191,7 +217,8 @@ def run_gold_100x_backtest(days=365):
                 sl = entry - (bar['atr'] * 1.5)
                 risk_dist = entry - sl
                 be_target = entry + (risk_dist * 2.0)
-                tp = entry + (risk_dist * 5.0)
+                tp1 = entry + (risk_dist * 2.5)  # 2.5R 平 30%
+                tp2 = entry + (risk_dist * 5.0)  # 5.0R 平 70%
 
             # 空頭跌破
             elif macro_trend == -1 and bar['c'] < bar['dc_low']:
@@ -200,17 +227,19 @@ def run_gold_100x_backtest(days=365):
                 sl = entry + (bar['atr'] * 1.5)
                 risk_dist = sl - entry
                 be_target = entry - (risk_dist * 2.0)
-                tp = entry - (risk_dist * 5.0)
+                tp1 = entry - (risk_dist * 2.5)
+                tp2 = entry - (risk_dist * 5.0)
 
             if sig_side and risk_dist > 0:
                 qty = (current_wallet * RISK_PCT) / risk_dist
-                # 100 倍槓桿保護上限
+                # 10 倍槓桿保護上限
                 if (qty * entry) > (current_wallet * MAX_LEVERAGE):
                     qty = (current_wallet * MAX_LEVERAGE) / entry
 
                 position = {
                     'side': sig_side, 'entry': entry, 'sl': sl,
-                    'tp': tp, 'be_target': be_target, 'is_be_moved': False, 'qty': qty
+                    'tp1': tp1, 'tp2': tp2, 'be_target': be_target,
+                    'tp1_hit': False, 'is_be_moved': False, 'qty': qty
                 }
 
     # 輸出報表
@@ -222,12 +251,12 @@ def run_gold_100x_backtest(days=365):
 
     report_text = (
         "```text\n"
-        "【XAU/USD 現貨黃金專屬 (100x槓桿 + 5%風控 + 1:5.0 RR)】\n"
+        "【XAU/USD 現貨黃金專屬 (10x槓桿 + 5%風控 + 階梯平倉版)】\n"
         f"回測週期: {period_title} ({start_date} ~ {end_date})\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USD\n"
         f"最終結餘: ${format_full_num(current_wallet, 2)} USD ({roi_pct:+.2f}%)\n"
         f"總交易次數: {total_trades} 次 | 策略勝率: {win_rate:.2f}%\n"
-        f"單筆風險: {RISK_PCT*100}% | 風報比: 1:5.0 (2.0R保本)\n"
+        f"規則: 2.0R保本 -> 2.5R平30% -> 5.0R平70% | 槓桿: 10x\n"
         "```"
     )
 
@@ -238,7 +267,7 @@ def run_gold_100x_backtest(days=365):
 
 if __name__ == '__main__':
     # 執行 1 個月 (30天) 回測
-    run_gold_100x_backtest(days=30)
+    run_gold_scaleout_backtest(days=30)
     time.sleep(2)
     # 執行 1 年 (365天) 回測
-    run_gold_100x_backtest(days=365)
+    run_gold_scaleout_backtest(days=365)
