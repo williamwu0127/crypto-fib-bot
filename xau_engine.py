@@ -1,8 +1,8 @@
 """
-XAU/USD (Gold) Pure Dedicated Quant Engine
-Strategy: 1D MA60 Macro Trend + 4H Donchian(20) Breakout + 1.5 ATR Dynamic SL
-Exit Logic: 2.0R Breakeven -> 5.0R High-RR Full Take Profit
-Risk: 5% per trade | 10x Max Leverage | Discord Push Notification
+XAU/USD Dedicated High-Frequency & High-RR Engine
+Strategy: 1D MA60 Macro Filter + 1H Donchian(10) Breakout + 1.5 ATR Dynamic SL
+Exit: 2.0R Breakeven -> 5.0R Full Take Profit
+Risk: 5% per trade | 10x Leverage | Hourly Scanning
 """
 
 import os
@@ -20,8 +20,8 @@ DISCORD_WEBHOOK_URL = os.getenv(
 )
 
 INITIAL_WALLET = 100.0
-RISK_PCT = 0.05        # 單筆固定承擔 5% 風險
-FEE_RATE = 0.0004      # 黃金現貨/期貨綜合點差與手續費 (萬分之四)
+RISK_PCT = 0.05        # 單筆固定 5% 風險
+FEE_RATE = 0.0004      # 黃金點差與手續費 (萬分之四)
 MAX_LEVERAGE = 10.0    # 10 倍實質槓桿保護上限
 
 def format_full_num(val, max_dec=4):
@@ -45,13 +45,13 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-# ==================== 2. 黃金數據抓取模組 ====================
+# ==================== 2. 數據抓取模組 ====================
 def fetch_gold_data(days=365):
     try:
         period_str = f"{days + 90}d" if days <= 600 else "2y"
         ticker = yf.Ticker("GC=F")
         
-        # 1. 抓取 1H 數據並合成為 4H K 線
+        # 1. 抓取 1H K 線 (執行級別)
         df_1h = ticker.history(period=period_str, interval="1h")
         if df_1h.empty:
             return None, None
@@ -60,58 +60,55 @@ def fetch_gold_data(days=365):
         date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
         df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
         df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
-        
-        df_1h.set_index('time', inplace=True)
-        df_4h = df_1h.resample('4h').agg({
-            'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
-        }).dropna().reset_index()
+        df_1h = df_1h.sort_values('time').reset_index(drop=True)
 
-        # 2. 抓取日線數據 (1D)
+        # 2. 抓取 1D 日線數據 (宏觀濾網)
         df_1d = ticker.history(period=period_str, interval="1d").reset_index()
         date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
         df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
         df_1d.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
+        df_1d = df_1d.sort_values('time').reset_index(drop=True)
 
-        return df_4h[['time', 'o', 'h', 'l', 'c', 'v']], df_1d[['time', 'o', 'h', 'l', 'c', 'v']]
+        return df_1h[['time', 'o', 'h', 'l', 'c', 'v']], df_1d[['time', 'o', 'h', 'l', 'c', 'v']]
     except Exception as e:
         print(f"[!] 黃金數據拉取失敗: {e}")
         return None, None
 
-# ==================== 3. 指標計算模組 ====================
-def prepare_indicators(df_4h, df_1d):
-    # 1. 日線 MA60 趨勢定錨
+# ==================== 3. 指標計算 (1H + Donchian 10 提頻) ====================
+def prepare_indicators(df_1h, df_1d):
+    # 1. 日線 MA60 大趨勢濾網
     df_1d['daily_ma60'] = df_1d['c'].rolling(60).mean()
     df_1d['daily_trend'] = np.where(df_1d['c'] > df_1d['daily_ma60'], 1, -1)
     
-    df_4h['daily_date'] = df_4h['time'].dt.floor('D')
+    df_1h['daily_date'] = df_1h['time'].dt.floor('D')
     df_1d['daily_date'] = df_1d['time'].dt.floor('D')
     daily_map = df_1d.drop_duplicates(subset=['daily_date']).set_index('daily_date')['daily_trend'].to_dict()
-    df_4h['macro_filter'] = df_4h['daily_date'].map(daily_map).ffill().fillna(0)
+    df_1h['macro_filter'] = df_1h['daily_date'].map(daily_map).ffill().fillna(0)
 
-    # 2. 4H 唐奇安通道 (前 20 期高低點)
-    df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
-    df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
+    # 2. 1H 唐奇安通道改為 10 週期 (提高觸發頻率)
+    df_1h['dc_high'] = df_1h['h'].shift(1).rolling(10).max()
+    df_1h['dc_low'] = df_1h['l'].shift(1).rolling(10).min()
 
-    # 3. 4H ATR(14) 計算
-    tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
-    df_4h['atr'] = tr.rolling(14).mean().fillna(df_4h['c'] * 0.015)
+    # 3. 1H ATR(14) 計算
+    tr = np.maximum(df_1h['h'] - df_1h['l'], np.maximum(abs(df_1h['h'] - df_1h['c'].shift(1)), abs(df_1h['l'] - df_1h['c'].shift(1))))
+    df_1h['atr'] = tr.rolling(14).mean().fillna(df_1h['c'] * 0.01)
 
-    return df_4h
+    return df_1h
 
 # ==================== 4. 撮合回測程序 ====================
-def run_gold_dedicated_backtest(days=365):
+def run_gold_hf_backtest(days=365):
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 65)
-    print(f">>> 啟動【XAU/USD 純黃金專屬 (日線定錨 + 4H Donchian + 1:5.0 RR)】{period_title}回測")
-    print(f">>> 初始資金: ${INITIAL_WALLET} USD | 風控: {RISK_PCT*100}% | 出場: 2.0R保本 -> 5.0R止盈")
+    print(f">>> 啟動【XAU/USD 現貨黃金 (1H Donchian 10 提頻 + 1:5.0 RR)】{period_title}回測")
+    print(f">>> 初始本金: ${INITIAL_WALLET} USD | 風控: {RISK_PCT*100}% | 出場: 2.0R保本 -> 5.0R止盈")
     print("=" * 65 + "\n")
 
-    df_4h, df_1d = fetch_gold_data(days=days)
-    if df_4h is None or len(df_4h) < 60:
-        print("[!] 無法獲取足夠的黃金走勢數據。")
+    df_1h, df_1d = fetch_gold_data(days=days)
+    if df_1h is None or len(df_1h) < 60:
+        print("[!] 無法獲取足夠數據。")
         return
 
-    df = prepare_indicators(df_4h, df_1d)
+    df = prepare_indicators(df_1h, df_1d)
     
     # 截取回測區間
     now_ms = int(time.time() * 1000)
@@ -119,7 +116,7 @@ def run_gold_dedicated_backtest(days=365):
     df = df[df['time'] >= start_filter_time].reset_index(drop=True)
 
     if df.empty:
-        print("[!] 該回測區間內無 K 線資料。")
+        print("[!] 該區間無 K 線資料。")
         return
 
     start_date = df.iloc[0]['time'].strftime("%Y-%m-%d")
@@ -132,7 +129,7 @@ def run_gold_dedicated_backtest(days=365):
     for idx in range(1, len(df)):
         bar = df.iloc[idx]
 
-        # 1. 持倉處理 (2.0R 移保本，5.0R 全額止盈)
+        # 1. 持倉處理 (2.0R 移保本，5.0R 止盈)
         if position is not None:
             side = position['side']
             entry = position['entry']
@@ -142,12 +139,10 @@ def run_gold_dedicated_backtest(days=365):
             is_be_moved = position['is_be_moved']
 
             if side == 'LONG':
-                # 達 2.0R 移動止損至開倉價保本
                 if not is_be_moved and bar['h'] >= be_target:
                     position['sl'] = entry
                     position['is_be_moved'] = True
 
-                # 觸發止損 / 保本損
                 if bar['l'] <= position['sl']:
                     exit_price = position['sl']
                     pnl = qty * (exit_price - entry) - (qty * (entry + exit_price) * FEE_RATE)
@@ -156,7 +151,6 @@ def run_gold_dedicated_backtest(days=365):
                     position = None
                     continue
 
-                # 觸發 5.0R 止盈
                 if bar['h'] >= tp:
                     pnl = qty * (tp - entry) - (qty * (entry + tp) * FEE_RATE)
                     current_wallet += pnl
@@ -184,13 +178,12 @@ def run_gold_dedicated_backtest(days=365):
                     position = None
                     continue
 
-        # 2. 開倉判定 (4H 收盤突破唐奇安 + 1.5 ATR 止損)
+        # 2. 開倉判定 (1H 收盤突破 Donchian 10 + 1.5 ATR 止損)
         if position is None and current_wallet > 5.0:
             macro_trend = bar['macro_filter']
             sig_side = None
             entry, sl, tp, be_target = 0.0, 0.0, 0.0, 0.0
 
-            # 多頭突破：日線多頭 + 突破 4H 唐奇安 20 期高點
             if macro_trend == 1 and bar['c'] > bar['dc_high']:
                 sig_side = 'LONG'
                 entry = bar['c']
@@ -199,7 +192,6 @@ def run_gold_dedicated_backtest(days=365):
                 be_target = entry + (risk_dist * 2.0)
                 tp = entry + (risk_dist * 5.0)
 
-            # 空頭跌破：日線空頭 + 跌破 4H 唐奇安 20 期低點
             elif macro_trend == -1 and bar['c'] < bar['dc_low']:
                 sig_side = 'SHORT'
                 entry = bar['c']
@@ -210,7 +202,6 @@ def run_gold_dedicated_backtest(days=365):
 
             if sig_side and risk_dist > 0:
                 qty = (current_wallet * RISK_PCT) / risk_dist
-                # 槓桿上限限制
                 if (qty * entry) > (current_wallet * MAX_LEVERAGE):
                     qty = (current_wallet * MAX_LEVERAGE) / entry
 
@@ -228,7 +219,7 @@ def run_gold_dedicated_backtest(days=365):
 
     report_text = (
         "```text\n"
-        "【XAU/USD 現貨黃金專屬 (日線定錨 + Donchian + 1:5.0 RR高賠率版)】\n"
+        "【XAU/USD 純黃金專屬 (1H Donchian 10 提頻 + 1:5.0 RR版)】\n"
         f"回測週期: {period_title} ({start_date} ~ {end_date})\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USD\n"
         f"最終結餘: ${format_full_num(current_wallet, 2)} USD ({roi_pct:+.2f}%)\n"
@@ -243,8 +234,6 @@ def run_gold_dedicated_backtest(days=365):
     print("完成！\n")
 
 if __name__ == '__main__':
-    # 執行 1 個月 (30 天) 回測
-    run_gold_dedicated_backtest(days=30)
+    run_gold_hf_backtest(days=30)
     time.sleep(2)
-    # 執行 1 年 (365 天) 回測
-    run_gold_dedicated_backtest(days=365)
+    run_gold_hf_backtest(days=365)
