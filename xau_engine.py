@@ -1,10 +1,8 @@
 """
-XAU/USD Dual-Track Multi-Pool Comparison Engine
-- Macro 4H Track: 10% Risk | 10x Leverage | 2.0R BE -> 5.0R TP (Dominant)
-- Micro 1H Track:  4% Risk |  8x Leverage | 2.0R BE -> 4.0R TP (SNR Pinbar Retest)
-Comparison Modes:
-1. 'ISOLATED': $100 per track (Total $200) - Risk Isolated
-2. 'COMBINED': $100 Shared Dynamic Compounding Pool
+XAU/USD 4H Macro Trend Breakout - Leverage Sweep Engine
+- Strategy: 1D MA60 + 4H Donchian(20) Breakout | 2.0R BE -> 5.0R TP
+- Leverages Tested: 3x, 5x, 10x, 50x, 100x
+- Risk per Trade: 5% (Position sized by Risk / Distance, capped by Leverage)
 """
 
 import os
@@ -20,10 +18,12 @@ DISCORD_WEBHOOK_URL = os.getenv(
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
-INITIAL_PER_TRACK = 100.0
+INITIAL_WALLET = 100.0
+RISK_PCT = 0.05
 FEE_RATE = 0.0004
+LEVERAGE_LIST = [3.0, 5.0, 10.0, 50.0, 100.0]
 
-def format_full_num(val, max_dec=4):
+def format_full_num(val, max_dec=2):
     try:
         f = float(val)
         return ("{:.%df}" % max_dec).format(f).rstrip('0').rstrip('.')
@@ -44,7 +44,7 @@ def fetch_gold_data(days=365):
 
         df_1h = ticker.history(period=period_str, interval="1h").reset_index()
         if df_1h.empty:
-            return None, None
+            return None
 
         date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
         df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
@@ -63,290 +63,168 @@ def fetch_gold_data(days=365):
         df_1d['macro_trend'] = np.where(df_1d['c'] > df_1d['ma60'], 1, -1)
 
         df_4h['d_date'] = df_4h['time'].dt.floor('D')
-        df_1h['d_date'] = df_1h['time'].dt.floor('D')
         df_1d['d_date'] = df_1d['time'].dt.floor('D')
         d_map = df_1d.drop_duplicates('d_date').set_index('d_date')['macro_trend'].to_dict()
         df_4h['macro_filter'] = df_4h['d_date'].map(d_map).ffill().fillna(0)
-        df_1h['macro_filter'] = df_1h['d_date'].map(d_map).ffill().fillna(0)
 
-        # 4H 指標
         df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
         df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
         tr_4h = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
         df_4h['atr'] = tr_4h.rolling(14).mean().fillna(df_4h['c'] * 0.015)
 
-        # 1H 指標
-        df_1h['dc_high'] = df_1h['h'].shift(1).rolling(20).max()
-        df_1h['dc_low'] = df_1h['l'].shift(1).rolling(20).min()
-        tr_1h = np.maximum(df_1h['h'] - df_1h['l'], np.maximum(abs(df_1h['h'] - df_1h['c'].shift(1)), abs(df_1h['l'] - df_1h['c'].shift(1))))
-        df_1h['atr'] = tr_1h.rolling(14).mean().fillna(df_1h['c'] * 0.01)
-
-        return df_4h, df_1h
+        return df_4h
     except Exception as e:
         print("[!] 數據抓取失敗: " + str(e))
-        return None, None
+        return None
 
-def run_backtest_pool(days=365, mode='COMBINED'):
+def simulate_single_leverage(df, max_lev):
+    wallet = float(INITIAL_WALLET)
+    pos = None
+    trades = []
+    is_liquidated = False
+
+    for i in range(1, len(df)):
+        if wallet <= 1.0:
+            is_liquidated = True
+            break
+
+        bar = df.iloc[i]
+
+        # 1. 撮合平倉
+        if pos is not None:
+            side, entry, sl, tp, be_tgt, qty, be_done = (
+                pos['side'], pos['entry'], pos['sl'], pos['tp'],
+                pos['be_target'], pos['qty'], pos['is_be_moved']
+            )
+
+            # 強平線判定 (本金虧損達 90% 即強制清算)
+            if side == 'LONG':
+                liq_price = entry - (wallet * 0.90 / qty)
+                if bar['l'] <= liq_price:
+                    wallet = 0.0
+                    is_liquidated = True
+                    trades.append(-INITIAL_WALLET)
+                    break
+
+                if not be_done and bar['h'] >= be_tgt:
+                    pos['sl'] = entry
+                    pos['is_be_moved'] = True
+
+                if bar['l'] <= pos['sl']:
+                    pnl = qty * (pos['sl'] - entry) - qty * (entry + pos['sl']) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
+                    continue
+
+                if bar['h'] >= tp:
+                    pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
+                    continue
+
+            elif side == 'SHORT':
+                liq_price = entry + (wallet * 0.90 / qty)
+                if bar['h'] >= liq_price:
+                    wallet = 0.0
+                    is_liquidated = True
+                    trades.append(-INITIAL_WALLET)
+                    break
+
+                if not be_done and bar['l'] <= be_tgt:
+                    pos['sl'] = entry
+                    pos['is_be_moved'] = True
+
+                if bar['h'] >= pos['sl']:
+                    pnl = qty * (entry - pos['sl']) - qty * (entry + pos['sl']) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
+                    continue
+
+                if bar['l'] <= tp:
+                    pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
+                    wallet += pnl
+                    trades.append(pnl)
+                    pos = None
+                    continue
+
+        # 2. 開倉信號
+        if pos is None and wallet > 5.0:
+            trend = bar['macro_filter']
+            atr_val = bar['atr']
+            sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
+
+            if trend == 1 and bar['c'] > bar['dc_high']:
+                sig, entry = 'LONG', bar['c']
+                sl = entry - (atr_val * 1.5)
+                risk_dist = entry - sl
+                be_tgt = entry + (risk_dist * 2.0)
+                tp = entry + (risk_dist * 5.0)
+
+            elif trend == -1 and bar['c'] < bar['dc_low']:
+                sig, entry = 'SHORT', bar['c']
+                sl = entry + (atr_val * 1.5)
+                risk_dist = sl - entry
+                be_tgt = entry - (risk_dist * 2.0)
+                tp = entry - (risk_dist * 5.0)
+
+            if sig and risk_dist > 0:
+                # 以 5% 風險定部位，並受最大槓桿約束
+                qty = (wallet * RISK_PCT) / risk_dist
+                if (qty * entry) > (wallet * max_lev):
+                    qty = (wallet * max_lev) / entry
+
+                pos = {
+                    'side': sig, 'entry': entry, 'sl': sl,
+                    'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
+                }
+
+    total_trades = len(trades)
+    win_trades = sum(1 for p in trades if p > 0)
+    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
+    roi_pct = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
+
+    return wallet, roi_pct, total_trades, win_rate, is_liquidated
+
+def run_leverage_sweep(days=365):
     period_title = "1 年期" if days >= 365 else str(days) + " 天期"
-    df_4h, df_1h = fetch_gold_data(days=days)
-    if df_4h is None or df_1h is None:
+    df_4h = fetch_gold_data(days=days)
+    if df_4h is None:
         return
 
     now_ms = int(time.time() * 1000)
     start_filter_time = pd.to_datetime(now_ms - (days * 86400000), unit='ms')
-
-    df_4h = df_4h[df_4h['time'] >= start_filter_time].reset_index(drop=True)
-    df_1h = df_1h[df_1h['time'] >= start_filter_time].reset_index(drop=True)
-    if df_4h.empty or df_1h.empty:
+    df = df_4h[df_4h['time'] >= start_filter_time].reset_index(drop=True)
+    if df.empty:
         return
 
-    start_date = df_1h.iloc[0]['time'].strftime("%Y-%m-%d")
-    end_date = df_1h.iloc[-1]['time'].strftime("%Y-%m-%d")
+    start_date = df.iloc[0]['time'].strftime("%Y-%m-%d")
+    end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
 
-    events = []
-    for idx in range(1, len(df_4h)):
-        events.append((df_4h.iloc[idx]['time'], 'TRACK_4H', idx))
-    for idx in range(1, len(df_1h)):
-        events.append((df_1h.iloc[idx]['time'], 'TRACK_1H', idx))
-    events.sort(key=lambda x: x[0])
+    result_lines = []
+    for lev in LEVERAGE_LIST:
+        wallet, roi_pct, trades, wr, is_liq = simulate_single_leverage(df.copy(), lev)
+        lev_str = (str(int(lev)) + "x").rjust(4)
+        if is_liq or wallet <= 1.0:
+            status_str = "【爆倉破產 LIQUIDATED】"
+            res_str = "結餘: $0.00 (-100.00%) | 交易: " + str(trades).rjust(2) + "次"
+        else:
+            status_str = "結餘: $" + format_full_num(wallet, 2).rjust(8) + " USD (" + ("%+0.2f" % roi_pct).rjust(8) + "%)"
+            res_str = status_str + " | 交易: " + str(trades).rjust(2) + "次 | 勝率: " + ("%5.2f" % wr) + "%"
 
-    if mode == 'COMBINED':
-        total_wallet = float(INITIAL_PER_TRACK)
-        wallets = {}
-    else:
-        total_wallet = 0.0
-        wallets = {'TRACK_4H': float(INITIAL_PER_TRACK), 'TRACK_1H': float(INITIAL_PER_TRACK)}
-
-    pos_4h = None
-    pos_1h = None
-    recent_1h_high = None
-    recent_1h_low = None
-
-    stats = {
-        'TRACK_4H': {'trades': 0, 'wins': 0, 'pnl': 0.0},
-        'TRACK_1H': {'trades': 0, 'wins': 0, 'pnl': 0.0}
-    }
-
-    for event_time, track_type, idx in events:
-        cur_w_4h = total_wallet if mode == 'COMBINED' else wallets['TRACK_4H']
-        cur_w_1h = total_wallet if mode == 'COMBINED' else wallets['TRACK_1H']
-
-        # ---------------- 4H 長線模組 (10% 風險 / 10x 槓桿) ----------------
-        if track_type == 'TRACK_4H':
-            bar = df_4h.iloc[idx]
-            if pos_4h is not None:
-                side, entry, sl, tp, be_tgt, qty, be_done = (
-                    pos_4h['side'], pos_4h['entry'], pos_4h['sl'], pos_4h['tp'],
-                    pos_4h['be_target'], pos_4h['qty'], pos_4h['is_be_moved']
-                )
-                if side == 'LONG':
-                    if not be_done and bar['h'] >= be_tgt:
-                        pos_4h['sl'] = entry
-                        pos_4h['is_be_moved'] = True
-                    if bar['l'] <= pos_4h['sl']:
-                        pnl = qty * (pos_4h['sl'] - entry) - qty * (entry + pos_4h['sl']) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_4H'] += pnl
-                        stats['TRACK_4H']['trades'] += 1
-                        stats['TRACK_4H']['pnl'] += pnl
-                        if pnl > 0: stats['TRACK_4H']['wins'] += 1
-                        pos_4h = None
-                    elif bar['h'] >= tp:
-                        pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_4H'] += pnl
-                        stats['TRACK_4H']['trades'] += 1
-                        stats['TRACK_4H']['wins'] += 1
-                        stats['TRACK_4H']['pnl'] += pnl
-                        pos_4h = None
-                elif side == 'SHORT':
-                    if not be_done and bar['l'] <= be_tgt:
-                        pos_4h['sl'] = entry
-                        pos_4h['is_be_moved'] = True
-                    if bar['h'] >= pos_4h['sl']:
-                        pnl = qty * (entry - pos_4h['sl']) - qty * (entry + pos_4h['sl']) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_4H'] += pnl
-                        stats['TRACK_4H']['trades'] += 1
-                        stats['TRACK_4H']['pnl'] += pnl
-                        if pnl > 0: stats['TRACK_4H']['wins'] += 1
-                        pos_4h = None
-                    elif bar['l'] <= tp:
-                        pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_4H'] += pnl
-                        stats['TRACK_4H']['trades'] += 1
-                        stats['TRACK_4H']['wins'] += 1
-                        stats['TRACK_4H']['pnl'] += pnl
-                        pos_4h = None
-
-            cur_w_4h = total_wallet if mode == 'COMBINED' else wallets['TRACK_4H']
-            if pos_4h is None and cur_w_4h > 5.0:
-                trend = bar['macro_filter']
-                atr_val = bar['atr']
-                sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
-
-                if trend == 1 and bar['c'] > bar['dc_high']:
-                    sig, entry = 'LONG', bar['c']
-                    sl = entry - (atr_val * 1.5)
-                    risk_dist = entry - sl
-                    be_tgt = entry + (risk_dist * 2.0)
-                    tp = entry + (risk_dist * 5.0)
-                elif trend == -1 and bar['c'] < bar['dc_low']:
-                    sig, entry = 'SHORT', bar['c']
-                    sl = entry + (atr_val * 1.5)
-                    risk_dist = sl - entry
-                    be_tgt = entry - (risk_dist * 2.0)
-                    tp = entry - (risk_dist * 5.0)
-
-                if sig and risk_dist > 0:
-                    qty = (cur_w_4h * 0.10) / risk_dist
-                    if (qty * entry) > (cur_w_4h * 10.0):
-                        qty = (cur_w_4h * 10.0) / entry
-                    pos_4h = {
-                        'side': sig, 'entry': entry, 'sl': sl,
-                        'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
-                    }
-
-        # ---------------- 1H 短線模組 (4% 風險 / 8x 槓桿) ----------------
-        elif track_type == 'TRACK_1H':
-            bar = df_1h.iloc[idx]
-            prev_bar = df_1h.iloc[idx - 1]
-
-            if pos_1h is not None:
-                side, entry, sl, tp, be_tgt, qty, be_done = (
-                    pos_1h['side'], pos_1h['entry'], pos_1h['sl'], pos_1h['tp'],
-                    pos_1h['be_target'], pos_1h['qty'], pos_1h['is_be_moved']
-                )
-                if side == 'LONG':
-                    if not be_done and bar['h'] >= be_tgt:
-                        pos_1h['sl'] = entry
-                        pos_1h['is_be_moved'] = True
-                    if bar['l'] <= pos_1h['sl']:
-                        pnl = qty * (pos_1h['sl'] - entry) - qty * (entry + pos_1h['sl']) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_1H'] += pnl
-                        stats['TRACK_1H']['trades'] += 1
-                        stats['TRACK_1H']['pnl'] += pnl
-                        if pnl > 0: stats['TRACK_1H']['wins'] += 1
-                        pos_1h = None
-                    elif bar['h'] >= tp:
-                        pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_1H'] += pnl
-                        stats['TRACK_1H']['trades'] += 1
-                        stats['TRACK_1H']['wins'] += 1
-                        stats['TRACK_1H']['pnl'] += pnl
-                        pos_1h = None
-                elif side == 'SHORT':
-                    if not be_done and bar['l'] <= be_tgt:
-                        pos_1h['sl'] = entry
-                        pos_1h['is_be_moved'] = True
-                    if bar['h'] >= pos_1h['sl']:
-                        pnl = qty * (entry - pos_1h['sl']) - qty * (entry + pos_1h['sl']) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_1H'] += pnl
-                        stats['TRACK_1H']['trades'] += 1
-                        stats['TRACK_1H']['pnl'] += pnl
-                        if pnl > 0: stats['TRACK_1H']['wins'] += 1
-                        pos_1h = None
-                    elif bar['l'] <= tp:
-                        pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
-                        if mode == 'COMBINED': total_wallet += pnl
-                        else: wallets['TRACK_1H'] += pnl
-                        stats['TRACK_1H']['trades'] += 1
-                        stats['TRACK_1H']['wins'] += 1
-                        stats['TRACK_1H']['pnl'] += pnl
-                        pos_1h = None
-
-            if prev_bar['c'] > prev_bar['dc_high']:
-                recent_1h_high = prev_bar['dc_high']
-            if prev_bar['c'] < prev_bar['dc_low']:
-                recent_1h_low = prev_bar['dc_low']
-
-            hour_utc = bar['time'].hour
-            is_active_session = 6 <= hour_utc <= 20
-
-            cur_w_1h = total_wallet if mode == 'COMBINED' else wallets['TRACK_1H']
-            if pos_1h is None and cur_w_1h > 5.0 and is_active_session:
-                trend = bar['macro_filter']
-                atr_val = bar['atr']
-                body = abs(bar['c'] - bar['o'])
-                lower_shadow = min(bar['c'], bar['o']) - bar['l']
-                upper_shadow = bar['h'] - max(bar['c'], bar['o'])
-                sig, entry, sl, tp, be_tgt = None, 0.0, 0.0, 0.0, 0.0
-
-                if trend == 1 and (pos_4h is None or pos_4h['side'] == 'LONG') and recent_1h_high is not None:
-                    retest_top = recent_1h_high + (atr_val * 0.6)
-                    is_bull_pinbar = (lower_shadow >= 1.2 * body) and (bar['c'] >= (bar['h'] + bar['l']) / 2)
-                    if (bar['l'] <= retest_top) and (bar['c'] > recent_1h_high) and is_bull_pinbar:
-                        sig, entry = 'LONG', bar['c']
-                        sl = bar['l'] - (atr_val * 0.9)
-                        risk_dist = entry - sl
-                        if risk_dist > (atr_val * 0.35):
-                            be_tgt = entry + (risk_dist * 2.0)
-                            tp = entry + (risk_dist * 4.0)
-                            recent_1h_high = None
-
-                elif trend == -1 and (pos_4h is None or pos_4h['side'] == 'SHORT') and recent_1h_low is not None:
-                    retest_bot = recent_1h_low - (atr_val * 0.6)
-                    is_bear_pinbar = (upper_shadow >= 1.2 * body) and (bar['c'] <= (bar['h'] + bar['l']) / 2)
-                    if (bar['h'] >= retest_bot) and (bar['c'] < recent_1h_low) and is_bear_pinbar:
-                        sig, entry = 'SHORT', bar['c']
-                        sl = bar['h'] + (atr_val * 0.9)
-                        risk_dist = sl - entry
-                        if risk_dist > (atr_val * 0.35):
-                            be_tgt = entry - (risk_dist * 2.0)
-                            tp = entry - (risk_dist * 4.0)
-                            recent_1h_low = None
-
-                if sig and risk_dist > 0:
-                    qty = (cur_w_1h * 0.04) / risk_dist
-                    if (qty * entry) > (cur_w_1h * 8.0):
-                        qty = (cur_w_1h * 8.0) / entry
-                    pos_1h = {
-                        'side': sig, 'entry': entry, 'sl': sl,
-                        'tp': tp, 'be_target': be_tgt, 'qty': qty, 'is_be_moved': False
-                    }
-
-    # 輸出報表
-    total_trades = stats['TRACK_4H']['trades'] + stats['TRACK_1H']['trades']
-    total_wins = stats['TRACK_4H']['wins'] + stats['TRACK_1H']['wins']
-    overall_wr = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
-
-    if mode == 'COMBINED':
-        total_roi = ((total_wallet - INITIAL_PER_TRACK) / INITIAL_PER_TRACK) * 100
-        mode_title = "【雙軌合併共享複利池 (長線 10% / 短線 4%)】"
-        init_str = "$" + format_full_num(INITIAL_PER_TRACK) + " USD"
-        final_str = "$" + format_full_num(total_wallet, 2) + " USD (" + ("%+0.2f" % total_roi) + "%)"
-    else:
-        tot_final = wallets['TRACK_4H'] + wallets['TRACK_1H']
-        total_roi = ((tot_final - 200.0) / 200.0) * 100
-        mode_title = "【雙軌獨立分池帳戶 (各 $100 完全隔離)】"
-        init_str = "$200.00 USD (長線 $100 / 短線 $100)"
-        w_4h_str = "%.2f" % wallets['TRACK_4H']
-        w_1h_str = "%.2f" % wallets['TRACK_1H']
-        final_str = "$" + format_full_num(tot_final, 2) + " USD (" + ("%+0.2f" % total_roi) + "%)\n(各軌結餘: 長線4H=$" + w_4h_str + " \vert{} 短線1H=$" + w_1h_str + ")"
-
-    track_lines = []
-    for t_key, name in [('TRACK_4H', '4H 長線波段 (10%風險 / 10x槓桿 / 5.0R)'),
-                        ('TRACK_1H', '1H 歐美短線 ( 4%風險 /  8x槓桿 / 4.0R全平)')]:
-        st = stats[t_key]
-        c, w, pnl = st['trades'], st['wins'], st['pnl']
-        wr = (w / c * 100) if c > 0 else 0.0
-        pnl_str = "%+0.2f" % pnl
-        wr_str = "%5.2f" % wr
-        track_lines.append("• " + name + "\n  └ 交易: " + str(c).rjust(2) + "次 | 勝率: " + wr_str + "% | 收益貢獻: " + pnl_str)
+        result_lines.append("• 槓桿 " + lev_str + " │ " + res_str)
 
     report_text = (
         "```text\n"
-        + "判定邏輯: " + mode_title + "\n"
+        + "【XAU/USD 黃金 4H 長線波段 - 多槓桿倍率壓力回測】\n"
+        + "策略邏輯: 1D MA60 + 4H 唐奇安(20) 突破 (2.0R保本 / 5.0R止盈)\n"
         + "回測週期: " + period_title + " (" + str(start_date) + " ~ " + str(end_date) + ")\n"
-        + "初始資金: " + init_str + "\n"
-        + "最終結餘: " + final_str + "\n"
-        + "總交易次數: " + str(total_trades) + " 次 | 綜合勝率: " + ("%.2f" % overall_wr) + "%\n"
-        + "----------------------------------------------------\n"
-        + "\n".join(track_lines) + "\n"
+        + "初始本金: $" + format_full_num(INITIAL_WALLET) + " USD (每種槓桿獨立起始)\n"
+        + "單筆風控: 固定 5% 帳戶風險 (受槓桿上限約束)\n"
+        + "------------------------------------------------------------\n"
+        + "\n".join(result_lines) + "\n"
         + "```"
     )
 
@@ -354,10 +232,6 @@ def run_backtest_pool(days=365, mode='COMBINED'):
     send_discord(report_text)
 
 if __name__ == '__main__':
-    run_backtest_pool(days=30, mode='ISOLATED')
+    run_leverage_sweep(days=30)
     time.sleep(2)
-    run_backtest_pool(days=365, mode='ISOLATED')
-    time.sleep(2)
-    run_backtest_pool(days=30, mode='COMBINED')
-    time.sleep(2)
-    run_backtest_pool(days=365, mode='COMBINED')
+    run_leverage_sweep(days=365)
