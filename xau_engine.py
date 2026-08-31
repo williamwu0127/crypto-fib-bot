@@ -1,8 +1,8 @@
 """
-XAU/USD Dual-Track Production Engine (Optimized High-Performance Edition)
-Track 1 (Swing 4H Long-term) : 1D MA60 + 4H Donchian(20) | 2.0R BE -> 5.0R TP (Classic 400%+ Version)
-Track 2 (Fast 1H Short-term) : 1D MA60 + 1H Donchian(20) | 1.5R BE -> 3.0R TP (Fixed Retest Breathing Space)
-Capital: $100 Isolated per Track | 5% Dynamic Risk | 10x Max Leverage
+XAU/USD Dual-Track Dedicated Backtest Engine
+Track 1 (4H Swing Track) : 1D MA60 + 4H Donchian(20) | 2.0R Breakeven -> 5.0R Take Profit ($100 USD)
+Track 2 (1H Fast Track)  : 1D MA60 + 1H Donchian(20) | 1.5R Breakeven -> 3.0R Take Profit ($100 USD)
+Risk: 5% Dynamic Risk per Track | 10x Max Real Leverage | Isolated Wallets
 """
 
 import os
@@ -13,32 +13,32 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime
 
-# ==================== 1. Webhook 與交易配置 ====================
+# ==================== 1. Webhook 與風控配置 ====================
 DISCORD_WEBHOOK_URL = os.getenv(
     "DISCORD_WEBHOOK_URL",
     "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
 )
 
-INITIAL_WALLET = 100.0
+INITIAL_WALLET_PER_TRACK = 100.0
 RISK_PCT = 0.05        # 單筆固定承擔 5% 風險
-FEE_RATE = 0.0004      # 黃金現貨手續費與點差 (萬分之四)
+FEE_RATE = 0.0004      # 黃金現貨綜合點差與手續費 (萬分之四)
 MAX_LEVERAGE = 10.0    # 10 倍實質槓桿保護上限
 
-# 雙軌配置
-TRACKS = {
+# 雙軌參數配置
+TRACK_CONFIGS = {
     'TRACK_4H': {
         'name': '4H 長線大波段軌',
         'itv': '4h',
-        'dc_window': 20,
-        'be_r': 2.0,   # 換回原始最佳配置: 2.0R 保本
-        'tp_r': 5.0    # 換回原始最佳配置: 5.0R 止盈
+        'dc_w': 20,
+        'be_r': 2.0,   # 2.0R 移保本
+        'tp_r': 5.0    # 5.0R 止盈 (高賠率版)
     },
     'TRACK_1H': {
         'name': '1H 短線高頻優化軌',
         'itv': '1h',
-        'dc_window': 20,
-        'be_r': 1.5,   # 放寬至 1.5R，給予回踩呼吸空間
-        'tp_r': 3.0    # 3.0R 止盈，確保高賠率覆蓋率
+        'dc_w': 20,
+        'be_r': 1.5,   # 1.5R 移保本
+        'tp_r': 3.0    # 3.0R 止盈 (高勝率版)
     }
 }
 
@@ -68,25 +68,25 @@ def fetch_gold_data(days=365):
     try:
         period_str = f"{days + 90}d" if days <= 600 else "2y"
         ticker = yf.Ticker("GC=F")
-        
+
         # 1. 抓取 1H K 線
         df_1h = ticker.history(period=period_str, interval="1h")
         if df_1h.empty:
             return None, None, None
-            
+
         df_1h = df_1h.reset_index()
         date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
         df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
         df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
         df_1h = df_1h.sort_values('time').reset_index(drop=True)
-        
+
         # 2. 合成 4H K 線
         df_1h_indexed = df_1h.set_index('time')
         df_4h = df_1h_indexed.resample('4h').agg({
             'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last', 'v': 'sum'
         }).dropna().reset_index()
 
-        # 3. 抓取日線數據 (1D 宏觀濾網)
+        # 3. 抓取日線 (1D 宏觀趨勢濾網)
         df_1d = ticker.history(period=period_str, interval="1d").reset_index()
         date_col_d = 'Datetime' if 'Datetime' in df_1d.columns else 'Date'
         df_1d['time'] = pd.to_datetime(df_1d[date_col_d]).dt.tz_localize(None)
@@ -103,7 +103,7 @@ def prepare_indicators(df_trade, df_1d, dc_window=20):
     # 1. 日線 MA60 大趨勢濾網
     df_1d['daily_ma60'] = df_1d['c'].rolling(60).mean()
     df_1d['daily_trend'] = np.where(df_1d['c'] > df_1d['daily_ma60'], 1, -1)
-    
+
     df_trade['daily_date'] = df_trade['time'].dt.floor('D')
     df_1d['daily_date'] = df_1d['time'].dt.floor('D')
     daily_map = df_1d.drop_duplicates(subset=['daily_date']).set_index('daily_date')['daily_trend'].to_dict()
@@ -131,7 +131,7 @@ def run_single_track(df, cfg, days=365):
     start_date = df.iloc[0]['time'].strftime("%Y-%m-%d")
     end_date = df.iloc[-1]['time'].strftime("%Y-%m-%d")
 
-    current_wallet = float(INITIAL_WALLET)
+    current_wallet = float(INITIAL_WALLET_PER_TRACK)
     position = None
     completed_trades = []
 
@@ -187,7 +187,7 @@ def run_single_track(df, cfg, days=365):
                     position = None
                     continue
 
-        # 2. 開倉判定
+        # 2. 開倉判定 (4H 或 1H 收盤突破 Donchian 20 + 1.5 ATR 止損)
         if position is None and current_wallet > 5.0:
             macro_trend = bar['macro_filter']
             sig_side = None
@@ -223,7 +223,7 @@ def run_single_track(df, cfg, days=365):
     total_trades = len(df_res)
     win_trades = len(df_res[df_res['pnl'] > 0]) if total_trades > 0 else 0
     win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
-    roi_pct = ((current_wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
+    roi_pct = ((current_wallet - INITIAL_WALLET_PER_TRACK) / INITIAL_WALLET_PER_TRACK) * 100
 
     return {
         'start_date': start_date, 'end_date': end_date,
@@ -231,30 +231,30 @@ def run_single_track(df, cfg, days=365):
         'total_trades': total_trades, 'win_rate': win_rate
     }
 
-# ==================== 5. 雙軌回測與推播 ====================
-def run_dual_track_system(days=365):
+# ==================== 5. 雙軌回測與推播主程序 ====================
+def run_gold_dual_track(days=365):
     period_title = "1 年期" if days >= 365 else f"{days} 天期"
     print("=" * 65)
-    print(f">>> 啟動【XAU/USD 現貨黃金 雙軌並行量化系統 (升級版)】{period_title}回測")
+    print(f">>> 啟動【XAU/USD 現貨黃金 - 純黃金雙軌並行系統】{period_title}回測")
     print("=" * 65 + "\n")
 
     df_1h, df_4h, df_1d = fetch_gold_data(days=days)
     if df_1h is None or df_4h is None or df_1d is None:
-        print("[!] 數據抓取異常。")
+        print("[!] 黃金走勢數據拉取異常。")
         return
 
-    # 指標運算
-    df_4h_prep = prepare_indicators(df_4h.copy(), df_1d.copy(), dc_window=TRACKS['TRACK_4H']['dc_window'])
-    df_1h_prep = prepare_indicators(df_1h.copy(), df_1d.copy(), dc_window=TRACKS['TRACK_1H']['dc_window'])
+    # 分別準備 4H 與 1H 指標
+    df_4h_prep = prepare_indicators(df_4h.copy(), df_1d.copy(), dc_window=TRACK_CONFIGS['TRACK_4H']['dc_w'])
+    df_1h_prep = prepare_indicators(df_1h.copy(), df_1d.copy(), dc_window=TRACK_CONFIGS['TRACK_1H']['dc_w'])
 
-    res_4h = run_single_track(df_4h_prep, TRACKS['TRACK_4H'], days=days)
-    res_1h = run_single_track(df_1h_prep, TRACKS['TRACK_1H'], days=days)
+    res_4h = run_single_track(df_4h_prep, TRACK_CONFIGS['TRACK_4H'], days=days)
+    res_1h = run_single_track(df_1h_prep, TRACK_CONFIGS['TRACK_1H'], days=days)
 
     if not res_4h or not res_1h:
-        print("[!] 回測執行失敗。")
+        print("[!] 回測失敗。")
         return
 
-    combined_start = INITIAL_WALLET * 2
+    combined_start = INITIAL_WALLET_PER_TRACK * 2
     combined_end = res_4h['final_wallet'] + res_1h['final_wallet']
     combined_roi = ((combined_end - combined_start) / combined_start) * 100
     combined_trades = res_4h['total_trades'] + res_1h['total_trades']
@@ -283,6 +283,7 @@ def run_dual_track_system(days=365):
     print("完成！\n")
 
 if __name__ == '__main__':
-    run_dual_track_system(days=30)
+    # 執行 30 天期與 365 天期回測
+    run_gold_dual_track(days=30)
     time.sleep(2)
-    run_dual_track_system(days=365)
+    run_gold_dual_track(days=365)
