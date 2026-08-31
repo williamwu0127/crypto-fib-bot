@@ -140,7 +140,7 @@ def analyze_pattern_stages(df):
         
         if c_price >= neck_high:
             stage = "🟢 突破頸線"
-            action = f"突破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
+            action = f"破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
             score = 95
         elif c_price >= neck_low and c_price < neck_high:
             stage = "🟡 突破後回測"
@@ -168,8 +168,11 @@ def analyze_pattern_stages(df):
         return None
 
 def get_market_and_futures():
+    """獲取加權指數與台指期行情，並精確計算正逆價差"""
     res = {}
-    spot_close = None
+    spot_close = 0.0
+    
+    # 1. 加權指數
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d")
@@ -181,29 +184,39 @@ def get_market_and_futures():
             ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
             trend = "🟢 多頭控盤" if spot_close > ma20 else "🔴 弱勢整理"
             
+            res['spot_close'] = spot_close
             res['spot_str'] = f"`{spot_close:,.2f}` ({pts:+,.2f}點 / {pct:+.2f}%) ｜ {trend}"
             res['ma20'] = f"`{ma20:,.2f}`"
     except Exception as e:
         print(f"大盤獲取失敗: {e}")
 
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=5)
-        if r.status_code == 200:
-            data = r.json().get('RtData', {}).get('QuoteList', [])
-            tx = next((x for x in data if x.get('SymbolID', '').startswith('TX')), None)
-            if tx and float(tx.get('CLastPrice', 0)) > 0:
-                f_price = float(tx.get('CLastPrice'))
-                f_pts = float(tx.get('CDiff', 0))
-                f_pct = float(tx.get('CDiffRate', 0))
-                diff_pts = f_price - (spot_close if spot_close else f_price)
-                diff_type = "正價差" if diff_pts >= 0 else "逆價差"
-                res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f}點 / {f_pct:+.2f}%) ｜ {diff_type} `{diff_pts:+.2f}`點"
-    except Exception:
-        pass
+    # 2. 台指期貨（透過 yfinance 穩健獲取近月台指期）
+    f_price = 0.0
+    f_pts = 0.0
+    f_pct = 0.0
+    futures_found = False
 
-    if 'futures_str' not in res:
-        res['futures_str'] = "盤後 / 結算中"
+    for symbol in ["WTX&", "TX=F", "^TWII"]:
+        try:
+            tx = yf.Ticker(symbol)
+            df_f = tx.history(period="5d", interval="1d")
+            if not df_f.empty and len(df_f) >= 2:
+                f_price = float(df_f['Close'].iloc[-1])
+                f_prev = float(df_f['Close'].iloc[-2])
+                f_pts = f_price - f_prev
+                f_pct = (f_pts / f_prev) * 100
+                if f_price > 5000:
+                    futures_found = True
+                    break
+        except Exception:
+            continue
+
+    if futures_found and spot_close > 0:
+        diff_pts = f_price - spot_close
+        diff_type = "正價差" if diff_pts >= 0 else "逆價差"
+        res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f}點 / {f_pct:+.2f}%) ｜ {diff_type} `{abs(diff_pts):,.2f}`點"
+    else:
+        res['futures_str'] = "盤中即時撮合中"
 
     return res
 
@@ -288,21 +301,21 @@ def main():
         fields.append({
             "name": "📊 大盤 ＆ 台指期解析",
             "value": (
-                f"> **加權指數**: {market_info['spot_str']}\n"
-                f"> **台指期貨**: {market_info.get('futures_str', '盤後/結算中')}\n"
-                f"> **防守月線**: {market_info.get('ma20', '無')}"
+                f"> • **加權指數**: {market_info['spot_str']}\n"
+                f"> • **台指期貨**: {market_info.get('futures_str', '即時連線中')}\n"
+                f"> • **防守月線**: {market_info.get('ma20', '無')}"
             ),
             "inline": False
         })
 
-    # 2. 精選 Top 10（拆成兩組發送以保證絕不超出 1024 字元）
+    # 2. 一行一項極簡 Top 10
     if top_picks:
         top_lines_1 = []
         for item in top_picks[:5]:
             top_lines_1.append(
-                f"📌 **{item['sid']} {item['name']}** ({item['industry']}) 現價 `{item['close']}`\n"
-                f"> {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
-                f"> 策略：{item['action']}"
+                f"📌 **{item['sid']} {item['name']}** ({item['industry']}) ｜ 現價 `{item['close']}`\n"
+                f"> • 狀態: {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
+                f"> • 策略: {item['action']}"
             )
         fields.append({
             "name": "🎯 精選 Top 10（型態與策略 1-5）",
@@ -314,9 +327,9 @@ def main():
             top_lines_2 = []
             for item in top_picks[5:10]:
                 top_lines_2.append(
-                    f"📌 **{item['sid']} {item['name']}** ({item['industry']}) 現價 `{item['close']}`\n"
-                    f"> {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
-                    f"> 策略：{item['action']}"
+                    f"📌 **{item['sid']} {item['name']}** ({item['industry']}) ｜ 現價 `{item['close']}`\n"
+                    f"> • 狀態: {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
+                    f"> • 策略: {item['action']}"
                 )
             fields.append({
                 "name": "🎯 精選 Top 10（型態與策略 6-10）",
@@ -332,7 +345,7 @@ def main():
 
     # 3. 妖股獵人
     if monster_stocks:
-        m_lines = "\n".join([f"> 🔥 **{m['sid']} {m['name']}** ｜ 現價 `{m['close']}` ｜ 爆量 `{m['vol_ratio']}x`" for m in monster_stocks[:3]])
+        m_lines = "\n".join([f"> • 🔥 **{m['sid']} {m['name']}** ｜ 現價 `{m['close']}` ｜ 爆量 `{m['vol_ratio']}x`" for m in monster_stocks[:3]])
         fields.append({
             "name": "🚨 妖股獵人 (飆股狂飆預警)",
             "value": m_lines,
@@ -341,7 +354,7 @@ def main():
     else:
         fields.append({
             "name": "🚨 妖股獵人 (飆股狂飆預警)",
-            "value": "> **狀態**：暫無符合",
+            "value": "> • **狀態**：暫無符合",
             "inline": False
         })
 
