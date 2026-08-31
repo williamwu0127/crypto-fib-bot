@@ -10,7 +10,6 @@ WEBHOOK_URL = os.getenv(
     "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 )
 
-# 監控核心資產代碼
 GLOBAL_SYMBOLS = {
     "^GSPC": ("S&P 500", "美股大盤基準"),
     "^IXIC": ("NASDAQ 綜合指數", "科技成長核心"),
@@ -107,7 +106,6 @@ def main():
             analyzed_items.append(res)
 
     fields = []
-    
     fields.append({
         "name": "───────── 🌐 隔夜全球市場 ＆ 宏觀指標掃描 ─────────",
         "value": "\u200b",
