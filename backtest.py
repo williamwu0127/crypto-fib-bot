@@ -60,10 +60,11 @@ def fetch_raw_data(ticker_sym, days=365):
         ticker = yf.Ticker(ticker_sym)
 
         # 抓取 1H K 線
-        df_1h = ticker.history(period=period_str, interval="1h").reset_index()
+        df_1h = ticker.history(period=period_str, interval="1h")
         if df_1h.empty:
             return None, None, None
 
+        df_1h = df_1h.reset_index()
         date_col = 'Datetime' if 'Datetime' in df_1h.columns else 'Date'
         df_1h['time'] = pd.to_datetime(df_1h[date_col]).dt.tz_localize(None)
         df_1h.rename(columns={'Open': 'o', 'High': 'h', 'Low': 'l', 'Close': 'c', 'Volume': 'v'}, inplace=True)
@@ -280,10 +281,10 @@ def run_unified_backtest(days=365, mode='COMBINED'):
         tot_init = INITIAL_CAPITAL * 3
         tot_final = sum(wallets.values())
         roi_pct = ((tot_final - tot_init) / tot_init) * 100
-        final_str = (
-            f"${format_full_num(tot_final, 2)} USD ({roi_pct:+.2f}%)\n"
-            f"(各軌結餘: XAU_4H=${wallets['XAU_4H']:.2f} | XAU_1H=${wallets['XAU_1H']:.2f} \vert{} MSFT_4H=${wallets['MSFT_4H']:.2f})"
-        )
+        w1 = wallets['XAU_4H']
+        w2 = wallets['XAU_1H']
+        w3 = wallets['MSFT_4H']
+        final_str = f"${format_full_num(tot_final, 2)} USD ({roi_pct:+.2f}\%)\n(各軌結餘: XAU_4H=${w1:.2f} | XAU_1H=${w2:.2f} \vert{} MSFT_4H=${w3:.2f})"
         init_str = f"${format_full_num(tot_init)} USD (每軌各 $100)"
 
     mode_title = "【三軌合併共享資金池 (極致動態複利)】" if mode == 'COMBINED' else "【三軌獨立帳戶 (風險完全隔離)】"
