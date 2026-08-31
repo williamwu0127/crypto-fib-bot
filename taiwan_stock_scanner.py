@@ -19,18 +19,13 @@ def send_msg(payload):
         print(f"發送失敗: {e}")
 
 def get_session_info():
-    """判斷觸發來源與當前台股交易時段 (UTC+8)"""
     tz_tw = timezone(timedelta(hours=8))
     now_tw = datetime.now(tz_tw)
     
-    # GitHub Actions 排程與事件判斷
     event_name = os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     trigger_type = "排程推播" if event_name == "schedule" else "手動觸發"
 
-    hour = now_tw.hour
-    minute = now_tw.minute
-    time_val = hour * 100 + minute
-
+    time_val = now_tw.hour * 100 + now_tw.minute
     if time_val < 900:
         session = "盤前掃描"
     elif 900 <= time_val <= 1330:
@@ -38,41 +33,36 @@ def get_session_info():
     else:
         session = "盤後總結"
 
-    date_str = now_tw.strftime("%Y-%m-%d %H:%M")
-    return f"{session} ｜ {trigger_type}", date_str
+    return f"{session} ｜ {trigger_type}", now_tw.strftime("%Y-%m-%d %H:%M")
 
 def refine_industry(name, original_industry):
-    """智慧細分產業"""
     orig_str = str(original_industry).strip() if original_industry else ""
     if orig_str and orig_str not in ["其他", "nan", "其他業"]:
         return orig_str
         
     name_str = str(name)
-    if any(k in name_str for k in ["生技", "藥", "醫", "基因", "針劑", "臨床"]):
-        return "生技醫療業"
-    elif any(k in name_str for k in ["能源", "綠能", "太陽能", "風電", "電力", "環保", "水資源", "華城", "士電", "中興電"]):
-        return "綠能環保業"
+    if any(k in name_str for k in ["生技", "藥", "醫", "基因", "針劑"]):
+        return "生技醫療"
+    elif any(k in name_str for k in ["能源", "綠能", "太陽能", "風電", "電力", "環保"]):
+        return "綠能環保"
     elif any(k in name_str for k in ["投控", "控股", "投資", "集團"]):
-        return "投資控股業"
-    elif any(k in name_str for k in ["建設", "開發", "營造", "置地", "工程"]):
-        return "營建開發業"
-    elif any(k in name_str for k in ["軟體", "資訊", "網路", "雲端", "智能", "系統", "數據"]):
-        return "資訊服務業"
-    elif any(k in name_str for k in ["航運", "海運", "航空", "物流", "運輸"]):
+        return "投資控股"
+    elif any(k in name_str for k in ["建設", "開發", "營造", "置地"]):
+        return "營建開發"
+    elif any(k in name_str for k in ["軟體", "資訊", "網路", "雲端", "系統"]):
+        return "資訊服務"
+    elif any(k in name_str for k in ["航運", "海運", "航空", "物流"]):
         return "航運業"
     elif any(k in name_str for k in ["機電", "機械", "電機", "自動化"]):
-        return "電機機械業"
-    
+        return "電機機械"
     return "一般產業"
 
 def get_dynamic_all_stocks():
-    """動態向證交所抓取台股全市場清單（雙重防護）"""
     stock_dict = {}
     urls = [
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "TW"),
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=4", "TWO")
     ]
-    
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     for url, market in urls:
         success = False
@@ -125,7 +115,6 @@ def get_dynamic_all_stocks():
     return stock_dict
 
 def analyze_pattern_stages(df):
-    """型態學判讀：找尋左腳、最低點（頭部）、右腳、頸線與交易策略"""
     try:
         close_s = df['Close']
         high_s = df['High']
@@ -134,90 +123,94 @@ def analyze_pattern_stages(df):
         c_price = float(close_s.iloc[-1])
         ma20 = float(close_s.rolling(20).mean().iloc[-1])
         
-        # 尋找過去 40 天內的結構特徵
         low_40d = low_s.iloc[-40:]
         head_idx = low_40d.idxmin()
         head_pos = low_40d.index.get_loc(head_idx)
         head_price = float(low_40d.min())
         
-        # 需預留足夠空間形成左右腳
         if head_pos < 5 or head_pos > len(low_40d) - 4:
             return None
             
-        left_foot = float(low_40d.iloc[:head_pos].min())
         right_foot = float(low_40d.iloc[head_pos+1:].min())
         neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
-        
         neck_low = round(neck_high * 0.985, 2)
-        neck_zone = f"{neck_low:.2f}～{neck_high:.2f}"
         stop_loss = round(head_price * 0.97, 2)
         
-        # 判斷型態完成度與階段
         if c_price >= neck_high:
             stage = "🟢 突破頸線"
-            strategy = f"右側突破 {neck_high:.2f} 站穩加碼，回測 {neck_low:.2f} 不破承接"
+            action = f"破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接"
             score = 95
         elif c_price >= neck_low and c_price < neck_high:
             stage = "🟡 突破後回測"
-            strategy = f"等待回測 {neck_low:.2f} 支撐不破進場，跌破則放棄"
+            action = f"回測 `{neck_low:.2f}` 不破進 ｜ 跌破放棄"
             score = 88
         elif right_foot >= head_price and c_price > ma20:
             stage = "🟢 左右腳完成 (W底)"
-            left_entry = round(right_foot * 1.01, 2)
-            strategy = f"左側 {left_entry:.2f} 附近試單，右側突破 {neck_high:.2f} 順勢加碼"
+            action = f"左側 `{right_foot*1.01:.2f}` 試單 ｜ 右側破 `{neck_high:.2f}` 加碼"
             score = 82
         elif right_foot >= head_price:
             stage = "🟡 右腳形成中"
-            left_entry = round(right_foot * 1.01, 2)
-            strategy = f"左側 {left_entry:.2f} 附近分批低接，右側等突破 {neck_high:.2f} 確認"
+            action = f"左側 `{right_foot*1.01:.2f}` 分批接 ｜ 破 `{neck_high:.2f}` 確認"
             score = 75
         else:
             return None
 
         return {
             "stage": stage,
-            "neck_zone": neck_zone,
+            "neck_zone": f"{neck_low:.2f}~{neck_high:.2f}",
             "stop_loss": f"{stop_loss:.2f}",
-            "strategy": strategy,
+            "action": action,
             "score": score
         }
     except Exception:
         return None
 
-def get_market_analysis():
-    """獲取加權指數大盤解析"""
+def get_market_and_futures():
+    """獲取加權指數與台指期行情（包含實際跌點與價差）"""
+    res = {}
     try:
         twii = yf.Ticker("^TWII")
-        df = twii.history(period="1mo", interval="1d")
-        if df.empty or len(df) < 20:
-            return None
+        df_t = twii.history(period="1mo", interval="1d")
+        if not df_t.empty and len(df_t) >= 20:
+            c_close = float(df_t['Close'].iloc[-1])
+            p_close = float(df_t['Close'].iloc[-2])
+            pts = c_close - p_close
+            pct = (pts / p_close) * 100
+            ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
+            trend = "🟢 多頭" if c_close > ma20 else "🔴 弱勢"
             
-        c_close = float(df['Close'].iloc[-1])
-        p_close = float(df['Close'].iloc[-2])
-        change_pts = c_close - p_close
-        change_pct = (change_pts / p_close) * 100
-        
-        ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
-        ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-        
-        trend = "🟢 多頭控盤" if c_close > ma20 and ma5 > ma20 else "🔴 空頭弱勢" if c_close < ma20 else "🟡 震盪整理"
-        
-        return {
-            "close": f"{c_close:,.2f}",
-            "change_pts": f"{change_pts:+,.2f}",
-            "change_pct": f"{change_pct:+.2f}%",
-            "ma20": f"{ma20:,.2f}",
-            "trend": trend
-        }
+            res['spot_close'] = c_close
+            res['spot_str'] = f"`{c_close:,.2f}` ({pts:+,.2f}點 / {pct:+.2f}%) ｜ {trend}"
+            res['ma20'] = f"`{ma20:,.2f}`"
     except Exception as e:
-        print(f"大盤資料獲取失敗: {e}")
-        return None
+        print(f"大盤獲取失敗: {e}")
+
+    # 台指期即時抓取 (期交所或備用源)
+    try:
+        r = requests.get("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, timeout=5)
+        if r.status_code == 200:
+            data = r.json().get('RtData', {}).get('QuoteList', [])
+            tx = next((x for x in data if x.get('SymbolID', '').startswith('TX')), None)
+            if tx:
+                f_price = float(tx.get('CLastPrice', 0))
+                f_pts = float(tx.get('CDiff', 0))
+                f_pct = float(tx.get('CDiffRate', 0))
+                diff_pts = f_price - res.get('spot_close', f_price)
+                diff_type = "正價差" if diff_pts >= 0 else "逆價差"
+                res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f}點 / {f_pct:+.2f}%) ｜ {diff_type} `{diff_pts:+.2f}`點"
+    except Exception:
+        pass
+
+    if 'futures_str' not in res:
+        res['futures_str'] = "盤後/結算中"
+
+    return res
 
 def main():
     session_title, date_time_str = get_session_info()
     print(f"啟動台股掃描：{session_title} ({date_time_str})")
     
-    market_data = get_market_analysis()
+    market_info = get_market_and_futures()
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
@@ -246,13 +239,12 @@ def main():
                 c_price = float(df['Close'].iloc[-1])
                 c_vol = float(df['Volume'].iloc[-1])
                 vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1])
-                est_money_mil = (c_price * c_vol) / 100_000_000
                 
-                # 基礎流動性過濾 (成交值 >= 8000 萬)
-                if est_money_mil < 0.8:
+                # 成交值 >= 8000 萬門檻
+                if (c_price * c_vol) / 100_000_000 < 0.8:
                     continue
 
-                # 妖股判斷（嚴格爆量緊縮突破）
+                # 妖股判斷
                 recent_high_20d = float(df['High'].iloc[-21:-1].max())
                 recent_low_20d = float(df['Low'].iloc[-21:-1].min())
                 box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -261,12 +253,10 @@ def main():
                     monster_stocks.append({
                         "sid": sid,
                         "name": name,
-                        "industry": industry,
                         "close": f"{c_price:,.2f}",
                         "vol_ratio": round(c_vol / vol_ma5, 1)
                     })
 
-                # 型態學結構分析
                 p_res = analyze_pattern_stages(df)
                 if p_res:
                     scored_results.append({
@@ -279,7 +269,7 @@ def main():
         except Exception:
             continue
 
-    # 產業分散篩選前 10 檔
+    # 產業分散篩選 Top 10
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
     industry_count = {}
     top_picks = []
@@ -293,39 +283,37 @@ def main():
         if len(top_picks) >= 10:
             break
 
-    # 構建精簡 Discord Embed
+    # 組合超精簡 Discord 訊息
     fields = []
     
-    # 1. 大盤解析
-    if market_data:
+    # 1. 大盤與台指期
+    if 'spot_str' in market_info:
         fields.append({
-            "name": "📊 加權指數大盤解析",
+            "name": "📊 大盤 ＆ 台指期解析",
             "value": (
-                f"> **指數與狀態**: `{market_data['close']}` ({market_data['change_pct']}) ｜ {market_data['trend']}\n"
-                f"> **防守月線**: `{market_data['ma20']}`"
+                f"> **加權指數**: {market_info['spot_str']}\n"
+                f"> **台指期貨**: {market_info.get('futures_str', '無')}\n"
+                f"> **防守月線**: {market_info.get('ma20', '無')}"
             ),
             "inline": False
         })
 
-    # 2. 精選 Top 10
+    # 2. 精簡 Top 10 排版
+    top_lines = []
+    for item in top_picks:
+        top_lines.append(
+            f"📌 **{item['sid']} {item['name']}** ({item['industry']}) 現價 `{item['close']}`\n"
+            f"> {item['stage']} ｜ 頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
+            f"> 策略：{item['action']}"
+        )
+    
     fields.append({
-        "name": "🎯 精選 Top 10（型態與左右側策略）",
-        "value": "\u200b",
+        "name": "🎯 精選 Top 10（型態與策略快覽）",
+        "value": "\n\n".join(top_lines) if top_lines else "> 今日暫無符合標的",
         "inline": False
     })
-    
-    for item in top_picks:
-        fields.append({
-            "name": f"📌 {item['sid']} {item['name']} ｜ {item['industry']} ｜ 現價：{item['close']}",
-            "value": (
-                f"> **型態階段**：{item['stage']}\n"
-                f"> **頸線與防守**：頸線 `{item['neck_zone']}` ｜ 停損 `{item['stop_loss']}`\n"
-                f"> **交易策略**：{item['strategy']}"
-            ),
-            "inline": False
-        })
 
-    # 3. 妖股獵人區塊（精簡提示）
+    # 3. 妖股獵人
     if monster_stocks:
         m_lines = "\n".join([f"> 🔥 **{m['sid']} {m['name']}** ｜ 現價 `{m['close']}` ｜ 爆量 `{m['vol_ratio']}x`" for m in monster_stocks[:3]])
         fields.append({
