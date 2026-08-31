@@ -4,3 +4,5 @@ numpy
 yfinance
 ccxt
 feedparser
+html5lib
+lxml
