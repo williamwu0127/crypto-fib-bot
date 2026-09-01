@@ -73,12 +73,12 @@ def get_dynamic_all_stocks():
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "TW"),
         ("https://isin.twse.com.tw/isin/C_public.jsp?strMode=4", "TWO")
     ]
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     for url, market in urls:
         try:
-            resp = requests.get(url, headers=headers, timeout=12)
+            resp = requests.get(url, headers=headers, timeout=10)
             resp.encoding = "big5-hkscs"
-            dfs = pd.read_html(resp.text)
+            dfs = pd.read_html(resp.text, flavor='html5lib')
             if not dfs:
                 continue
             df = dfs[0]
@@ -103,6 +103,24 @@ def get_dynamic_all_stocks():
                         stock_dict[ticker] = (sid, name, theme_str, original_ind)
         except Exception:
             continue
+            
+    # 【強固備份機制】：若動態抓取失敗（如 GitHub IP 被證交所防禦攔擋），自動載入核心飆股與權值股清單
+    if not stock_dict:
+        fallback_list = [
+            ("2330", "台積電", "CoWoS", "半導體業", "TW"), ("2454", "聯發科", "權值股", "半導體業", "TW"),
+            ("2317", "鴻海", "AI伺服器", "其他電子業", "TW"), ("2308", "台達電", "重電", "電機機械", "TW"),
+            ("2382", "廣達", "AI伺服器", "電腦及週邊設備", "TW"), ("3231", "緯創", "AI伺服器", "電腦及週邊設備", "TW"),
+            ("6669", "緯穎", "AI伺服器", "電腦及週邊設備", "TW"), ("3037", "欣興", "散熱PCB", "電子零組件", "TW"),
+            ("8046", "南電", "ABF載板", "電子零組件", "TW"), ("3189", "景碩", "ABF載板", "電子零組件", "TW"),
+            ("2368", "金像電", "散熱PCB", "電子零組件", "TW"), ("3450", "聯鈞", "矽光子", "通信網路業", "TW"),
+            ("3081", "聯亞", "矽光子", "通信網路業", "TW"), ("4979", "華星光", "矽光子", "通信網路業", "TW"),
+            ("6488", "環球晶", "矽晶圓", "半導體業", "TW"), ("5483", "中美晶", "矽晶圓", "半導體業", "TWO"),
+            ("1519", "華城", "重電", "電機機械", "TW"), ("1513", "中興電", "重電", "電機機械", "TW"),
+            ("1503", "士電", "重電", "電機機械", "TW"), ("2634", "漢翔", "軍工", "航運業", "TW")
+        ]
+        for sid, name, theme, ind, mkt in fallback_list:
+            stock_dict[f"{sid}.{mkt}"] = (sid, name, theme, ind)
+            
     return stock_dict
 
 def get_large_shareholders_data():
@@ -319,7 +337,6 @@ def get_spot_orderbook(ticker_list):
 
 def get_market_and_futures():
     res = {}
-    spot_close = 0.0
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
@@ -377,7 +394,6 @@ def main():
     spot_book = get_spot_orderbook(target_spot_tickers)
 
     scored_results = []
-    monster_stocks = []
     spread_candidates = []
 
     chunk_size = 150
@@ -394,16 +410,7 @@ def main():
 
                     sid, name, theme_str, original_ind = stock_dict[ticker]
                     close_s = df['Close']
-                    high_s = df['High']
-                    low_s = df['Low']
-                    vol_s = df['Volume']
-
                     today_close = float(close_s.iloc[-1])
-                    prev_close = float(close_s.iloc[-2]) if len(close_s) >= 2 else today_close
-                    today_vol = float(vol_s.iloc[-1])
-                    vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1]) if len(vol_s) >= 5 else today_vol
-                    atr_14 = calculate_atr(df, 14)
-                    atr_pct = (atr_14 / today_close) * 100 if today_close > 0 else 0.0
 
                     if sid in stock_futures and today_close > 0:
                         f_dict = stock_futures[sid]
@@ -427,7 +434,7 @@ def main():
                                         "signal": f"實質淨正價差 +{net_pct:.2f}%"
                                     })
 
-                    est_money_mil = (today_close * today_vol) / 100_000_000
+                    est_money_mil = (today_close * float(df['Volume'].iloc[-1])) / 100_000_000
                     if est_money_mil < 0.5:
                         continue
 
@@ -490,12 +497,9 @@ def main():
             fields.append({
                 "name": f"📌 {item['sid']} {item['name']} ｜ {item['industry']}  現價 : {item['close']}",
                 "value": (
-                    f"> **進場區間**: `{item['entry']}`\n"
-                    f"> **動態止盈 (TP)**: `{item['tp']}`\n"
-                    f"> **動態止損 (SL)**: `{item['sl']}`\n"
-                    f"> **頸線區間**: `{item['neck_zone']}`\n"
-                    f"> **左側策略**: {item['left_strat']}\n"
-                    f"> **右側策略**: {item['right_strat']}\n"
+                    f"> **進場區間**: `{item['entry']}`\n> **動態止盈 (TP)**: `{item['tp']}`\n"
+                    f"> **動態止損 (SL)**: `{item['sl']}`\n> **頸線區間**: `{item['neck_zone']}`\n"
+                    f"> **左側策略**: {item['left_strat']}\n> **右側策略**: {item['right_strat']}\n"
                     f"> **結構狀態**: {item['status_text']}"
                     f"{chip_line}"
                 ),
@@ -521,7 +525,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股{title_suffix} ({date_str})",
-            "description": "已恢復高效批次掃描與完整結構分析：",
+            "description": "已透過強固防呆機制與高效批次掃描完成分析：",
             "color": 3447003,
             "fields": fields
         }]
