@@ -1,9 +1,26 @@
 """
 Multi-Asset SMC & Macro Independent Sandbox Backtest Engine (365 Days)
-- Assets: BTC, ETH, SOL, BNB, DOGE, XAU (PAXG)
-- Capital: Each asset has an independent 100.0 USDT starting pool
-- Crypto Strategy: 1D EMA50 -> 4H EMA Trend -> 15m CHoCH + FVG Entry (1% Risk)
-- Gold Strategy: 1D MA60 -> 4H Donchian(20) -> 1.5 ATR -> 2.0R BE -> 5.0R TP (5% Risk / 10x)
+====================================================================
+【完整交易邏輯與備份說明】
+1. 資金與沙盒架構:
+   - 標的範圍: BTC, ETH, SOL, BNB, DOGE (加密貨幣) 及 XAU/PAXG (黃金)。
+   - 獨立資金池: 每種標的各自擁有獨立的 100.0 USDT 起始資金與複利帳戶，盈虧互不干涉。
+   - 排序格式: 嚴格按照加密貨幣在前、黃金在後的順序輸出與統計。
+
+2. 加密貨幣策略模型 (SMC + 頂層架構 + 15m 執行):
+   - 宏觀定錨 (1D): 計算 1D EMA50。價格 >= EMA50 僅做多，反之僅做空。
+   - 結構與缺口 (4H / 1H): 偵測大級別市場結構轉變（CHoCH）與機構不平衡區（FVG）。
+   - 微觀進場 (15m): 價格回踩 4H/1H 的 FVG 區間，配合 15m 斐波 0.618 與實體收盤確認進場。
+   - 風控與止損 (SL): 設在結構防守點（FVG 極端邊緣）外側加上 0.2% 緩衝區（Buffer），不設絕對防守。每筆交易風險為帳戶權益的 1%。
+   - 分批止盈 (TP): 
+     * TP1: 達到 1.5R 盈虧比時平倉 50% 部位，並將剩餘部位止損推至開倉價（保本）。
+     * TP2: 達到 3.0R 盈虧比（流動性目標位）時全數平倉。
+
+3. 黃金策略模型 (XAU / PAXG):
+   - 宏觀定錨 (1D): MA60 判斷多空。
+   - 突破進場 (4H): 4H 唐奇安通道 (Donchian 20) 突破。
+   - 風控與動態保本: 5% 風控 / 10x 槓桿，1.5 ATR 初始止損，浮盈達 2.0R 時移動保本，5.0R 全額止盈。
+====================================================================
 """
 
 import os
@@ -157,7 +174,7 @@ def run_independent_sandbox_backtest():
                                 qty = (wallet * 10.0) / entry
                             pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * 5.0), 'be_target': entry - (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
 
-        # 2. 加密貨幣 SMC 策略模式 (CHoCH + FVG)
+        # 2. 加密貨幣 SMC 策略模式 (4H/1H 結構與 FVG + 15m 執行 + 0.2% buffer)
         elif cfg['mode'] == 'crypto_smc':
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_4h  = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
@@ -169,19 +186,29 @@ def run_independent_sandbox_backtest():
             df_1d['d_date'] = df_1d['time'].dt.floor('D')
             d_map = df_1d.set_index('d_date')['c'].ge(df_1d.set_index('d_date')['ema50']).to_dict()
 
-            df_4h['ema20'] = df_4h['c'].ewm(span=20, adjust=False).mean()
-            df_4h['ema50'] = df_4h['c'].ewm(span=50, adjust=False).mean()
+            df_4h['swing_high'] = df_4h['h'].rolling(5).max()
+            df_4h['swing_low'] = df_4h['l'].rolling(5).min()
             df_4h['h_date'] = df_4h['time'].dt.floor('H')
-            h4_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
-
-            df_15m['swing_high'] = df_15m['h'].rolling(5).max()
-            df_15m['swing_low'] = df_15m['l'].rolling(5).min()
             
+            # 對齊 4H 結構與 FVG
+            fvg_4h_map = {}
+            for j in range(2, len(df_4h)):
+                b_curr = df_4h.iloc[j]
+                b_prev2 = df_4h.iloc[j-2]
+                h_time = b_curr['time'].floor('H')
+                
+                bull_fvg = b_curr['l'] > b_prev2['h']
+                bear_fvg = b_curr['h'] < b_prev2['l']
+                fvg_4h_map[h_time] = {
+                    'bull': bull_fvg, 'bear': bear_fvg,
+                    'bull_zone': (b_prev2['h'], b_curr['l']),
+                    'bear_zone': (b_curr['h'], b_prev2['l'])
+                }
+
             pos = None
             for i in range(20, len(df_15m)):
                 bar = df_15m.iloc[i]
                 prev_bar = df_15m.iloc[i-1]
-                prev2_bar = df_15m.iloc[i-2]
 
                 if pos is not None:
                     side, entry, sl, tp1, tp2, qty, tp1_hit = pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['tp1_hit']
@@ -230,34 +257,37 @@ def run_independent_sandbox_backtest():
                     t_day = bar['time'].floor('D')
                     t_hour = bar['time'].floor('H')
                     d1_bull = d_map.get(t_day, True)
-                    h4_bull = h4_map.get(t_hour, True)
+                    
+                    fvg_info = fvg_4h_map.get(t_hour, {'bull': False, 'bear': False})
 
-                    # CHoCH (結構轉變確認)
-                    choch_bull = bar['c'] > prev_bar['swing_high']
-                    choch_bear = bar['c'] < prev_bar['swing_low']
+                    # 15m 實體收盤確認與斐波 0.618 區間觸發
+                    sub = df_15m.iloc[i-20:i+1]
+                    h_wave, l_wave = sub['h'].max(), sub['l'].min()
+                    wave = h_wave - l_wave
+                    if wave > 0:
+                        fib_0618_l = h_wave - (wave * 0.618)
+                        fib_0618_s = l_wave + (wave * 0.618)
 
-                    # FVG (公允價值缺口偵測)
-                    fvg_bull = bar['l'] > prev2_bar['h']  # 多頭 FVG 區間: prev2_bar['h'] ~ bar['l']
-                    fvg_bear = bar['h'] < prev2_bar['l']  # 空頭 FVG 區間: bar['h'] ~ prev2_bar['l']
-
-                    if d1_bull and h4_bull and choch_bull and fvg_bull:
-                        entry = bar['c']
-                        sl = prev2_bar['h'] - (entry * 0.005) # 結構防守點下方
-                        risk_dist = entry - sl
-                        if risk_dist > 0:
-                            qty = (wallet * 0.01) / risk_dist
-                            tp1 = entry + (risk_dist * 1.5)
-                            tp2 = entry + (risk_dist * 3.0)
-                            pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
-                    elif not d1_bull and not h4_bull and choch_bear and fvg_bear:
-                        entry = bar['c']
-                        sl = prev2_bar['l'] + (entry * 0.005) # 結構防守點上方
-                        risk_dist = sl - entry
-                        if risk_dist > 0:
-                            qty = (wallet * 0.01) / risk_dist
-                            tp1 = entry - (risk_dist * 1.5)
-                            tp2 = entry - (risk_dist * 3.0)
-                            pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
+                        if d1_bull and fvg_info['bull'] and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] > prev_bar['c']):
+                            entry = bar['c']
+                            # 結構防守點下緣外側多放 0.2% 緩衝
+                            sl = fvg_info['bull_zone'][0] * (1.0 - 0.002)
+                            risk_dist = entry - sl
+                            if risk_dist > 0:
+                                qty = (wallet * 0.01) / risk_dist
+                                tp1 = entry + (risk_dist * 1.5)
+                                tp2 = entry + (risk_dist * 3.0)
+                                pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
+                        elif not d1_bull and fvg_info['bear'] and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] < prev_bar['c']):
+                            entry = bar['c']
+                            # 結構防守點上緣外側多放 0.2% 緩衝
+                            sl = fvg_info['bear_zone'][1] * (1.0 + 0.002)
+                            risk_dist = sl - entry
+                            if risk_dist > 0:
+                                qty = (wallet * 0.01) / risk_dist
+                                tp1 = entry - (risk_dist * 1.5)
+                                tp2 = entry - (risk_dist * 3.0)
+                                pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
         tot_t = len(completed_trades)
         wins = sum(1 for t in completed_trades if t['pnl'] > 0)
@@ -274,7 +304,7 @@ def run_independent_sandbox_backtest():
         f"【多資產獨立 100U SMC 沙盒回測報告 - {period_title}】",
         "----------------------------------------------------",
         "資金配置: 每種標的各自獨立 100.0 USDT 帳戶",
-        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1% 風控 / CHoCH + FVG 策略)",
+        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1% 風控 / 4H FVG + 15m 收盤確認)",
         "貴金屬:   XAU (5% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
         "----------------------------------------------------",
         "各標的獨立帳戶績效排序:"
