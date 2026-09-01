@@ -11,8 +11,8 @@ Multi-Asset Multi-Leverage Quantitative Backtest Engine (365 Days)
    - DOGE: 5.0% 風控 / 1H ICT (Sweep+OB+FVG) + 15m OTE (2.0R保本 / 5.0R止盈)
    - XAU : 5.0% 風控 / 1D MA60 + 4H 唐奇安(20) / 1.5 ATR / 2.0R保本 / 5.0R止盈
 5. 強制平倉機制 (Liquidation Check):
-   - 納入維持保證金比例 (MMR = 0.5% ~ 1.0%)
-   - 若 K 線極值觸及預估強平價，則直接判定爆倉清算 (餘額歸零)，準確評估超高槓桿風險。
+   - 納入維持保證金比例 (MMR = 0.5%)
+   - 若 K 線極值觸及預估強平價，則判定爆倉清算 (餘額歸零)，準確評估超高槓桿風險。
 ================================================================================
 """
 
@@ -46,7 +46,7 @@ SYMBOLS_CONFIG = {
 LEVERAGE_LIST = [5.0, 10.0, 20.0, 50.0, 100.0]
 INITIAL_WALLET = 100.0
 FEE_RATE = 0.0004
-MAINTENANCE_MARGIN_RATE = 0.005  # 0.5% 維持保證金率
+MAINTENANCE_MARGIN_RATE = 0.005
 
 def send_discord(text):
     if DISCORD_WEBHOOK_URL:
@@ -173,7 +173,6 @@ def simulate_trades(df_entry, h4_trend_map, ict_info_map, cfg, lev):
                         qty = (wallet * cfg['risk']) / risk_dist
                         if (qty * entry) > (wallet * lev):
                             qty = (wallet * lev) / entry
-                        # 計算預估強平價
                         liq_price = entry * (1.0 - (1.0 / lev) + MAINTENANCE_MARGIN_RATE)
                         pos = {
                             'side': 'LONG', 'entry': entry, 'sl': sl,
@@ -198,7 +197,7 @@ def simulate_trades(df_entry, h4_trend_map, ict_info_map, cfg, lev):
                         }
 
             elif cfg['mode'] in ['ict_aggressive', 'ict_hybrid']:
-                t_hour = bar['time'].floor('H')
+                t_hour = bar['time'].floor('h')
                 h4_bull = h4_trend_map.get(t_hour, True)
                 ict_info = ict_info_map.get(t_hour, None)
                 if ict_info is None:
@@ -247,8 +246,8 @@ def simulate_trades(df_entry, h4_trend_map, ict_info_map, cfg, lev):
                         risk_dist = sl - entry
                         if risk_dist > 0:
                             qty = (wallet * cfg['risk']) / risk_dist
-                            if (qty * entry) > (wallet * cfg['lev']):
-                                qty = (wallet * cfg['lev']) / entry
+                            if (qty * entry) > (wallet * lev):
+                                qty = (wallet * lev) / entry
                             liq_price = entry * (1.0 + (1.0 / lev) - MAINTENANCE_MARGIN_RATE)
                             pos = {
                                 'side': 'SHORT', 'entry': entry, 'sl': sl,
@@ -314,7 +313,7 @@ def run_multi_leverage_backtest():
 
             df_4h['ema20'] = df_4h['c'].ewm(span=20, adjust=False).mean()
             df_4h['ema50'] = df_4h['c'].ewm(span=50, adjust=False).mean()
-            df_4h['h_date'] = df_4h['time'].dt.floor('H')
+            df_4h['h_date'] = df_4h['time'].dt.floor('h')
             h4_trend_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
 
             df_1h['swing_high'] = df_1h['h'].rolling(5).max()
@@ -326,7 +325,7 @@ def run_multi_leverage_backtest():
                 b_prev = df_1h.iloc[j-1]
                 b_prev2 = df_1h.iloc[j-2]
                 b_prev3 = df_1h.iloc[j-3]
-                h_time = b_curr['time'].floor('H')
+                h_time = b_curr['time'].floor('h')
 
                 bull_fvg = b_curr['l'] > b_prev2['h']
                 bear_fvg = b_curr['h'] < b_prev2['l']
