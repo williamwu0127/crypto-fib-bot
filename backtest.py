@@ -1,13 +1,17 @@
 """
 Multi-Asset ICT/SMC Pro Quantitative Backtest Engine (365 Days)
 ================================================================================
-【升級配置說明】
-1. 風控對標: 將加密貨幣（BTC, ETH, SOL, BNB, DOGE）單筆風控提升至 5.0%（與黃金一致）。
-2. 槓桿機制: 10x 槓桿。
-3. 損益結構: 
-   - TP1 (2.0R): 平倉 50% 部位並移至保本 (BE)。
-   - TP2 (5.0R): 全數平倉。
-4. 防守機制: 錨定 1H OB/結構極端值外側 + 0.2% 緩衝區 (Buffer)。
+【優化配置說明】
+1. 分級風控 (Tiered Risk Management):
+   - 主流幣 (BTC, ETH, BNB): 設定 2.5% 風控，降低震盪洗盤期的磨損回撤。
+   - 高彈性山寨幣 (SOL, DOGE): 設定 4.0% 風控，放大趨勢單邊的複利爆發力。
+   - 貴金屬 (XAU): 維持 5.0% 風控 / 10x 槓桿。
+2. 損益與出清結構優化 (Profit-Run Scaling):
+   - TP1 (2.0R): 僅平倉 30% 部位鎖定手續費與基本利潤，並將剩餘 70% 部位止損推至保本 (BE)。
+   - TP2 (5.0R): 剩餘 70% 部位全數平倉，大幅提升單筆大趨勢的吃肉量。
+3. 防守與進場模型:
+   - 4H 趨勢定錨 + 1H 流動性獵取/OB/FVG + 15m OTE (0.618~0.79) 尊重收盤確認。
+   - 止損錨定 OB/結構外側 + 0.2% 緩衝區 (Buffer)。
 ================================================================================
 """
 
@@ -20,12 +24,12 @@ import numpy as np
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 SYMBOLS = {
-    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.05},
-    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.05},
-    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.05},
-    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.05},
-    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.05},
-    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian', 'lev': 10.0, 'risk': 0.05}
+    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.025},
+    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.025},
+    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.040},
+    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.025},
+    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.040},
+    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian', 'lev': 10.0, 'risk': 0.050}
 }
 
 INITIAL_WALLET_PER_ASSET = 100.0
@@ -71,7 +75,7 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_independent_sandbox_backtest():
     days = 365
-    period_title = "365 天期 (ICT Pro: 5% 風控 + 10x 槓桿獨立 100U 沙盒)"
+    period_title = "365 天期 (分級風控 + 70%奔跑止盈 + 獨立100U沙盒)"
     print(f"\n==================================================")
     print(f">>> 開始執行【{period_title}】多資產獨立資金回測...")
     print(f"==================================================")
@@ -83,7 +87,7 @@ def run_independent_sandbox_backtest():
         cfg = SYMBOLS[sym]
         wallet = float(INITIAL_WALLET_PER_ASSET)
         completed_trades = []
-        print(f"獨立跑背測標的: {sym} (起始資金: ${wallet:.2f} USDT | 風控: {cfg['risk']*100}%)...", flush=True)
+        print(f"獨立跑背測標的: {sym} (起始資金: ${wallet:.2f} USDT | 風控: {cfg['risk']*100:.1f}%)...", flush=True)
         
         # 1. 黃金策略模式
         if cfg['mode'] == 'gold_macro_donchian':
@@ -162,7 +166,7 @@ def run_independent_sandbox_backtest():
                                 qty = (wallet * cfg['lev']) / entry
                             pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * 5.0), 'be_target': entry - (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
 
-        # 2. 加密貨幣 ICT/SMC Pro 策略 (5% 風控 + 10x 槓桿)
+        # 2. 加密貨幣 ICT/SMC Pro 策略 (分級風控 + 30%/70% 分批)
         elif cfg['mode'] == 'crypto_ict_pro':
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
@@ -214,7 +218,7 @@ def run_independent_sandbox_backtest():
                     side, entry, sl, tp1, tp2, qty, tp1_hit = pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['tp1_hit']
                     if side == 'LONG':
                         if bar['l'] <= sl:
-                            rem_qty = qty * 0.5 if tp1_hit else qty
+                            rem_qty = qty * 0.7 if tp1_hit else qty
                             pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
                             wallet += pnl
                             completed_trades.append({'pnl': pnl})
@@ -222,19 +226,19 @@ def run_independent_sandbox_backtest():
                             continue
                         if not tp1_hit and bar['h'] >= tp1:
                             pos['tp1_hit'] = True
-                            pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
+                            pnl_tp1 = (qty * 0.3) * (tp1 - entry) - (qty * 0.3) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
                             pos['sl'] = entry
                             completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['h'] >= tp2:
-                            pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
+                            pnl_tp2 = (qty * 0.7) * (tp2 - entry) - (qty * 0.7) * (entry + tp2) * FEE_RATE
                             wallet += pnl_tp2
                             completed_trades.append({'pnl': pnl_tp2})
                             pos = None
                             continue
                     elif side == 'SHORT':
                         if bar['h'] >= sl:
-                            rem_qty = qty * 0.5 if tp1_hit else qty
+                            rem_qty = qty * 0.7 if tp1_hit else qty
                             pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
                             wallet += pnl
                             completed_trades.append({'pnl': pnl})
@@ -242,12 +246,12 @@ def run_independent_sandbox_backtest():
                             continue
                         if not tp1_hit and bar['l'] <= tp1:
                             pos['tp1_hit'] = True
-                            pnl_tp1 = (qty * 0.5) * (entry - tp1) - (qty * 0.5) * (entry + tp1) * FEE_RATE
+                            pnl_tp1 = (qty * 0.3) * (entry - tp1) - (qty * 0.3) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
                             pos['sl'] = entry
                             completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['l'] <= tp2:
-                            pnl_tp2 = (qty * 0.5) * (entry - tp2) - (qty * 0.5) * (entry + tp2) * FEE_RATE
+                            pnl_tp2 = (qty * 0.7) * (entry - tp2) - (qty * 0.7) * (entry + tp2) * FEE_RATE
                             wallet += pnl_tp2
                             completed_trades.append({'pnl': pnl_tp2})
                             pos = None
@@ -323,8 +327,8 @@ def run_independent_sandbox_backtest():
         f"【多資產獨立 100U ICT/SMC Pro 沙盒回測報告 - {period_title}】",
         "--------------------------------------------------------------------",
         "資金配置: 每種標的各自獨立 100.0 USDT 帳戶",
-        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (5% 風控 / 10x 槓桿 / 流動性+OB+FVG+OTE)",
-        "貴金屬:   XAU (5% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
+        "加密貨幣: BTC, ETH, BNB (2.5% 風控) | SOL, DOGE (4.0% 風控) | 10x 槓桿",
+        "貴金屬:   XAU (5.0% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
         "--------------------------------------------------------------------",
         "各標的獨立帳戶績效排序:"
     ]
