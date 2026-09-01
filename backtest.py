@@ -1,12 +1,12 @@
 """
-Multi-Asset Quantitative Backtest Engine (365 Days)
+Multi-Asset Quantitative Backtest Engine (365 Days - Optimized Version)
 ============================================================
 【實盤策略規則說明】
-1. BTC / ETH 實盤策略 (1% 動態風控):
+1. BTC / ETH 實盤策略 (1% 動態風控 - 濾網優化版):
    - 宏觀定錨: 1D 日線 EMA50 (價格 >= EMA50 僅做多，反之僅做空)
    - 趨勢過濾: 4H 均線趨勢 (EMA20 vs EMA50 銅牆鐵壁過濾)
-   - 微觀進場: 15m 斐波 0.618 回踩 + RSI 動能確認
-   - 出場機制: 分批止盈 (TP1 達成平倉 50% 並移止損至 TP1，TP2 達斐波 1.272 擴展)
+   - 微觀進場: 15m 斐波 0.618 回踩 + RSI 動能確認 (波幅門檻提升至 0.8% 過濾雜訊)
+   - 出場機制: 分批止盈 (優化盈虧比，降低手續費消耗)
    - 結構防守: 實體跌破/突破關鍵 EMA50 或起漲點立即平倉
 
 2. XAU (黃金) 實盤策略 (5% 風控 / 10x 槓桿):
@@ -75,7 +75,7 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_365d_backtest():
     days = 365
-    period_title = "365 天期 (一年完整回測)"
+    period_title = "365 天期 (優化過濾雜訊版)"
     print(f"\n==================================================")
     print(f">>> 開始執行【{period_title}】多資產量化回測...")
     print(f"==================================================")
@@ -243,7 +243,8 @@ def run_365d_backtest():
                     sub = df_15m.iloc[i-25:i+1]
                     h, l = sub['h'].max(), sub['l'].min()
                     wave = h - l
-                    if wave > 0 and (wave / l) >= 0.005:
+                    # 門檻提升至 0.008 (0.8%) 以過濾震盪雜訊
+                    if wave > 0 and (wave / l) >= 0.008:
                         fib_0618_l = h - (wave * 0.618)
                         fib_0618_s = l + (wave * 0.618)
                         prev_rsi = df_15m.iloc[i-1]['rsi']
@@ -256,8 +257,8 @@ def run_365d_backtest():
                             risk_dist = abs(entry - sl)
                             if risk_dist > 0:
                                 qty = (wallet * 0.01) / risk_dist
-                                tp1 = h if h > entry else entry + risk_dist
-                                tp2 = h + (wave * 0.272)
+                                tp1 = h if h > entry else entry + (risk_dist * 1.5)
+                                tp2 = h + (wave * 0.382)
                                 pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
                         elif not d1_bull and not h4_bull and (bar['c'] <= bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and rsi_bear:
                             entry = bar['c']
@@ -265,8 +266,8 @@ def run_365d_backtest():
                             risk_dist = abs(entry - sl)
                             if risk_dist > 0:
                                 qty = (wallet * 0.01) / risk_dist
-                                tp1 = l if l < entry else entry - risk_dist
-                                tp2 = l - (wave * 0.272)
+                                tp1 = l if l < entry else entry - (risk_dist * 1.5)
+                                tp2 = l - (wave * 0.382)
                                 pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
     total_trades = len(completed_trades)
@@ -289,25 +290,10 @@ def run_365d_backtest():
         f"【量化策略回測報告 - {period_title}】\n"
         f"----------------------------------------------------\n"
         f"策略架構:\n"
-        f" - BTC/ETH: 1D EMA50 -> 4H EMA 趨勢 -> 15m 斐波 (1% 風控)\n"
+        f" - BTC/ETH: 1D EMA50 -> 4H EMA 趨勢 -> 15m 斐波 (1% 風控/過濾雜訊)\n"
         f" - XAU(黃金): 1D MA60 -> 4H 唐奇安突破 -> 1.5 ATR (5% 風控/10x)\n"
         f"----------------------------------------------------\n"
         f"初始資金: ${INITIAL_WALLET:.2f} USDT\n"
         f"最終結餘: ${wallet:.2f} USDT ({roi:+.2f}%)\n"
         f"總成交次數: {total_trades} 次\n"
-        f"總勝場數: {win_trades} 次 | 總敗場數: {loss_trades} 次\n"
-        f"整體策略勝率: {win_rate:.2f}%\n"
-        f"----------------------------------------------------\n"
-        f"各標的績效與勝率統計:\n"
-    )
-    
-    for sym, st in symbol_stats.items():
-        report += f" - {sym.ljust(4)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 淨利: {st['pnl']:+6.2f} USDT\n"
-    
-    report += "```"
-    
-    print(report)
-    send_discord(report)
-
-if __name__ == '__main__':
-    run_365d_backtest()
+        f
