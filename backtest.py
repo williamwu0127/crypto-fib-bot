@@ -1,9 +1,9 @@
 """
-Multi-Asset Independent Sandbox Backtest Engine (365 Days)
+Multi-Asset SMC & Macro Independent Sandbox Backtest Engine (365 Days)
 - Assets: BTC, ETH, SOL, BNB, DOGE, XAU (PAXG)
 - Capital: Each asset has an independent 100.0 USDT starting pool
+- Crypto Strategy: 1D EMA50 -> 4H EMA Trend -> 15m CHoCH + FVG Entry (1% Risk)
 - Gold Strategy: 1D MA60 -> 4H Donchian(20) -> 1.5 ATR -> 2.0R BE -> 5.0R TP (5% Risk / 10x)
-- Crypto Strategy: 1D EMA50 -> 4H EMA Trend -> 15m Fibonacci 0.618 (1% Risk)
 """
 
 import os
@@ -15,11 +15,11 @@ import numpy as np
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 SYMBOLS = {
-    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
-    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
-    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
-    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
-    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_triple_screen'},
+    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_smc'},
+    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_smc'},
+    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_smc'},
+    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_smc'},
+    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_smc'},
     'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian'}
 }
 
@@ -66,18 +66,21 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_independent_sandbox_backtest():
     days = 365
-    period_title = "365 天期 (獨立 100U 沙盒回測)"
+    period_title = "365 天期 (SMC + 獨立 100U 沙盒回測)"
     print(f"\n==================================================")
     print(f">>> 開始執行【{period_title}】多資產獨立資金回測...")
     print(f"==================================================")
 
     asset_results = {}
+    sorted_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
 
-    for sym, cfg in SYMBOLS.items():
+    for sym in sorted_symbols:
+        cfg = SYMBOLS[sym]
         wallet = float(INITIAL_WALLET_PER_ASSET)
         completed_trades = []
         print(f"獨立跑背測標的: {sym} (起始資金: ${wallet:.2f} USDT)...", flush=True)
         
+        # 1. 黃金策略模式
         if cfg['mode'] == 'gold_macro_donchian':
             df_4h = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
             df_1d = fetch_binance_klines(cfg['s'], '1d', days=days + 60)
@@ -154,7 +157,8 @@ def run_independent_sandbox_backtest():
                                 qty = (wallet * 10.0) / entry
                             pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * 5.0), 'be_target': entry - (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
 
-        elif cfg['mode'] == 'crypto_triple_screen':
+        # 2. 加密貨幣 SMC 策略模式 (CHoCH + FVG)
+        elif cfg['mode'] == 'crypto_smc':
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_4h  = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
             df_1d  = fetch_binance_klines(cfg['s'], '1d', days=days + 60)
@@ -170,19 +174,15 @@ def run_independent_sandbox_backtest():
             df_4h['h_date'] = df_4h['time'].dt.floor('H')
             h4_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
 
-            df_15m['ema50'] = df_15m['c'].ewm(span=50, adjust=False).mean()
-            df_15m['ema200'] = df_15m['c'].ewm(span=200, adjust=False).mean()
-            tr = np.maximum(df_15m['h'] - df_15m['l'], np.maximum(abs(df_15m['h'] - df_15m['c'].shift(1)), abs(df_15m['l'] - df_15m['c'].shift(1))))
-            df_15m['atr'] = tr.rolling(14).mean().fillna(df_15m['c'] * 0.01)
-            delta = df_15m['c'].diff()
-            gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-            loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-            df_15m['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-            df_15m['rsi_ema'] = df_15m['rsi'].ewm(span=9, adjust=False).mean()
-
+            df_15m['swing_high'] = df_15m['h'].rolling(5).max()
+            df_15m['swing_low'] = df_15m['l'].rolling(5).min()
+            
             pos = None
-            for i in range(30, len(df_15m)):
+            for i in range(20, len(df_15m)):
                 bar = df_15m.iloc[i]
+                prev_bar = df_15m.iloc[i-1]
+                prev2_bar = df_15m.iloc[i-2]
+
                 if pos is not None:
                     side, entry, sl, tp1, tp2, qty, tp1_hit = pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['tp1_hit']
                     if side == 'LONG':
@@ -197,7 +197,7 @@ def run_independent_sandbox_backtest():
                             pos['tp1_hit'] = True
                             pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
-                            pos['sl'] = tp1
+                            pos['sl'] = entry
                             completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['h'] >= tp2:
                             pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
@@ -217,7 +217,7 @@ def run_independent_sandbox_backtest():
                             pos['tp1_hit'] = True
                             pnl_tp1 = (qty * 0.5) * (entry - tp1) - (qty * 0.5) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
-                            pos['sl'] = tp1
+                            pos['sl'] = entry
                             completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['l'] <= tp2:
                             pnl_tp2 = (qty * 0.5) * (entry - tp2) - (qty * 0.5) * (entry + tp2) * FEE_RATE
@@ -232,34 +232,32 @@ def run_independent_sandbox_backtest():
                     d1_bull = d_map.get(t_day, True)
                     h4_bull = h4_map.get(t_hour, True)
 
-                    sub = df_15m.iloc[i-25:i+1]
-                    h, l = sub['h'].max(), sub['l'].min()
-                    wave = h - l
-                    if wave > 0 and (wave / l) >= 0.005:
-                        fib_0618_l = h - (wave * 0.618)
-                        fib_0618_s = l + (wave * 0.618)
-                        prev_rsi = df_15m.iloc[i-1]['rsi']
-                        rsi_bull = (bar['rsi'] <= 55) and (bar['rsi'] >= bar['rsi_ema'] or bar['rsi'] > prev_rsi)
-                        rsi_bear = (bar['rsi'] >= 45) and (bar['rsi'] <= bar['rsi_ema'] or bar['rsi'] < prev_rsi)
+                    # CHoCH (結構轉變確認)
+                    choch_bull = bar['c'] > prev_bar['swing_high']
+                    choch_bear = bar['c'] < prev_bar['swing_low']
 
-                        if d1_bull and h4_bull and (bar['c'] >= bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and rsi_bull:
-                            entry = bar['c']
-                            sl = min(l, entry - (bar['atr'] * 1.5))
-                            risk_dist = abs(entry - sl)
-                            if risk_dist > 0:
-                                qty = (wallet * 0.01) / risk_dist
-                                tp1 = h if h > entry else entry + risk_dist
-                                tp2 = h + (wave * 0.272)
-                                pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
-                        elif not d1_bull and not h4_bull and (bar['c'] <= bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and rsi_bear:
-                            entry = bar['c']
-                            sl = max(h, entry + (bar['atr'] * 1.5))
-                            risk_dist = abs(entry - sl)
-                            if risk_dist > 0:
-                                qty = (wallet * 0.01) / risk_dist
-                                tp1 = l if l < entry else entry - risk_dist
-                                tp2 = l - (wave * 0.272)
-                                pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
+                    # FVG (公允價值缺口偵測)
+                    fvg_bull = bar['l'] > prev2_bar['h']  # 多頭 FVG 區間: prev2_bar['h'] ~ bar['l']
+                    fvg_bear = bar['h'] < prev2_bar['l']  # 空頭 FVG 區間: bar['h'] ~ prev2_bar['l']
+
+                    if d1_bull and h4_bull and choch_bull and fvg_bull:
+                        entry = bar['c']
+                        sl = prev2_bar['h'] - (entry * 0.005) # 結構防守點下方
+                        risk_dist = entry - sl
+                        if risk_dist > 0:
+                            qty = (wallet * 0.01) / risk_dist
+                            tp1 = entry + (risk_dist * 1.5)
+                            tp2 = entry + (risk_dist * 3.0)
+                            pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
+                    elif not d1_bull and not h4_bull and choch_bear and fvg_bear:
+                        entry = bar['c']
+                        sl = prev2_bar['l'] + (entry * 0.005) # 結構防守點上方
+                        risk_dist = sl - entry
+                        if risk_dist > 0:
+                            qty = (wallet * 0.01) / risk_dist
+                            tp1 = entry - (risk_dist * 1.5)
+                            tp2 = entry - (risk_dist * 3.0)
+                            pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
         tot_t = len(completed_trades)
         wins = sum(1 for t in completed_trades if t['pnl'] > 0)
@@ -271,15 +269,12 @@ def run_independent_sandbox_backtest():
             'total': tot_t, 'wins': wins, 'wr': wr, 'final_wallet': wallet, 'net_pnl': net_pnl, 'roi': roi
         }
 
-    # 排序：加密貨幣在前 (BTC, ETH, SOL, BNB, DOGE)，黃金在後 (XAU)
-    sorted_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
-
     report_lines = [
         "```text",
-        f"【多資產獨立 100U 沙盒回測報告 - {period_title}】",
+        f"【多資產獨立 100U SMC 沙盒回測報告 - {period_title}】",
         "----------------------------------------------------",
         "資金配置: 每種標的各自獨立 100.0 USDT 帳戶",
-        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1% 風控 / 15m 斐波策略)",
+        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1% 風控 / CHoCH + FVG 策略)",
         "貴金屬:   XAU (5% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
         "----------------------------------------------------",
         "各標的獨立帳戶績效排序:"
