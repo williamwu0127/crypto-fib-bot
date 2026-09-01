@@ -1,17 +1,18 @@
 """
-Multi-Asset ICT/SMC Pro Quantitative Backtest Engine (365 Days)
+Multi-Asset Hybrid Optimized Portfolio Engine (365 Days - Shared 100 USDT Pool)
 ================================================================================
-【優化配置說明】
-1. 分級風控 (Tiered Risk Management):
-   - 主流幣 (BTC, ETH, BNB): 設定 2.5% 風控，降低震盪洗盤期的磨損回撤。
-   - 高彈性山寨幣 (SOL, DOGE): 設定 4.0% 風控，放大趨勢單邊的複利爆發力。
-   - 貴金屬 (XAU): 維持 5.0% 風控 / 10x 槓桿。
-2. 損益與出清結構優化 (Profit-Run Scaling):
-   - TP1 (2.0R): 僅平倉 30% 部位鎖定手續費與基本利潤，並將剩餘 70% 部位止損推至保本 (BE)。
-   - TP2 (5.0R): 剩餘 70% 部位全數平倉，大幅提升單筆大趨勢的吃肉量。
-3. 防守與進場模型:
-   - 4H 趨勢定錨 + 1H 流動性獵取/OB/FVG + 15m OTE (0.618~0.79) 尊重收盤確認。
-   - 止損錨定 OB/結構外側 + 0.2% 緩衝區 (Buffer)。
+【共用 100U 資金池之多資產專屬客製化回測架構】
+1. 資金架構:
+   - 全資產共用單一 100.0 USDT 初始資金池進行動態複利。
+   - 報表順序嚴格保持：BTC -> ETH -> SOL -> BNB -> DOGE -> XAU。
+
+2. 各幣種專屬最佳策略配置:
+   - BTC : 1.0% 風控 / 1x / 4H方向 + 1H FVG + 15m 斐波0.618 / 1.5R (平50%) + 3.0R (全平)
+   - ETH : 1.0% 風控 / 1x / 4H方向 + 1H FVG + 15m 斐波0.618 / 1.5R (平50%) + 3.0R (全平)
+   - SOL : 5.0% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
+   - BNB : 2.5% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平30%移保本) + 5.0R (平70%)
+   - DOGE: 5.0% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
+   - XAU : 5.0% 風控 / 10x / 1D MA60 濾網 + 4H Donchian(20) / 1.5 ATR / 2.0R 保本 / 5.0R 全平
 ================================================================================
 """
 
@@ -23,17 +24,35 @@ import numpy as np
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-SYMBOLS = {
-    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.025},
-    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.025},
-    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.040},
-    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.025},
-    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_ict_pro', 'lev': 10.0, 'risk': 0.040},
-    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian', 'lev': 10.0, 'risk': 0.050}
+SYMBOLS_CONFIG = {
+    'BTC': {
+        's': 'BTCUSDT', 'interval': '15m', 'mode': 'smc_conservative',
+        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5
+    },
+    'ETH': {
+        's': 'ETHUSDT', 'interval': '15m', 'mode': 'smc_conservative',
+        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5
+    },
+    'SOL': {
+        's': 'SOLUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
+        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5
+    },
+    'BNB': {
+        's': 'BNBUSDT', 'interval': '15m', 'mode': 'ict_hybrid',
+        'lev': 10.0, 'risk': 0.025, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.3
+    },
+    'DOGE': {
+        's': 'DOGEUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
+        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5
+    },
+    'XAU': {
+        's': 'PAXGUSDT', 'interval': '4h', 'mode': 'gold_donchian',
+        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0
+    }
 }
 
-INITIAL_WALLET_PER_ASSET = 100.0
 FEE_RATE = 0.0004
+INITIAL_SHARED_WALLET = 100.0
 
 def send_discord(text):
     if DISCORD_WEBHOOK_URL:
@@ -73,24 +92,25 @@ def fetch_binance_klines(symbol, interval, days=365):
         return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
     return None
 
-def run_independent_sandbox_backtest():
+def run_shared_portfolio_backtest():
     days = 365
-    period_title = "365 天期 (分級風控 + 70%奔跑止盈 + 獨立100U沙盒)"
+    period_title = "365 天期 (各幣種專屬最佳策略 - 共用 100U 複利池)"
     print(f"\n==================================================")
-    print(f">>> 開始執行【{period_title}】多資產獨立資金回測...")
+    print(f">>> 開始執行【{period_title}】共用資金池回測...")
     print(f"==================================================")
 
-    asset_results = {}
+    shared_wallet = float(INITIAL_SHARED_WALLET)
+    asset_performance = {}
     sorted_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
 
     for sym in sorted_symbols:
-        cfg = SYMBOLS[sym]
-        wallet = float(INITIAL_WALLET_PER_ASSET)
+        cfg = SYMBOLS_CONFIG[sym]
+        start_wallet_for_sym = shared_wallet
         completed_trades = []
-        print(f"獨立跑背測標的: {sym} (起始資金: ${wallet:.2f} USDT | 風控: {cfg['risk']*100:.1f}%)...", flush=True)
-        
-        # 1. 黃金策略模式
-        if cfg['mode'] == 'gold_macro_donchian':
+        print(f"執行標的: {sym.ljust(5)} | 策略模式: {cfg['mode'].ljust(16)} | 當前共用資金池: ${shared_wallet:.2f} USDT...", flush=True)
+
+        # ---------------- 1. 黃金專屬：唐奇安趨勢 ----------------
+        if cfg['mode'] == 'gold_donchian':
             df_4h = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
             df_1d = fetch_binance_klines(cfg['s'], '1d', days=days + 60)
             if df_4h is None or df_1d is None:
@@ -118,13 +138,13 @@ def run_independent_sandbox_backtest():
                             pos['is_be_moved'] = True
                         if bar['l'] <= pos['sl']:
                             pnl = qty * (pos['sl'] - entry) - qty * (entry + pos['sl']) * FEE_RATE
-                            wallet += pnl
+                            shared_wallet += pnl
                             completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if bar['h'] >= tp:
                             pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
-                            wallet += pnl
+                            shared_wallet += pnl
                             completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
@@ -134,40 +154,151 @@ def run_independent_sandbox_backtest():
                             pos['is_be_moved'] = True
                         if bar['h'] >= pos['sl']:
                             pnl = qty * (entry - pos['sl']) - qty * (entry + pos['sl']) * FEE_RATE
-                            wallet += pnl
+                            shared_wallet += pnl
                             completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if bar['l'] <= tp:
                             pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
-                            wallet += pnl
+                            shared_wallet += pnl
                             completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
 
-                if pos is None and wallet > 5.0:
+                if pos is None and shared_wallet > 5.0:
                     bull = bar['macro_bull']
                     if bull and bar['c'] > bar['dc_high']:
                         entry = bar['c']
                         sl = entry - (bar['atr'] * 1.5)
                         risk_dist = entry - sl
                         if risk_dist > 0:
-                            qty = (wallet * cfg['risk']) / risk_dist
-                            if (qty * entry) > (wallet * cfg['lev']):
-                                qty = (wallet * cfg['lev']) / entry
-                            pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp': entry + (risk_dist * 5.0), 'be_target': entry + (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
+                            qty = (shared_wallet * cfg['risk']) / risk_dist
+                            if (qty * entry) > (shared_wallet * cfg['lev']):
+                                qty = (shared_wallet * cfg['lev']) / entry
+                            pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp': entry + (risk_dist * cfg['tp2_r']), 'be_target': entry + (risk_dist * cfg['tp1_r']), 'qty': qty, 'is_be_moved': False}
                     elif not bull and bar['c'] < bar['dc_low']:
                         entry = bar['c']
                         sl = entry + (bar['atr'] * 1.5)
                         risk_dist = sl - entry
                         if risk_dist > 0:
-                            qty = (wallet * cfg['risk']) / risk_dist
-                            if (qty * entry) > (wallet * cfg['lev']):
-                                qty = (wallet * cfg['lev']) / entry
-                            pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * 5.0), 'be_target': entry - (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
+                            qty = (shared_wallet * cfg['risk']) / risk_dist
+                            if (qty * entry) > (shared_wallet * cfg['lev']):
+                                qty = (shared_wallet * cfg['lev']) / entry
+                            pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * cfg['tp2_r']), 'be_target': entry - (risk_dist * cfg['tp1_r']), 'qty': qty, 'is_be_moved': False}
 
-        # 2. 加密貨幣 ICT/SMC Pro 策略 (分級風控 + 30%/70% 分批)
-        elif cfg['mode'] == 'crypto_ict_pro':
+        # ---------------- 2. 加密貨幣：BTC / ETH 穩健 SMC (1.5R/3.0R) ----------------
+        elif cfg['mode'] == 'smc_conservative':
+            df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
+            df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
+            df_4h  = fetch_binance_klines(cfg['s'], '4h', days=days + 60)
+            if df_15m is None or df_1h is None or df_4h is None:
+                continue
+
+            df_4h['ema20'] = df_4h['c'].ewm(span=20, adjust=False).mean()
+            df_4h['ema50'] = df_4h['c'].ewm(span=50, adjust=False).mean()
+            df_4h['h_date'] = df_4h['time'].dt.floor('H')
+            h4_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
+
+            fvg_1h_map = {}
+            for j in range(2, len(df_1h)):
+                b_curr = df_1h.iloc[j]
+                b_prev2 = df_1h.iloc[j-2]
+                h_time = b_curr['time'].floor('H')
+                bull_fvg = b_curr['l'] > b_prev2['h']
+                bear_fvg = b_curr['h'] < b_prev2['l']
+                fvg_1h_map[h_time] = {
+                    'bull': bull_fvg, 'bear': bear_fvg,
+                    'bull_zone': (b_prev2['h'], b_curr['l']),
+                    'bear_zone': (b_curr['h'], b_prev2['l'])
+                }
+
+            pos = None
+            for i in range(20, len(df_15m)):
+                bar = df_15m.iloc[i]
+                prev_bar = df_15m.iloc[i-1]
+
+                if pos is not None:
+                    side, entry, sl, tp1, tp2, qty, tp1_hit = pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['tp1_hit']
+                    if side == 'LONG':
+                        if bar['l'] <= sl:
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio']) if tp1_hit else qty
+                            pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
+                            shared_wallet += pnl
+                            completed_trades.append({'pnl': pnl})
+                            pos = None
+                            continue
+                        if not tp1_hit and bar['h'] >= tp1:
+                            pos['tp1_hit'] = True
+                            pnl_tp1 = (qty * cfg['tp1_ratio']) * (tp1 - entry) - (qty * cfg['tp1_ratio']) * (entry + tp1) * FEE_RATE
+                            shared_wallet += pnl_tp1
+                            pos['sl'] = entry
+                            completed_trades.append({'pnl': pnl_tp1})
+                        if pos['tp1_hit'] and bar['h'] >= tp2:
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio'])
+                            pnl_tp2 = rem_qty * (tp2 - entry) - rem_qty * (entry + tp2) * FEE_RATE
+                            shared_wallet += pnl_tp2
+                            completed_trades.append({'pnl': pnl_tp2})
+                            pos = None
+                            continue
+                    elif side == 'SHORT':
+                        if bar['h'] >= sl:
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio']) if tp1_hit else qty
+                            pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
+                            shared_wallet += pnl
+                            completed_trades.append({'pnl': pnl})
+                            pos = None
+                            continue
+                        if not tp1_hit and bar['l'] <= tp1:
+                            pos['tp1_hit'] = True
+                            pnl_tp1 = (qty * cfg['tp1_ratio']) * (entry - tp1) - (qty * cfg['tp1_ratio']) * (entry + tp1) * FEE_RATE
+                            shared_wallet += pnl_tp1
+                            pos['sl'] = entry
+                            completed_trades.append({'pnl': pnl_tp1})
+                        if pos['tp1_hit'] and bar['l'] <= tp2:
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio'])
+                            pnl_tp2 = rem_qty * (entry - tp2) - rem_qty * (entry + tp2) * FEE_RATE
+                            shared_wallet += pnl_tp2
+                            completed_trades.append({'pnl': pnl_tp2})
+                            pos = None
+                            continue
+
+                if pos is None and shared_wallet > 5.0:
+                    t_hour = bar['time'].floor('H')
+                    h4_bull = h4_map.get(t_hour, True)
+                    fvg_info = fvg_1h_map.get(t_hour, {'bull': False, 'bear': False})
+
+                    sub = df_15m.iloc[i-20:i+1]
+                    h_wave, l_wave = sub['h'].max(), sub['l'].min()
+                    wave = h_wave - l_wave
+                    if wave > 0:
+                        fib_0618_l = h_wave - (wave * 0.618)
+                        fib_0618_s = l_wave + (wave * 0.618)
+
+                        if h4_bull and fvg_info['bull'] and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] > prev_bar['c']):
+                            entry = bar['c']
+                            sl = fvg_info['bull_zone'][0] * (1.0 - 0.002)
+                            risk_dist = entry - sl
+                            if risk_dist > 0:
+                                qty = (shared_wallet * cfg['risk']) / risk_dist
+                                if (qty * entry) > (shared_wallet * cfg['lev']):
+                                    qty = (shared_wallet * cfg['lev']) / entry
+                                tp1 = entry + (risk_dist * cfg['tp1_r'])
+                                tp2 = entry + (risk_dist * cfg['tp2_r'])
+                                pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
+                        elif not h4_bull and fvg_info['bear'] and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] < prev_bar['c']):
+                            entry = bar['c']
+                            sl = fvg_info['bear_zone'][1] * (1.0 + 0.002)
+                            risk_dist = sl - entry
+                            if risk_dist > 0:
+                                qty = (shared_wallet * cfg['risk']) / risk_dist
+                                if (qty * entry) > (shared_wallet * cfg['lev']):
+                                    qty = (shared_wallet * cfg['lev']) / entry
+                                tp1 = entry - (risk_dist * cfg['tp1_r'])
+                                tp2 = entry - (risk_dist * cfg['tp2_r'])
+                                pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
+
+        # ---------------- 3. 加密貨幣：SOL / BNB / DOGE ICT Pro 體系 ----------------
+        elif cfg['mode'] in ['ict_aggressive', 'ict_hybrid']:
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
             df_4h  = fetch_binance_klines(cfg['s'], '4h', days=days + 60)
@@ -218,46 +349,48 @@ def run_independent_sandbox_backtest():
                     side, entry, sl, tp1, tp2, qty, tp1_hit = pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['tp1_hit']
                     if side == 'LONG':
                         if bar['l'] <= sl:
-                            rem_qty = qty * 0.7 if tp1_hit else qty
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio']) if tp1_hit else qty
                             pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
-                            wallet += pnl
+                            shared_wallet += pnl
                             completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if not tp1_hit and bar['h'] >= tp1:
                             pos['tp1_hit'] = True
-                            pnl_tp1 = (qty * 0.3) * (tp1 - entry) - (qty * 0.3) * (entry + tp1) * FEE_RATE
-                            wallet += pnl_tp1
+                            pnl_tp1 = (qty * cfg['tp1_ratio']) * (tp1 - entry) - (qty * cfg['tp1_ratio']) * (entry + tp1) * FEE_RATE
+                            shared_wallet += pnl_tp1
                             pos['sl'] = entry
                             completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['h'] >= tp2:
-                            pnl_tp2 = (qty * 0.7) * (tp2 - entry) - (qty * 0.7) * (entry + tp2) * FEE_RATE
-                            wallet += pnl_tp2
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio'])
+                            pnl_tp2 = rem_qty * (tp2 - entry) - rem_qty * (entry + tp2) * FEE_RATE
+                            shared_wallet += pnl_tp2
                             completed_trades.append({'pnl': pnl_tp2})
                             pos = None
                             continue
                     elif side == 'SHORT':
                         if bar['h'] >= sl:
-                            rem_qty = qty * 0.7 if tp1_hit else qty
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio']) if tp1_hit else qty
                             pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
-                            wallet += pnl
+                            shared_wallet += pnl
                             completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if not tp1_hit and bar['l'] <= tp1:
                             pos['tp1_hit'] = True
-                            pnl_tp1 = (qty * 0.3) * (entry - tp1) - (qty * 0.3) * (entry + tp1) * FEE_RATE
-                            wallet += pnl_tp1
+                            pnl_tp1 = (qty * cfg['tp1_ratio']) * (entry - tp1) - (qty * cfg['tp1_ratio']) * (entry + tp1) * FEE_RATE
+                            shared_wallet += pnl_tp1
                             pos['sl'] = entry
                             completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['l'] <= tp2:
-                            pnl_tp2 = (qty * 0.7) * (entry - tp2) - (qty * 0.7) * (entry + tp2) * FEE_RATE
-                            wallet += pnl_tp2
+                            rem_qty = qty * (1.0 - cfg['tp1_ratio'])
+                            pnl_tp2 = rem_qty * (entry - tp2) - rem_qty * (entry + tp2) * FEE_RATE
+                            shared_wallet += pnl_tp2
                             completed_trades.append({'pnl': pnl_tp2})
                             pos = None
                             continue
 
-                if pos is None and wallet > 5.0:
+                if pos is None and shared_wallet > 5.0:
                     t_hour = bar['time'].floor('H')
                     h4_bull = h4_map.get(t_hour, True)
                     ict_info = h1_ict_map.get(t_hour, None)
@@ -293,11 +426,11 @@ def run_independent_sandbox_backtest():
                             sl = sl_anchor * (1.0 - 0.002)
                             risk_dist = entry - sl
                             if risk_dist > 0:
-                                qty = (wallet * cfg['risk']) / risk_dist
-                                if (qty * entry) > (wallet * cfg['lev']):
-                                    qty = (wallet * cfg['lev']) / entry
-                                tp1 = entry + (risk_dist * 2.0)
-                                tp2 = entry + (risk_dist * 5.0)
+                                qty = (shared_wallet * cfg['risk']) / risk_dist
+                                if (qty * entry) > (shared_wallet * cfg['lev']):
+                                    qty = (shared_wallet * cfg['lev']) / entry
+                                tp1 = entry + (risk_dist * cfg['tp1_r'])
+                                tp2 = entry + (risk_dist * cfg['tp2_r'])
                                 pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
                         elif short_trigger:
                             entry = bar['c']
@@ -305,44 +438,51 @@ def run_independent_sandbox_backtest():
                             sl = sl_anchor * (1.0 + 0.002)
                             risk_dist = sl - entry
                             if risk_dist > 0:
-                                qty = (wallet * cfg['risk']) / risk_dist
-                                if (qty * entry) > (wallet * cfg['lev']):
-                                    qty = (wallet * cfg['lev']) / entry
-                                tp1 = entry - (risk_dist * 2.0)
-                                tp2 = entry - (risk_dist * 5.0)
+                                qty = (shared_wallet * cfg['risk']) / risk_dist
+                                if (qty * entry) > (shared_wallet * cfg['lev']):
+                                    qty = (shared_wallet * cfg['lev']) / entry
+                                tp1 = entry - (risk_dist * cfg['tp1_r'])
+                                tp2 = entry - (risk_dist * cfg['tp2_r'])
                                 pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
         tot_t = len(completed_trades)
         wins = sum(1 for t in completed_trades if t['pnl'] > 0)
         wr = (wins / tot_t * 100) if tot_t > 0 else 0.0
-        net_pnl = wallet - INITIAL_WALLET_PER_ASSET
-        roi = (net_pnl / INITIAL_WALLET_PER_ASSET) * 100
+        seg_pnl = shared_wallet - start_wallet_for_sym
+        seg_roi = (seg_pnl / start_wallet_for_sym * 100) if start_wallet_for_sym > 0 else 0.0
 
-        asset_results[sym] = {
-            'total': tot_t, 'wins': wins, 'wr': wr, 'final_wallet': wallet, 'net_pnl': net_pnl, 'roi': roi
+        asset_performance[sym] = {
+            'total': tot_t, 'wins': wins, 'wr': wr,
+            'start_wallet': start_wallet_for_sym, 'end_wallet': shared_wallet,
+            'seg_pnl': seg_pnl, 'seg_roi': seg_roi
         }
+
+    total_net_pnl = shared_wallet - INITIAL_SHARED_WALLET
+    total_roi = (total_net_pnl / INITIAL_SHARED_WALLET) * 100
 
     report_lines = [
         "```text",
-        f"【多資產獨立 100U ICT/SMC Pro 沙盒回測報告 - {period_title}】",
+        f"【多資產共用 100U 最佳化策略回測報告 - {period_title}】",
+        "====================================================================",
+        f"初始共用資金: ${INITIAL_SHARED_WALLET:.2f} USDT | 最終共用資金: ${shared_wallet:.2f} USDT ({total_roi:+.2f}%)",
         "--------------------------------------------------------------------",
-        "資金配置: 每種標的各自獨立 100.0 USDT 帳戶",
-        "加密貨幣: BTC, ETH, BNB (2.5% 風控) | SOL, DOGE (4.0% 風控) | 10x 槓桿",
-        "貴金屬:   XAU (5.0% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
-        "--------------------------------------------------------------------",
-        "各標的獨立帳戶績效排序:"
+        "各標的專屬配置與接力表現:"
     ]
-    
+
     for sym in sorted_symbols:
-        if sym in asset_results:
-            st = asset_results[sym]
-            report_lines.append(f" - {sym.ljust(5)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 最終餘額: ${st['final_wallet']:7.2f} ({st['roi']:+.2f}%)")
-    
+        if sym in asset_performance:
+            st = asset_performance[sym]
+            report_lines.append(
+                f" - {sym.ljust(5)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | "
+                f"結算資金: ${st['end_wallet']:7.2f} (階段貢獻: {st['seg_roi']:+.2f}%)"
+            )
+
+    report_lines.append("====================================================================")
     report_lines.append("```")
     report = "\n".join(report_lines)
-    
+
     print(report)
     send_discord(report)
 
 if __name__ == '__main__':
-    run_independent_sandbox_backtest()
+    run_shared_portfolio_backtest()
