@@ -1,20 +1,16 @@
 """
-Multi-Asset Quantitative Backtest Engine (365 Days - Optimized Version)
+Multi-Asset Quantitative Backtest Engine (365 Days - 1H/4H Structure TP/SL Optimized)
 ============================================================
 【實盤策略規則說明】
-1. BTC / ETH 實盤策略 (1% 動態風控 - 濾網優化版):
-   - 宏觀定錨: 1D 日線 EMA50 (價格 >= EMA50 僅做多，反之僅做空)
-   - 趨勢過濾: 4H 均線趨勢 (EMA20 vs EMA50 銅牆鐵壁過濾)
-   - 微觀進場: 15m 斐波 0.618 回踩 + RSI 動能確認 (波幅門檻提升至 0.8% 過濾雜訊)
-   - 出場機制: 分批止盈 (優化盈虧比，降低手續費消耗)
-   - 結構防守: 實體跌破/突破關鍵 EMA50 或起漲點立即平倉
+1. BTC / ETH 實盤策略 (1% 風控 - 大週期結構止盈止損):
+   - 宏觀定錨: 1D 日線 EMA50
+   - 趨勢過濾: 4H 均線趨勢 (EMA20 vs EMA50)
+   - 微觀進場: 15m 斐波 0.618 回踩 + RSI 確認
+   - 結構風控: 以 4H 結構低點/高點與較寬 ATR 作為防守 (避免 15m 雜訊頻繁掃損)
+   - 宏觀止盈: 擺脫短線 1.2R 束縛，改以大週期結構波段目標擴展 (追求高盈虧比)
 
 2. XAU (黃金) 實盤策略 (5% 風控 / 10x 槓桿):
-   - 宏觀定錨: 1D 日線 MA60 (價格 > MA60 僅做多，反之僅做空)
-   - 突破進場: 4H 唐奇安通道 (Donchian 20) 突破進場
-   - 風控防守: 1.5 ATR 初始止損
-   - 動態保本: 浮盈達到 2.0R 時自動將止損平移至開倉價 (保本)
-   - 終極止盈: 達到 5.0R 盈虧比全額止盈
+   - 宏觀定錨: 1D 日線 MA60 -> 4H 唐奇安突破 -> 1.5 ATR (2.0R保本/5.0R止盈)
 ============================================================
 """
 
@@ -75,7 +71,7 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_365d_backtest():
     days = 365
-    period_title = "365 天期 (優化過濾雜訊版)"
+    period_title = "365 天期 (大週期結構止盈止損優化版)"
     print(f"\n==================================================")
     print(f">>> 開始執行【{period_title}】多資產量化回測...")
     print(f"==================================================")
@@ -177,6 +173,12 @@ def run_365d_backtest():
             df_4h['ema50'] = df_4h['c'].ewm(span=50, adjust=False).mean()
             df_4h['h_date'] = df_4h['time'].dt.floor('H')
             h4_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
+            
+            # 建立 4H 結構低點/高點對應表（用來做大週期止損防守）
+            df_4h['h_low'] = df_4h['l'].rolling(6).min()  # 24小時內的4H結構低
+            df_4h['h_high'] = df_4h['h'].rolling(6).max() # 24小時內的4H結構高
+            h4_low_map = df_4h.set_index('h_date')['h_low'].to_dict()
+            h4_high_map = df_4h.set_index('h_date')['h_high'].to_dict()
 
             df_15m['ema50'] = df_15m['c'].ewm(span=50, adjust=False).mean()
             df_15m['ema200'] = df_15m['c'].ewm(span=200, adjust=False).mean()
@@ -205,7 +207,7 @@ def run_365d_backtest():
                             pos['tp1_hit'] = True
                             pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
-                            pos['sl'] = tp1
+                            pos['sl'] = tp1 # 保本或移至TP1
                             completed_trades.append({'sym': sym, 'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['h'] >= tp2:
                             pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
@@ -239,6 +241,10 @@ def run_365d_backtest():
                     t_hour = bar['time'].floor('H')
                     d1_bull = d_map.get(t_day, True)
                     h4_bull = h4_map.get(t_hour, True)
+                    
+                    # 取得 4H 結構支撐/壓力做為大週期防守
+                    h4_l_struct = h4_low_map.get(t_hour, bar['l'] * 0.98)
+                    h4_h_struct = h4_high_map.get(t_hour, bar['h'] * 1.02)
 
                     sub = df_15m.iloc[i-25:i+1]
                     h, l = sub['h'].max(), sub['l'].min()
@@ -252,21 +258,24 @@ def run_365d_backtest():
 
                         if d1_bull and h4_bull and (bar['c'] >= bar['ema50'] >= bar['ema200']) and (bar['l'] <= fib_0618_l * 1.002) and rsi_bull:
                             entry = bar['c']
-                            sl = min(l, entry - (bar['atr'] * 1.5))
+                            # 止損改以 4H 結構低點或 1.5x 4H ATR 錨定，避免短線插針
+                            sl = min(h4_l_struct, entry - (bar['atr'] * 2.0))
                             risk_dist = abs(entry - sl)
                             if risk_dist > 0:
                                 qty = (wallet * 0.01) / risk_dist
-                                tp1 = h if h > entry else entry + (risk_dist * 1.5)
-                                tp2 = h + (wave * 0.382)
+                                # 止盈拉大至大週期結構目標 (2.0R 與 4.0R)
+                                tp1 = entry + (risk_dist * 2.0)
+                                tp2 = entry + (risk_dist * 4.0)
                                 pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
                         elif not d1_bull and not h4_bull and (bar['c'] <= bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998) and rsi_bear:
                             entry = bar['c']
-                            sl = max(h, entry + (bar['atr'] * 1.5))
+                            # 止損改以 4H 結構高點或 1.5x 4H ATR 錨定
+                            sl = max(h4_h_struct, entry + (bar['atr'] * 2.0))
                             risk_dist = abs(entry - sl)
                             if risk_dist > 0:
                                 qty = (wallet * 0.01) / risk_dist
-                                tp1 = l if l < entry else entry - (risk_dist * 1.5)
-                                tp2 = l - (wave * 0.382)
+                                tp1 = entry - (risk_dist * 2.0)
+                                tp2 = entry - (risk_dist * 4.0)
                                 pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
     total_trades = len(completed_trades)
@@ -289,8 +298,8 @@ def run_365d_backtest():
         f"【量化策略回測報告 - {period_title}】\n"
         f"----------------------------------------------------\n"
         f"策略架構:\n"
-        f" - BTC/ETH: 1D EMA50 -> 4H EMA 趨勢 -> 15m 斐波 (1% 風控/過濾雜訊)\n"
-        f" - XAU(黃金): 1D MA60 -> 4H 唐奇安突破 -> 1.5 ATR (5% 風控/10x)\n"
+        f" - BTC/ETH: 1D/4H 結構錨定止損/止盈 (1% 風控)\n"
+        f" - XAU(黃金): 1D MA60 -> 4H 唐奇安突破 (5% 風控/10x)\n"
         f"----------------------------------------------------\n"
         f"初始資金: ${INITIAL_WALLET:.2f} USDT\n"
         f"最終結餘: ${wallet:.2f} USDT ({roi:+.2f}%)\n"
