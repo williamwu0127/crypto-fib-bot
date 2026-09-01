@@ -4,17 +4,18 @@ Multi-Asset SMC (1H FVG + 4H Direction) Sandbox Backtest Engine (365 Days)
 【完整交易邏輯與備份說明】
 1. 資金與沙盒架構:
    - 標的範圍: BTC, ETH, SOL, BNB, DOGE (加密貨幣) 及 XAU/PAXG (黃金)。
-   - 獨立資金池: 每種標的各自擁有獨立的 100.0 USDT 起始資金與複利帳戶，盈虧互不干涉。
-   - 排序格式: 嚴格按照加密貨幣在前、黃金在後的順序輸出與統計。
+   - 獨立資金池: 每種標的各自擁有獨立的 100.0 USDT 起始資金與複利帳戶。
+   - 排序格式: 加密貨幣在前、黃金在後。
 
-2. 加密貨幣策略模型 (4H 方向 + 1H FVG + 15m 執行):
-   - 大方向定錨 (4H): 透過 4H EMA20 與 EMA50 的相對位置判斷中短線趨勢方向（不使用 1D 宏觀過濾，提高進場頻率）。
-   - 缺口偵測 (1H): 在 1H 級別尋找機構不平衡區（FVG）。
+2. 加密貨幣策略模型 (4H 方向 + 1H FVG + 15m 執行 + 10x 槓桿):
+   - 大方向定錨 (4H): 4H EMA20 與 EMA50 相對位置判斷趨勢。
+   - 缺口偵測 (1H): 1H 級別機構不平衡區（FVG）。
    - 微觀進場 (15m): 價格回踩 1H FVG 區間，配合 15m 斐波 0.618 與 15m K線收盤過濾確認進場。
-   - 風控與止損 (SL): 設在結構防守點（FVG 極端邊緣）外側加上 0.2% 緩衝區（Buffer）。每筆交易風險為帳戶權益的 1%。
-   - 分批止盈 (TP): 
-     * TP1: 達到 1.5R 盈虧比時平倉 50% 部位，並將剩餘部位止損推至開倉價（保本）。
-     * TP2: 達到 3.0R 盈虧比時全數平倉。
+   - 風控與止損 (SL): 結構防守點外側加上 0.2% 緩衝區（Buffer）。每筆風險為帳戶權益的 1%。
+   - 槓桿與止盈 (TP): 
+     * 套用 10x 槓桿。
+     * TP1: 達到 2.0R 盈虧比時平倉 50% 部位，並將剩餘部位止損推至開倉價（保本）。
+     * TP2: 達到 5.0R 盈虧比時全數平倉（對標黃金的高回報結構）。
 
 3. 黃金策略模型 (XAU / PAXG):
    - 宏觀定錨 (1D): MA60 判斷多空。
@@ -32,12 +33,12 @@ import numpy as np
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 SYMBOLS = {
-    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1'},
-    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1'},
-    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1'},
-    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1'},
-    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_smc_h1'},
-    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian'}
+    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1_10x', 'lev': 10.0},
+    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1_10x', 'lev': 10.0},
+    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1_10x', 'lev': 10.0},
+    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_smc_h1_10x', 'lev': 10.0},
+    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_smc_h1_10x', 'lev': 10.0},
+    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian',  'lev': 10.0}
 }
 
 INITIAL_WALLET_PER_ASSET = 100.0
@@ -83,7 +84,7 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_independent_sandbox_backtest():
     days = 365
-    period_title = "365 天期 (4H方向 + 1H FVG + 獨立100U沙盒)"
+    period_title = "365 天期 (SMC + 10x槓桿 + 2R/5R止盈)"
     print(f"\n==================================================")
     print(f">>> 開始執行【{period_title}】多資產獨立資金回測...")
     print(f"==================================================")
@@ -161,8 +162,8 @@ def run_independent_sandbox_backtest():
                         risk_dist = entry - sl
                         if risk_dist > 0:
                             qty = (wallet * 0.05) / risk_dist
-                            if (qty * entry) > (wallet * 10.0):
-                                qty = (wallet * 10.0) / entry
+                            if (qty * entry) > (wallet * cfg['lev']):
+                                qty = (wallet * cfg['lev']) / entry
                             pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp': entry + (risk_dist * 5.0), 'be_target': entry + (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
                     elif not bull and bar['c'] < bar['dc_low']:
                         entry = bar['c']
@@ -170,25 +171,23 @@ def run_independent_sandbox_backtest():
                         risk_dist = sl - entry
                         if risk_dist > 0:
                             qty = (wallet * 0.05) / risk_dist
-                            if (qty * entry) > (wallet * 10.0):
-                                qty = (wallet * 10.0) / entry
+                            if (qty * entry) > (wallet * cfg['lev']):
+                                qty = (wallet * cfg['lev']) / entry
                             pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * 5.0), 'be_target': entry - (risk_dist * 2.0), 'qty': qty, 'is_be_moved': False}
 
-        # 2. 加密貨幣策略模式 (4H 方向 + 1H FVG + 15m 執行)
-        elif cfg['mode'] == 'crypto_smc_h1':
+        # 2. 加密貨幣 SMC 策略模式 (10x 槓桿 + 2R/5R 止盈)
+        elif cfg['mode'] == 'crypto_smc_h1_10x':
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
             df_4h  = fetch_binance_klines(cfg['s'], '4h', days=days + 60)
             if df_15m is None or df_1h is None or df_4h is None:
                 continue
 
-            # 4H 大方向判斷 (EMA20 vs EMA50)
             df_4h['ema20'] = df_4h['c'].ewm(span=20, adjust=False).mean()
             df_4h['ema50'] = df_4h['c'].ewm(span=50, adjust=False).mean()
             df_4h['h_date'] = df_4h['time'].dt.floor('H')
             h4_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
 
-            # 1H FVG 偵測
             fvg_1h_map = {}
             for j in range(2, len(df_1h)):
                 b_curr = df_1h.iloc[j]
@@ -256,7 +255,6 @@ def run_independent_sandbox_backtest():
                     h4_bull = h4_map.get(t_hour, True)
                     fvg_info = fvg_1h_map.get(t_hour, {'bull': False, 'bear': False})
 
-                    # 15m 斐波 0.618 與 K線收盤確認
                     sub = df_15m.iloc[i-20:i+1]
                     h_wave, l_wave = sub['h'].max(), sub['l'].min()
                     wave = h_wave - l_wave
@@ -266,21 +264,25 @@ def run_independent_sandbox_backtest():
 
                         if h4_bull and fvg_info['bull'] and (bar['l'] <= fib_0618_l * 1.002) and (bar['c'] > prev_bar['c']):
                             entry = bar['c']
-                            sl = fvg_info['bull_zone'][0] * (1.0 - 0.002) # 0.2% 緩衝
+                            sl = fvg_info['bull_zone'][0] * (1.0 - 0.002)
                             risk_dist = entry - sl
                             if risk_dist > 0:
                                 qty = (wallet * 0.01) / risk_dist
-                                tp1 = entry + (risk_dist * 1.5)
-                                tp2 = entry + (risk_dist * 3.0)
+                                if (qty * entry) > (wallet * cfg['lev']):
+                                    qty = (wallet * cfg['lev']) / entry
+                                tp1 = entry + (risk_dist * 2.0)  # 改為 2.0R 分批
+                                tp2 = entry + (risk_dist * 5.0)  # 改為 5.0R 終極止盈
                                 pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
                         elif not h4_bull and fvg_info['bear'] and (bar['h'] >= fib_0618_s * 0.998) and (bar['c'] < prev_bar['c']):
                             entry = bar['c']
-                            sl = fvg_info['bear_zone'][1] * (1.0 + 0.002) # 0.2% 緩衝
+                            sl = fvg_info['bear_zone'][1] * (1.0 + 0.002)
                             risk_dist = sl - entry
                             if risk_dist > 0:
                                 qty = (wallet * 0.01) / risk_dist
-                                tp1 = entry - (risk_dist * 1.5)
-                                tp2 = entry - (risk_dist * 3.0)
+                                if (qty * entry) > (wallet * cfg['lev']):
+                                    qty = (wallet * cfg['lev']) / entry
+                                tp1 = entry - (risk_dist * 2.0)  # 改為 2.0R 分批
+                                tp2 = entry - (risk_dist * 5.0)  # 改為 5.0R 終極止盈
                                 pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
         tot_t = len(completed_trades)
@@ -298,7 +300,7 @@ def run_independent_sandbox_backtest():
         f"【多資產獨立 100U SMC 沙盒回測報告 - {period_title}】",
         "----------------------------------------------------",
         "資金配置: 每種標的各自獨立 100.0 USDT 帳戶",
-        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1% 風控 / 4H方向 + 1H FVG + 15m收盤)",
+        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1%風控 / 10x槓桿 / 2R與5R止盈)",
         "貴金屬:   XAU (5% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
         "----------------------------------------------------",
         "各標的獨立帳戶績效排序:"
