@@ -274,6 +274,16 @@ def run_backtest(days=365):
     win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
     roi = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
 
+    # 各標的勝率統計
+    symbol_stats = {}
+    for sym in SYMBOLS.keys():
+        sym_trades = [t for t in completed_trades if t['sym'] == sym]
+        sym_total = len(sym_trades)
+        sym_wins = sum(1 for t in sym_trades if t['pnl'] > 0)
+        sym_wr = (sym_wins / sym_total * 100) if sym_total > 0 else 0.0
+        sym_pnl = sum(t['pnl'] for t in sym_trades)
+        symbol_stats[sym] = {'total': sym_total, 'wins': sym_wins, 'wr': sym_wr, 'pnl': sym_pnl}
+
     report = (
         f"```text\n"
         f"【量化策略回測報告 - {period_title}】\n"
@@ -285,15 +295,14 @@ def run_backtest(days=365):
         f"初始資金: ${INITIAL_WALLET:.2f} USDT\n"
         f"最終結餘: ${wallet:.2f} USDT ({roi:+.2f}%)\n"
         f"總成交次數: {total_trades} 次\n"
-        f"勝場數: {win_trades} 次 | 敗場數: {loss_trades} 次\n"
-        f"策略勝率: {win_rate:.2f}%\n"
+        f"總勝場數: {win_trades} 次 | 總敗場數: {loss_trades} 次\n"
+        f"整體策略勝率: {win_rate:.2f}%\n"
         f"----------------------------------------------------\n"
-        f"詳細成交記錄 (最近 10 筆):\n"
+        f"各標的績效與勝率統計:\n"
     )
     
-    for t in completed_trades[-10:]:
-        pnl_sign = "+" if t['pnl'] >= 0 else ""
-        report += f" - 標的: {t['sym'].ljust(4)} | 盈虧: {pnl_sign}{t['pnl']:.2f} USDT\n"
+    for sym, st in symbol_stats.items():
+        report += f" - {sym.ljust(4)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 淨利: {st['pnl']:+6.2f} USDT\n"
     
     report += "```"
     
