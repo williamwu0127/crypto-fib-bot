@@ -33,7 +33,6 @@ TARGET_THEMES = {
     "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
 }
 
-# 嚴格妖股產業白名單（只允許高爆發力的科技與生技族群，剔除所有傳產與金融牛皮股）
 ALLOWED_MONSTER_INDUSTRIES = [
     "半導體業", "電腦及週邊設備", "光電業", "通信網路業", "電子零組件", 
     "電子通路業", "資訊服務業", "其他電子業", "生技醫療業", "電機機械"
@@ -112,28 +111,55 @@ def get_dynamic_all_stocks():
 
 def get_market_and_futures():
     res = {}
+    
+    # 1. 透過證交所官方 MIS 系統抓取大盤即時/盤後精準報價 (tse_t00.tw)
+    try:
+        url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            msg_arr = r.json().get('msgArray', [])
+            if msg_arr:
+                t00 = msg_arr[0]
+                z_str = t00.get('z', '')
+                y_str = t00.get('y', '')
+                
+                spot_close = float(z_str.replace(',', '')) if z_str != '-' else float(y_str.replace(',', ''))
+                prev_close = float(y_str.replace(',', ''))
+                
+                pts = spot_close - prev_close
+                pct = (pts / prev_close) * 100 if prev_close > 0 else 0.0
+                
+                res['spot_close'] = spot_close
+                res['pts'] = pts
+                res['pct'] = pct
+    except Exception:
+        pass
+
+    # 2. 用 yfinance 輔助取得 20 日均線 (若失敗則防呆)
+    ma20 = None
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
-        # 防呆清洗：剔除 Yahoo 給錯的畸形誇張點位（例如 4萬點）
-        df_t = df_t[(df_t['Close'] > 10000) & (df_t['Close'] < 35000)]
-        
-        if not df_t.empty and len(df_t) >= 2:
-            spot_close = float(df_t['Close'].iloc[-1])
-            p_close = float(df_t['Close'].iloc[-2])
-            pts = spot_close - p_close
-            pct = (pts / p_close) * 100
-            ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1]) if len(df_t) >= 20 else spot_close * 0.98
-            trend = "🟢 多頭控盤" if spot_close > ma20 else "🔴 弱勢整理"
-            emoji = "📈" if pts >= 0 else "📉"
-            res = {'spot_close': spot_close, 'pts': pts, 'pct': pct, 'trend': trend, 'emoji': emoji, 'ma20': ma20}
-    except:
+        if not df_t.empty and len(df_t) >= 15:
+            ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
+    except Exception:
         pass
 
+    # 防呆機制
     if 'spot_close' not in res:
-        res = {'spot_close': 22500.0, 'pts': 0.0, 'pct': 0.0, 'trend': "🟢 多頭控盤", 'emoji': "📈", 'ma20': 22000.0}
+        res['spot_close'] = 22500.0
+        res['pts'] = 0.0
+        res['pct'] = 0.0
+        
+    if ma20 is None or pd.isna(ma20):
+        ma20 = res['spot_close'] * 0.98
 
-    # 期貨抓取
+    res['ma20'] = ma20
+    res['trend'] = "🟢 多頭控盤" if res['spot_close'] >= ma20 else "🔴 弱勢整理"
+    res['emoji'] = "📈" if res['pts'] >= 0 else "📉"
+
+    # 3. 台指期貨抓取
     tx_quote = None
     stock_futures = {}
     try:
@@ -151,7 +177,7 @@ def get_market_and_futures():
                 if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
                     if und_id not in stock_futures:
                         stock_futures[und_id] = {"near": {"price": last_p}}
-    except:
+    except Exception:
         pass
 
     if tx_quote and res['spot_close'] > 0:
@@ -176,7 +202,7 @@ def get_spot_orderbook(ticker_list):
                 last_p = float(m.get('z', '0')) if m.get('z', '0') != '-' else 0.0
                 ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
                 if sid: book_dict[sid] = {"ask1": ask_p, "last": last_p}
-    except:
+    except Exception:
         pass
     return book_dict
 
@@ -209,7 +235,6 @@ def analyze_pattern_stages(df, c_price, atr_14):
     else:
         return None
 
-    # 嚴格控制止損幅度 (-3% 至 -7% 之間)
     sl_price = round(max(recent_low_5d * 0.99, c_price - atr_14 * 1.5, c_price * 0.94), 2)
     sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
@@ -247,7 +272,6 @@ def main():
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            # 移除 group_by 以防 MultiIndex 錯亂，採精準逐欄提取
             df_batch = yf.download(chunk, period="3mo", interval="1d", auto_adjust=True, progress=False)
             
             for ticker in chunk:
@@ -268,7 +292,6 @@ def main():
                 today_close = float(df['Close'].iloc[-1])
                 today_vol = float(df['Volume'].iloc[-1])
                 
-                # 流動性過濾：每日成交值必須大於 1 億台幣，剔除無量冷門股
                 est_money_mil = (today_close * today_vol) / 100_000_000
                 if est_money_mil < 1.0 or today_close < 10.0:
                     continue
@@ -277,7 +300,7 @@ def main():
                 atr_14 = calculate_atr(df, 14)
                 atr_pct = (atr_14 / today_close) * 100
 
-                # 1. 高動能妖股篩選 (排除非科技/生技之牛皮股)
+                # 高動能妖股篩選
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and vol_ma5 > 0:
                     vol_ratio = round(today_vol / vol_ma5, 1)
                     if vol_ratio >= 2.5 and atr_pct >= 3.5:
@@ -292,7 +315,7 @@ def main():
                             "score": vol_ratio * atr_pct
                         })
 
-                # 2. 正逆價差套利
+                # 正逆價差套利
                 if sid in stock_futures:
                     near_f = stock_futures[sid].get("near")
                     if near_f:
@@ -309,7 +332,7 @@ def main():
                                 "net_pct_abs": abs(net_pct)
                             })
 
-                # 3. 波段結構篩選
+                # 波段結構篩選
                 p_res = analyze_pattern_stages(df, today_close, atr_14)
                 if p_res:
                     score = p_res["score"] + (15 if theme_str != original_ind else 0)
@@ -317,14 +340,13 @@ def main():
                         "sid": sid, "name": name, "industry": original_ind,
                         "close": f"{today_close:.2f}", "score": score, **p_res
                     })
-        except:
+        except Exception:
             continue
 
-    # 排序與篩選
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
-    top_picks = sorted_all[:6]  # 精選 Top 6
-    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:2] # 妖股 Top 2
-    top_spreads = sorted(spread_candidates, key=lambda x: x['net_pct_abs'], reverse=True)[:1] # 價差 Top 1
+    top_picks = sorted_all[:6]
+    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:2]
+    top_spreads = sorted(spread_candidates, key=lambda x: x['net_pct_abs'], reverse=True)[:1]
 
     fields = []
     fields.append({
