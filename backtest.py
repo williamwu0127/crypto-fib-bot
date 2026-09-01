@@ -2,7 +2,7 @@
 Multi-Asset Quantitative Backtest Engine (30D & 365D - Separated Capital Pools)
 ============================================================
 【策略架構調整】
-- Crypto 資金池 (BTC/ETH): 獨立 $100 USDT | 1D EMA50 -> 4H EMA趨勢 -> 15m 支撐回踩 (高勝率防守)
+- Crypto 資金池 (BTC/ETH): 獨立 $100 USDT | 1D EMA50 -> 4H EMA趨勢 -> 15m 支撐回踩
 - XAU 資金池 (黃金): 獨立 $100 USDT | 1D MA60 -> 4H 唐奇安突破 (高 RR 獵人模式)
 ============================================================
 """
@@ -62,7 +62,7 @@ def fetch_binance_klines(symbol, interval, days=365):
         for col in ['o', 'h', 'l', 'c', 'v']:
             df[col] = df[col].astype(float)
         df['time'] = pd.to_datetime(df['t'], unit='ms')
-        return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time'].reset_index(drop=True)
+        return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
     return None
 
 def run_backtest_period(days=365):
@@ -224,7 +224,7 @@ def run_backtest_period(days=365):
                         risk_dist = abs(entry - sl)
                         if risk_dist > 0:
                             qty = (crypto_wallet * 0.01) / risk_dist
-                            tp = entry + (risk_dist * 2.5)  # 2.5R 穩定盈虧比
+                            tp = entry + (risk_dist * 2.5)
                             pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'qty': qty}
                     elif not d1_bull and not h4_bull and (bar['c'] <= bar['ema50'] <= bar['ema200']) and (bar['h'] >= fib_0618_s * 0.998):
                         entry = bar['c']
@@ -239,7 +239,6 @@ def run_backtest_period(days=365):
     total_trades = len(all_trades)
     win_trades = sum(1 for t in all_trades if t['pnl'] > 0)
     win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
-    total_net_pnl = (gold_wallet - INITIAL_WALLET) + (crypto_wallet - INITIAL_WALLET)
 
     report = (
         f"```text\n"
@@ -262,11 +261,4 @@ def run_backtest_period(days=365):
         t_pnl = sum(t['pnl'] for t in sym_trades)
         report += f" - {sym.ljust(4)} | 次數: {str(t_cnt).ljust(3)} 筆 | 勝率: {t_wr:6.2f}% | 淨利: {t_pnl:+6.2f} USDT\n"
     
-    report += "```"
-    print(report)
-    send_discord(report)
-
-if __name__ == '__main__':
-    run_backtest_period(days=30)
-    time.sleep(1.0)
-    run_backtest_period(days=365)
+    report += "
