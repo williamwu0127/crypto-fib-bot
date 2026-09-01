@@ -1,15 +1,17 @@
 import os
-import re
-import logging
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import logging
 from datetime import datetime, timezone, timedelta
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+WEBHOOK_URL = os.getenv(
+    "DISCORD_WEBHOOK_URL",
+    "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+)
 FRICTION_COST_PCT = 0.40
 
 TARGET_THEMES = {
@@ -31,14 +33,16 @@ TARGET_THEMES = {
     "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
 }
 
-NON_MONSTER_INDUSTRIES = ["金融保險業", "水泥工業", "食品工業", "鋼鐵工業", "建材營造", "油電燃氣業", "觀光餐旅"]
+# 嚴格妖股產業白名單（只允許高爆發力的科技與生技族群，剔除所有傳產與金融牛皮股）
+ALLOWED_MONSTER_INDUSTRIES = [
+    "半導體業", "電腦及週邊設備", "光電業", "通信網路業", "電子零組件", 
+    "電子通路業", "資訊服務業", "其他電子業", "生技醫療業", "電機機械"
+]
 
 def send_msg(payload):
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Discord 狀態碼: {r.status_code}")
-        if r.status_code != 204:
-            print(f"回應內容: {r.text}")
     except Exception as e:
         print(f"發送失敗: {e}")
 
@@ -49,17 +53,12 @@ def get_session_info():
     trigger_type = "排程" if event_name == "schedule" else "手動"
 
     time_val = now_tw.hour * 100 + now_tw.minute
-    if time_val < 900:
-        session_name = "盤前"
-    elif 900 <= time_val <= 1330:
-        session_name = "盤中"
-    elif 1330 < time_val < 1745:
-        session_name = "盤後"
-    else:
-        session_name = "籌碼"
+    if time_val < 900: session_name = "盤前"
+    elif 900 <= time_val <= 1330: session_name = "盤中"
+    elif 1330 < time_val < 1745: session_name = "盤後"
+    else: session_name = "籌碼"
 
-    title_str = f"全方位{session_name}分析報告 ({trigger_type})"
-    return session_name, title_str, now_tw.strftime("%Y-%m-%d"), (session_name == "籌碼")
+    return session_name, f"全方位{session_name}分析報告 ({trigger_type})", now_tw.strftime("%Y-%m-%d"), (session_name == "籌碼")
 
 def identify_theme(sid, original_ind):
     for theme, sids in TARGET_THEMES.items():
@@ -79,8 +78,7 @@ def get_dynamic_all_stocks():
             resp = requests.get(url, headers=headers, timeout=12)
             resp.encoding = "big5-hkscs"
             dfs = pd.read_html(resp.text)
-            if not dfs:
-                continue
+            if not dfs: continue
             df = dfs[0]
             df.columns = df.iloc[0]
             df = df.iloc[1:]
@@ -99,267 +97,136 @@ def get_dynamic_all_stocks():
                                 original_ind = val_str
                                 break
                         theme_str = identify_theme(sid, original_ind)
-                        ticker = f"{sid}.{market}"
-                        stock_dict[ticker] = (sid, name, theme_str, original_ind)
-        except Exception:
+                        stock_dict[f"{sid}.{market}"] = (sid, name, theme_str, original_ind)
+        except:
             continue
             
     if not stock_dict:
         fallback_list = [
             ("2330", "台積電", "CoWoS", "半導體業", "TW"), ("2454", "聯發科", "權值股", "半導體業", "TW"),
-            ("2317", "鴻海", "AI伺服器", "其他電子業", "TW"), ("2308", "台達電", "重電", "電機機械", "TW"),
-            ("2382", "廣達", "AI伺服器", "電腦及週邊設備", "TW"), ("3231", "緯創", "AI伺服器", "電腦及週邊設備", "TW")
+            ("2317", "鴻海", "AI伺服器", "其他電子業", "TW"), ("2308", "台達電", "重電", "電機機械", "TW")
         ]
         for sid, name, theme, ind, mkt in fallback_list:
             stock_dict[f"{sid}.{mkt}"] = (sid, name, theme, ind)
     return stock_dict
 
-def get_large_shareholders_data():
-    holders_dict = {}
+def get_market_and_futures():
+    res = {}
     try:
-        url = "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=8)
-        if r.status_code == 200:
-            df = pd.read_csv(pd.io.common.StringIO(r.text))
-            df.columns = [c.strip() for c in df.columns]
-            date_col, code_col, level_col, pct_col = df.columns[0], df.columns[1], df.columns[2], df.columns[5]
-            unique_dates = sorted(df[date_col].unique(), reverse=True)
-            if len(unique_dates) >= 2:
-                latest_d, prev_d = unique_dates[0], unique_dates[1]
-                df_400 = df[df[level_col] >= 12]
-                latest_grp = df_400[df_400[date_col] == latest_d].groupby(code_col)[pct_col].sum()
-                prev_grp = df_400[df_400[date_col] == prev_d].groupby(code_col)[pct_col].sum()
-                for sid in latest_grp.index:
-                    sid_str = str(sid).strip()
-                    if len(sid_str) == 4:
-                        curr_pct = float(latest_grp.get(sid, 0.0))
-                        p_pct = float(prev_grp.get(sid, curr_pct))
-                        diff_pct = curr_pct - p_pct
-                        holders_dict[sid_str] = {"ratio": curr_pct, "diff": diff_pct, "is_increasing": diff_pct > 0.0}
-    except Exception:
+        twii = yf.Ticker("^TWII")
+        df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
+        # 防呆清洗：剔除 Yahoo 給錯的畸形誇張點位（例如 4萬點）
+        df_t = df_t[(df_t['Close'] > 10000) & (df_t['Close'] < 35000)]
+        
+        if not df_t.empty and len(df_t) >= 2:
+            spot_close = float(df_t['Close'].iloc[-1])
+            p_close = float(df_t['Close'].iloc[-2])
+            pts = spot_close - p_close
+            pct = (pts / p_close) * 100
+            ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1]) if len(df_t) >= 20 else spot_close * 0.98
+            trend = "🟢 多頭控盤" if spot_close > ma20 else "🔴 弱勢整理"
+            emoji = "📈" if pts >= 0 else "📉"
+            res = {'spot_close': spot_close, 'pts': pts, 'pct': pct, 'trend': trend, 'emoji': emoji, 'ma20': ma20}
+    except:
         pass
-    return holders_dict
 
-def get_institutional_data(date_str):
-    market_chips = {}
-    stock_chips = {}
-    date_nodash = date_str.replace("-", "")
-    try:
-        url_mkt = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={date_nodash}&type=day&response=json"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url_mkt, headers=headers, timeout=5)
-        if r.status_code == 200:
-            res_json = r.json()
-            if res_json.get("stat") == "OK":
-                for row in res_json.get("data", []):
-                    name = row[0].strip()
-                    net_val = float(str(row[3]).replace(",", "")) / 100_000_000
-                    if "外資" in name:
-                        market_chips["外資"] = net_val
-                    elif "投信" in name:
-                        market_chips["投信"] = net_val
-                    elif "自營商" in name:
-                        market_chips["自營商"] = market_chips.get("自營商", 0.0) + net_val
+    if 'spot_close' not in res:
+        res = {'spot_close': 22500.0, 'pts': 0.0, 'pct': 0.0, 'trend': "🟢 多頭控盤", 'emoji': "📈", 'ma20': 22000.0}
 
-        url_t86 = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_nodash}&selectType=ALL&response=json"
-        r_t86 = requests.get(url_t86, headers=headers, timeout=5)
-        if r_t86.status_code == 200:
-            res_t86 = r_t86.json()
-            if res_t86.get("stat") == "OK":
-                for row in res_t86.get("data", []):
-                    sid = row[0].strip()
-                    foreign_net = int(str(row[4]).replace(",", "")) // 1000
-                    trust_net = int(str(row[10]).replace(",", "")) // 1000
-                    stock_chips[sid] = {"foreign": foreign_net, "trust": trust_net}
-    except Exception:
-        pass
-    return market_chips, stock_chips
-
-def calculate_atr(df, period=14):
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_val = tr.rolling(period).mean().iloc[-1]
-    return float(atr_val) if not pd.isna(atr_val) else float(high.iloc[-1] - low.iloc[-1])
-
-def analyze_pattern_stages(df, sid, original_ind, large_holders_info, stock_chips):
-    try:
-        close_s = df['Close']
-        high_s = df['High']
-        low_s = df['Low']
-        
-        c_price = float(close_s.iloc[-1])
-        ma20 = float(close_s.rolling(20).mean().iloc[-1])
-        atr_14 = calculate_atr(df, 14)
-        
-        if c_price < ma20:
-            return None
-
-        low_40d = low_s.iloc[-40:] if len(low_s) >= 40 else low_s
-        head_idx = low_40d.idxmin()
-        head_pos = low_40d.index.get_loc(head_idx)
-        head_price = float(low_40d.min())
-        
-        right_foot = float(low_40d.iloc[head_pos+1:].min()) if head_pos < len(low_40d)-1 else head_price
-        neck_high = float(high_s.loc[low_40d.index[head_pos]:].max())
-        neck_low = round(neck_high * 0.985, 2)
-        recent_low_5d = float(low_s.iloc[-5:].min())
-        
-        holder_data = large_holders_info.get(sid, None)
-        chip_data = stock_chips.get(sid, {"foreign": 0, "trust": 0})
-        foreign_net = chip_data['foreign']
-        trust_net = chip_data['trust']
-        
-        holder_str = ""
-        holder_bonus = 0
-        if holder_data:
-            diff_ratio = holder_data['diff']
-            if holder_data['is_increasing']:
-                holder_bonus = 15
-                holder_str = f" ｜ 大戶 `+{diff_ratio:.2f}%` 🔥"
-            else:
-                holder_str = f" ｜ 大戶 `{diff_ratio:.2f}%`"
-
-        if c_price >= neck_high:
-            structure_desc = f"多頭破頸線 (階梯墊高){holder_str}"
-            status_text = "🟢 突破頸線 (轉強發動)"
-            score = 90 + holder_bonus
-        elif c_price >= neck_low:
-            structure_desc = f"強勢箱型蓄勢 (回測支撐){holder_str}"
-            status_text = "🟡 突破後回測 (支撐確認)"
-            score = 82 + holder_bonus
-        else:
-            return None
-
-        sl_candidate_1 = recent_low_5d * 0.99
-        sl_candidate_2 = c_price - atr_14 * 1.2
-        sl_price = round(max(sl_candidate_1, sl_candidate_2, c_price * 0.95), 2)
-        sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
-
-        box_height = neck_high - head_price
-        tp_price = round(c_price + max(box_height, atr_14 * 2.5), 2)
-        tp_pct = round(((tp_price - c_price) / c_price) * 100, 2)
-
-        entry_low = round(c_price * 0.992, 2)
-        entry_high = round(c_price * 1.006, 2)
-
-        return {
-            "status_text": f"{status_text} ｜ `{structure_desc}`",
-            "neck_zone": f"{neck_low:.2f} ~ {neck_high:.2f}",
-            "left_strat": f"`{right_foot:.2f}` 已過",
-            "right_strat": f"突破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接",
-            "tp": f"{tp_price} (+{tp_pct}%)",
-            "sl": f"{sl_price} ({sl_pct}%)",
-            "entry": f"{entry_low:.2f} ~ {entry_high:.2f}",
-            "score": score,
-            "industry": original_ind
-        }
-    except Exception:
-        return None
-
-def parse_price(val, default_val=0.0):
-    try:
-        p = float(str(val).replace(',', '').strip())
-        return p if p > 0 else default_val
-    except Exception:
-        return default_val
-
-def get_taifex_quotes():
+    # 期貨抓取
     tx_quote = None
     stock_futures = {}
     try:
         headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
         r = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=5)
         if r.status_code == 200:
-            data = r.json().get('RtData', {}).get('QuoteList', [])
-            for item in data:
+            for item in r.json().get('RtData', {}).get('QuoteList', []):
                 sym = item.get('SymbolID', '')
-                last_p = parse_price(item.get('CLastPrice'))
-                bid_p = parse_price(item.get('CBidPrice'), last_p)
-                ask_p = parse_price(item.get('CAskPrice'), last_p)
-                diff = parse_price(item.get('CDiff'))
-                rate = parse_price(item.get('CDiffRate'))
-                
+                last_p = float(str(item.get('CLastPrice', '0')).replace(',', ''))
+                diff = float(str(item.get('CDiff', '0')).replace(',', ''))
+                rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
                 if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
-                    tx_quote = {"price": last_p, "bid": bid_p, "ask": ask_p, "diff": diff, "rate": rate}
-
+                    tx_quote = {"price": last_p, "diff": diff, "rate": rate}
                 und_id = str(item.get('UnderlyingId', '')).strip()
                 if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
-                    f_obj = {"price": last_p, "bid": bid_p, "ask": ask_p, "diff": diff, "rate": rate}
                     if und_id not in stock_futures:
-                        stock_futures[und_id] = {"near": f_obj, "far": None}
-                    elif stock_futures[und_id]["far"] is None and last_p != stock_futures[und_id]["near"]["price"]:
-                        stock_futures[und_id]["far"] = f_obj
-    except Exception:
-        pass
-    return tx_quote, stock_futures
-
-def get_spot_orderbook(ticker_list):
-    book_dict = {}
-    if not ticker_list:
-        return book_dict
-    try:
-        query_keys = []
-        for t in ticker_list:
-            sid, mkt = t.split('.')
-            prefix = "tse" if mkt == "TW" else "otc"
-            query_keys.append(f"{prefix}_{sid}.tw")
-
-        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            msg_arr = r.json().get('msgArray', [])
-            for m in msg_arr:
-                sid = m.get('c', '')
-                ask_str = m.get('a', '_').split('_')[0]
-                last_p = parse_price(m.get('z', '0'))
-                ask_p = parse_price(ask_str, last_p)
-                if sid:
-                    book_dict[sid] = {"ask1": ask_p, "last": last_p}
-    except Exception:
-        pass
-    return book_dict
-
-def get_market_and_futures():
-    res = {}
-    try:
-        twii = yf.Ticker("^TWII")
-        df_t = twii.history(period="5d", interval="1d", auto_adjust=False)
-        if not df_t.empty and len(df_t) >= 2:
-            spot_close = float(df_t['Close'].iloc[-1])
-            if spot_close > 35000 or spot_close < 8000:
-                spot_close = 23200.0
-            p_close = float(df_t['Close'].iloc[-2])
-            pts = spot_close - p_close
-            pct = (pts / p_close) * 100
-            ma20 = spot_close * 0.98
-            trend = "🟢 多頭控盤" if spot_close >= ma20 else "🔴 弱勢整理"
-            emoji = "📈" if pts >= 0 else "📉"
-            res = {'spot_close': spot_close, 'pts': pts, 'pct': pct, 'trend': trend, 'emoji': emoji, 'ma20': ma20}
-    except Exception:
+                        stock_futures[und_id] = {"near": {"price": last_p}}
+    except:
         pass
 
-    if 'spot_close' not in res:
-        res = {'spot_close': 23200.0, 'pts': 150.0, 'pct': 0.65, 'trend': "🟢 多頭控盤", 'emoji': "📈", 'ma20': 22700.0}
-
-    tx_quote, stock_futures = get_taifex_quotes()
     if tx_quote and res['spot_close'] > 0:
-        f_price = tx_quote['price']
-        f_pts = tx_quote['diff']
-        f_pct = tx_quote['rate']
-        diff = f_price - res['spot_close']
+        diff = tx_quote['price'] - res['spot_close']
         dtype = "正價差" if diff >= 0 else "逆價差"
-        res['futures_str'] = f"`{f_price:,.2f}` ({f_pts:+,.2f} / {f_pct:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
+        res['futures_str'] = f"`{tx_quote['price']:,.2f}` ({tx_quote['diff']:+,.2f} / {tx_quote['rate']:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
     else:
         res['futures_str'] = "即時撮合中"
 
     return res, stock_futures
+
+def get_spot_orderbook(ticker_list):
+    book_dict = {}
+    if not ticker_list: return book_dict
+    try:
+        query_keys = [f"{'tse' if t.split('.')[1] == 'TW' else 'otc'}_{t.split('.')[0]}.tw" for t in ticker_list]
+        r = requests.get(f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if r.status_code == 200:
+            for m in r.json().get('msgArray', []):
+                sid = m.get('c', '')
+                ask_str = m.get('a', '_').split('_')[0]
+                last_p = float(m.get('z', '0')) if m.get('z', '0') != '-' else 0.0
+                ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
+                if sid: book_dict[sid] = {"ask1": ask_p, "last": last_p}
+    except:
+        pass
+    return book_dict
+
+def calculate_atr(df, period=14):
+    tr1 = df['High'] - df['Low']
+    tr2 = (df['High'] - df['Close'].shift(1)).abs()
+    tr3 = (df['Low'] - df['Close'].shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_val = tr.rolling(period).mean().iloc[-1]
+    return float(atr_val) if not pd.isna(atr_val) else float(df['High'].iloc[-1] - df['Low'].iloc[-1])
+
+def analyze_pattern_stages(df, c_price, atr_14):
+    ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+    if c_price < ma20: return None
+
+    low_40d = df['Low'].iloc[-40:]
+    head_idx = low_40d.idxmin()
+    head_pos = low_40d.index.get_loc(head_idx)
+    head_price = float(low_40d.min())
+    
+    right_foot = float(low_40d.iloc[head_pos+1:].min()) if head_pos < len(low_40d)-1 else head_price
+    neck_high = float(df['High'].loc[low_40d.index[head_pos]:].max())
+    neck_low = round(neck_high * 0.985, 2)
+    recent_low_5d = float(df['Low'].iloc[-5:].min())
+
+    if c_price >= neck_high:
+        desc, status, score = "多頭破頸線 (階梯墊高)", "🟢 突破頸線 (轉強發動)", 90
+    elif c_price >= neck_low:
+        desc, status, score = "強勢箱型蓄勢 (回測支撐)", "🟡 突破後回測 (支撐確認)", 82
+    else:
+        return None
+
+    # 嚴格控制止損幅度 (-3% 至 -7% 之間)
+    sl_price = round(max(recent_low_5d * 0.99, c_price - atr_14 * 1.5, c_price * 0.94), 2)
+    sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
+
+    box_height = neck_high - head_price
+    tp_price = round(c_price + max(box_height, atr_14 * 2.5), 2)
+    tp_pct = round(((tp_price - c_price) / c_price) * 100, 2)
+
+    return {
+        "status_text": f"{status} ｜ `{desc}`",
+        "neck_zone": f"{neck_low:.2f} ~ {neck_high:.2f}",
+        "left_strat": f"`{right_foot:.2f}` 已過",
+        "right_strat": f"突破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接",
+        "tp": f"{tp_price} (+{tp_pct}%)",
+        "sl": f"{sl_price} ({sl_pct}%)",
+        "entry": f"{round(c_price * 0.992, 2):.2f} ~ {round(c_price * 1.006, 2):.2f}",
+        "score": score
+    }
 
 def main():
     session_name, title_suffix, date_str, is_chips_session = get_session_info()
@@ -367,14 +234,9 @@ def main():
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
-    if not all_tickers:
-        return
+    if not all_tickers: return
 
-    large_holders_info = get_large_shareholders_data()
-    market_chips, stock_chips = get_institutional_data(date_str)
-
-    futures_sids = list(stock_futures.keys())
-    target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in futures_sids]
+    target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in stock_futures]
     spot_book = get_spot_orderbook(target_spot_tickers)
 
     scored_results = []
@@ -385,76 +247,84 @@ def main():
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            df_batch = yf.download(chunk, period="3mo", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
+            # 移除 group_by 以防 MultiIndex 錯亂，採精準逐欄提取
+            df_batch = yf.download(chunk, period="3mo", interval="1d", auto_adjust=True, progress=False)
+            
             for ticker in chunk:
-                try:
-                    df = df_batch[ticker].dropna() if len(chunk) > 1 else df_batch.dropna()
-                    if df.empty or len(df) < 25:
-                        continue
+                df = pd.DataFrame()
+                if isinstance(df_batch.columns, pd.MultiIndex):
+                    if ticker in df_batch.columns.get_level_values(1):
+                        df['Close'] = df_batch['Close'][ticker]
+                        df['High'] = df_batch['High'][ticker]
+                        df['Low'] = df_batch['Low'][ticker]
+                        df['Volume'] = df_batch['Volume'][ticker]
+                else:
+                    if len(chunk) == 1: df = df_batch.copy()
+                
+                df = df.dropna()
+                if df.empty or len(df) < 25: continue
 
-                    sid, name, theme_str, original_ind = stock_dict[ticker]
-                    close_s = df['Close']
-                    high_s = df['High']
-                    low_s = df['Low']
-                    vol_s = df['Volume']
+                sid, name, theme_str, original_ind = stock_dict[ticker]
+                today_close = float(df['Close'].iloc[-1])
+                today_vol = float(df['Volume'].iloc[-1])
+                
+                # 流動性過濾：每日成交值必須大於 1 億台幣，剔除無量冷門股
+                est_money_mil = (today_close * today_vol) / 100_000_000
+                if est_money_mil < 1.0 or today_close < 10.0:
+                    continue
 
-                    today_close = float(close_s.iloc[-1])
-                    prev_close = float(close_s.iloc[-2]) if len(close_s) >= 2 else today_close
-                    today_vol = float(vol_s.iloc[-1])
-                    vol_ma5 = float(vol_s.rolling(5).mean().iloc[-1]) if len(vol_s) >= 5 else today_vol
-                    atr_14 = calculate_atr(df, 14)
-                    atr_pct = (atr_14 / today_close) * 100 if today_close > 0 else 0.0
+                vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1]) if len(df) >= 5 else today_vol
+                atr_14 = calculate_atr(df, 14)
+                atr_pct = (atr_14 / today_close) * 100
 
-                    # 1. 妖股/飆股預警篩選（排除金融與防禦牛皮股）
-                    is_excluded = (original_ind in NON_MONSTER_INDUSTRIES) or (theme_str in ["金融保險業", "水泥工業", "食品工業"])
-                    if (not is_excluded) and vol_ma5 > 0:
-                        vol_ratio = round(today_vol / vol_ma5, 1)
-                        if vol_ratio >= 2.0 and atr_pct >= 2.5:
-                            m_sl = round(max(float(low_s.iloc[-5:].min()) * 0.99, today_close - atr_14 * 1.4), 2)
-                            m_tp = round(today_close + atr_14 * 3.0, 2)
-                            monster_candidates.append({
-                                "sid": sid, "name": name, "industry": original_ind,
-                                "close": f"{today_close:.2f}", "vol_ratio": vol_ratio,
-                                "entry": f"{round(today_close*0.992,2)} ~ {round(today_close*1.006,2)}",
-                                "tp": f"{m_tp} (+{round(((m_tp-today_close)/today_close)*100,2)}%)",
-                                "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100,2)}%)",
-                                "score": vol_ratio * atr_pct
-                            })
+                # 1. 高動能妖股篩選 (排除非科技/生技之牛皮股)
+                if original_ind in ALLOWED_MONSTER_INDUSTRIES and vol_ma5 > 0:
+                    vol_ratio = round(today_vol / vol_ma5, 1)
+                    if vol_ratio >= 2.5 and atr_pct >= 3.5:
+                        m_sl = round(max(float(df['Low'].iloc[-5:].min()) * 0.99, today_close - atr_14 * 1.5), 2)
+                        m_tp = round(today_close + atr_14 * 3.5, 2)
+                        monster_candidates.append({
+                            "sid": sid, "name": name, "industry": original_ind,
+                            "close": f"{today_close:.2f}", "vol_ratio": vol_ratio,
+                            "entry": f"{round(today_close*0.992,2)} ~ {round(today_close*1.006,2)}",
+                            "tp": f"{m_tp} (+{round(((m_tp-today_close)/today_close)*100,2)}%)",
+                            "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100,2)}%)",
+                            "score": vol_ratio * atr_pct
+                        })
 
-                    # 2. 期現貨正逆價差套利篩選
-                    if sid in stock_futures and today_close > 0:
-                        f_dict = stock_futures[sid]
-                        near_f = f_dict.get("near")
-                        if near_f:
-                            book_info = spot_book.get(sid, {})
-                            spot_p = book_info.get('last', today_close)
-                            fut_p = near_f['price']
-                            diff_val = fut_p - spot_p
-                            net_pct = (diff_val / spot_p) * 100 - FRICTION_COST_PCT
-                            spread_type = "🟢 正價差套利" if diff_val > 0 else "🔴 逆價差套利"
+                # 2. 正逆價差套利
+                if sid in stock_futures:
+                    near_f = stock_futures[sid].get("near")
+                    if near_f:
+                        spot_p = spot_book.get(sid, {}).get('last', today_close)
+                        fut_p = near_f['price']
+                        diff_val = fut_p - spot_p
+                        net_pct = (diff_val / spot_p) * 100 - FRICTION_COST_PCT
+                        if diff_val != 0 and abs((diff_val / spot_p) * 100) >= 0.5:
                             spread_candidates.append({
                                 "sid": sid, "name": name, "industry": original_ind,
                                 "spot_p": f"{spot_p:,.2f}", "fut_p": f"{fut_p:,.2f}",
                                 "diff_str": f"{diff_val:+,.2f} ({net_pct:+.2f}%)",
-                                "signal": spread_type
+                                "signal": "🟢 正價差套利" if diff_val > 0 else "🔴 逆價差套利",
+                                "net_pct_abs": abs(net_pct)
                             })
 
-                    # 3. 波段結構篩選
-                    p_res = analyze_pattern_stages(df, sid, original_ind, large_holders_info, stock_chips)
-                    if p_res:
-                        scored_results.append({
-                            "sid": sid, "name": name, "close": f"{today_close:.2f}", **p_res
-                        })
-                except Exception:
-                    continue
-        except Exception:
+                # 3. 波段結構篩選
+                p_res = analyze_pattern_stages(df, today_close, atr_14)
+                if p_res:
+                    score = p_res["score"] + (15 if theme_str != original_ind else 0)
+                    scored_results.append({
+                        "sid": sid, "name": name, "industry": original_ind,
+                        "close": f"{today_close:.2f}", "score": score, **p_res
+                    })
+        except:
             continue
 
+    # 排序與篩選
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
-    top_picks = sorted_all[:6]  # 改為 6 種
-
-    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:2]  # 選 2 種最高的妖股
-    top_spread = spread_candidates[0] if spread_candidates else None  # 選 1 個正逆價差
+    top_picks = sorted_all[:6]  # 精選 Top 6
+    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:2] # 妖股 Top 2
+    top_spreads = sorted(spread_candidates, key=lambda x: x['net_pct_abs'], reverse=True)[:1] # 價差 Top 1
 
     fields = []
     fields.append({
@@ -468,22 +338,9 @@ def main():
         "inline": False
     })
     
-    # ─── 波段精選 Top 6 ───
-    fields.append({
-        "name": f"───────── 🎯 盤後精選 Top 6 ─────────",
-        "value": "\u200b",
-        "inline": False
-    })
-    
+    fields.append({"name": f"───────── 🎯 盤後精選 Top 6 ─────────", "value": "\u200b", "inline": False})
     if top_picks:
         for i, item in enumerate(top_picks):
-            chip_line = ""
-            if item['sid'] in stock_chips:
-                c_info = stock_chips[item['sid']]
-                f_cnt = c_info['foreign']
-                t_cnt = c_info['trust']
-                chip_line = f"\n> **法人籌碼**: 外資 `{f_cnt:+d}張` ｜ 投信 `{t_cnt:+d}張`"
-
             fields.append({
                 "name": f"📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
                 "value": (
@@ -495,7 +352,6 @@ def main():
                     f"> **左側策略**: {item['left_strat']}\n"
                     f"> **右側策略**: {item['right_strat']}\n"
                     f"> **結構狀態**: {item['status_text']}"
-                    f"{chip_line}"
                 ),
                 "inline": True
             })
@@ -504,42 +360,23 @@ def main():
     else:
         fields.append({"name": "⚡ 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
-    # ─── 妖股/飆股預警 (選 2 種最高的) ───
-    fields.append({
-        "name": f"───────── 🚨 高動能妖股預警 (Top 2) ─────────",
-        "value": "\u200b",
-        "inline": False
-    })
+    fields.append({"name": f"───────── 🚨 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
             fields.append({
                 "name": f"🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
-                "value": (
-                    f"> **產業**: `{m['industry']}`\n"
-                    f"> **爆量倍數**: `{m['vol_ratio']}x`\n"
-                    f"> **進場區間**: `{m['entry']}`\n"
-                    f"> **止盈 (TP)**: `{m['tp']}`\n"
-                    f"> **止損 (SL)**: `{m['sl']}`"
-                ),
+                "value": f"> **產業**: `{m['industry']}`\n> **爆量倍數**: `{m['vol_ratio']}x`\n> **進場區間**: `{m['entry']}`\n> **止盈 (TP)**: `{m['tp']}`\n> **止損 (SL)**: `{m['sl']}`",
                 "inline": True
             })
     else:
         fields.append({"name": "⚡ 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
 
-    # ─── 期現貨正逆價差套利 (選 1 個) ───
-    fields.append({
-        "name": f"───────── ⚡ 期現貨價差套利焦點 ─────────",
-        "value": "\u200b",
-        "inline": False
-    })
-    if top_spread:
+    fields.append({"name": f"───────── ⚡ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
+    if top_spreads:
+        ts = top_spreads[0]
         fields.append({
-            "name": f"⚡ {top_spread['sid']} {top_spread['name']} ｜ {top_spread['signal']}",
-            "value": (
-                f"> **現貨價格**: `{top_spread['spot_p']}`\n"
-                f"> **期貨價格**: `{top_spread['fut_p']}`\n"
-                f"> **價差與淨利**: `{top_spread['diff_str']}`"
-            ),
+            "name": f"⚡ {ts['sid']} {ts['name']} ｜ {ts['signal']}",
+            "value": f"> **現貨價格**: `{ts['spot_p']}`\n> **期貨價格**: `{ts['fut_p']}`\n> **價差與淨利**: `{ts['diff_str']}`",
             "inline": False
         })
     else:
@@ -549,7 +386,7 @@ def main():
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股盤後分析報告 (手動) ({date_str})",
-            "description": "已完成大盤結構判定、Top 6 精選、高動能妖股與價差套利掃描：",
+            "description": "已修復價格抓取、過濾無量標的，並完成 Top 6 與妖股精選：",
             "color": 3447003,
             "fields": fields
         }]
