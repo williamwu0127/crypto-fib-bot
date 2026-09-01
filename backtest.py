@@ -31,7 +31,7 @@ SYMBOLS_CONFIG = {
     },
     'ETH': {
         's': 'ETHUSDT', 'interval': '15m', 'mode': 'smc_conservative',
-        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True
+        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': False
     },
     'SOL': {
         's': 'SOLUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
