@@ -1,13 +1,13 @@
 """
 Multi-Asset 365-Day Shared Pool Backtest Engine (GitHub Edition)
 ================================================================================
-【GitHub 365 天回測專用版本 - 合併共用資金池架構】
+【GitHub 365 天回測專用版本 - 合併共用資金池架構 (BTC 僅觀察)】
 1. 資金架構:
-   - 模式: 所有標的合併共用單一 100.0 USDT 初始資金池，動態連鎖複利。
-   - 排序: 嚴格保持 BTC -> ETH -> SOL -> BNB -> DOGE -> XAU。
+   - 模式: 實盤標的合併共用單一 100.0 USDT 初始資金池進行動態複利。
+   - 排序: 資金接力順序為 ETH -> SOL -> BNB -> DOGE -> XAU (BTC 僅列觀察)。
 
 2. 各幣種專屬最佳化配置:
-   - BTC : 1.0% 風控 / 1x / 4H EMA20/50 + 1H FVG + 15m 斐波0.618 / 1.5R (平50%) + 3.0R (全平)
+   - BTC : 【純觀察】15m SMC 結構監控，不參與資金池開倉。
    - ETH : 1.0% 風控 / 1x / 4H EMA20/50 + 1H FVG + 15m 斐波0.618 / 1.5R (平50%) + 3.0R (全平)
    - SOL : 5.0% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
    - BNB : 2.5% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平30%移保本) + 5.0R (平70%)
@@ -26,28 +26,28 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 SYMBOLS_CONFIG = {
     'BTC': {
-        's': 'BTCUSDT', 'interval': '15m', 'mode': 'smc_conservative',
-        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5
+        's': 'BTCUSDT', 'interval': '15m', 'mode': 'view_only',
+        'lev': 1.0, 'risk': 0.00, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': False
     },
     'ETH': {
         's': 'ETHUSDT', 'interval': '15m', 'mode': 'smc_conservative',
-        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5
+        'lev': 1.0, 'risk': 0.01, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True
     },
     'SOL': {
         's': 'SOLUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
-        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5
+        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5, 'trade': True
     },
     'BNB': {
         's': 'BNBUSDT', 'interval': '15m', 'mode': 'ict_hybrid',
-        'lev': 10.0, 'risk': 0.025, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.3
+        'lev': 10.0, 'risk': 0.025, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.3, 'trade': True
     },
     'DOGE': {
         's': 'DOGEUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
-        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5
+        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5, 'trade': True
     },
     'XAU': {
         's': 'PAXGUSDT', 'interval': '4h', 'mode': 'gold_donchian',
-        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0
+        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0, 'trade': True
     }
 }
 
@@ -94,20 +94,20 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_shared_portfolio_backtest():
     days = 365
-    period_title = "365 天期 (各幣種專屬最佳策略 - 合併共用 100U 資金池)"
+    period_title = "365 天期 (BTC 觀察 + 多資產共用 100U 複利池)"
     print("\n==================================================")
     print(f">>> 開始執行【{period_title}】合併資金池回測...")
     print("==================================================")
 
     shared_wallet = float(INITIAL_SHARED_WALLET)
     asset_performance = {}
-    sorted_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
+    trade_symbols = ['ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
 
-    for sym in sorted_symbols:
+    for sym in trade_symbols:
         cfg = SYMBOLS_CONFIG[sym]
         start_wallet_for_sym = shared_wallet
         completed_trades = []
-        print(f"執行標的: {sym.ljust(5)} | 策略模式: {cfg['mode'].ljust(16)} | 當前共用資金池: ${shared_wallet:.2f} USDT...", flush=True)
+        print(f"執行標的: {sym.ljust(5)} | 模式: {cfg['mode'].ljust(16)} | 當前共用資金池: ${shared_wallet:.2f} USDT...", flush=True)
 
         # ---------------- 1. 黃金專屬：唐奇安趨勢 ----------------
         if cfg['mode'] == 'gold_donchian':
@@ -186,7 +186,7 @@ def run_shared_portfolio_backtest():
                                 qty = (shared_wallet * cfg['lev']) / entry
                             pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * cfg['tp2_r']), 'be_target': entry - (risk_dist * cfg['tp1_r']), 'qty': qty, 'is_be_moved': False}
 
-        # ---------------- 2. 加密貨幣：BTC / ETH 穩健 SMC (1.5R/3.0R) ----------------
+        # ---------------- 2. 加密貨幣：ETH 穩健 SMC (1.5R/3.0R) ----------------
         elif cfg['mode'] == 'smc_conservative':
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
@@ -469,7 +469,7 @@ def run_shared_portfolio_backtest():
         "各標的專屬配置與接力表現:"
     ]
 
-    for sym in sorted_symbols:
+    for sym in trade_symbols:
         if sym in asset_performance:
             st = asset_performance[sym]
             report_lines.append(
@@ -477,6 +477,7 @@ def run_shared_portfolio_backtest():
                 f"結算資金: ${st['end_wallet']:7.2f} (階段貢獻: {st['seg_roi']:+.2f}%)"
             )
 
+    report_lines.append(" - BTC   | 【純觀察標的】不參與資金池開倉與接力")
     report_lines.append("====================================================================")
     report_lines.append("```")
     report = "\n".join(report_lines)
