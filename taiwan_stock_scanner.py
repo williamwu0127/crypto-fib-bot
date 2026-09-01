@@ -8,10 +8,8 @@ from datetime import datetime, timezone, timedelta
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-WEBHOOK_URL = os.getenv(
-    "DISCORD_WEBHOOK_URL",
-    "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
-)
+WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+
 FRICTION_COST_PCT = 0.40
 
 TARGET_THEMES = {
