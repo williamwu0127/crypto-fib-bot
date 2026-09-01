@@ -7,13 +7,18 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
+# 抑制 yfinance 報錯日誌
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 直接寫死指定之 Discord Webhook
-WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+WEBHOOK_URL = os.getenv(
+    "DISCORD_WEBHOOK_URL",
+    "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+)
 
+# 交易摩擦成本（現貨+期貨來回手續費與稅金 ≈ 0.40%）
 FRICTION_COST_PCT = 0.40
 
+# 指定 15 大核心聚焦族群庫 (Top 6 專屬池)
 TARGET_THEMES = {
     "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
     "AI伺服器": ["2382", "3231", "6669", "2356", "2376", "2317", "2301", "3017", "2421"],
@@ -33,6 +38,7 @@ TARGET_THEMES = {
     "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
 }
 
+# 飆股排除低波動/防禦族群
 NON_MONSTER_INDUSTRIES = ["金融保險業", "水泥工業", "食品工業", "鋼鐵工業", "建材營造", "油電燃氣業", "觀光餐旅"]
 
 def send_msg(payload):
@@ -109,10 +115,12 @@ def get_dynamic_all_stocks():
     return stock_dict
 
 def get_institutional_data(date_str):
+    """抓取 TWSE/TPEx 盤後三大法人買賣超統計與個股籌碼"""
     market_chips = {}
     stock_chips = {}
     date_nodash = date_str.replace("-", "")
     try:
+        # 1. 大盤三大法人買賣超
         url_mkt = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={date_nodash}&type=day&response=json"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url_mkt, headers=headers, timeout=5)
@@ -121,7 +129,7 @@ def get_institutional_data(date_str):
             if res_json.get("stat") == "OK":
                 for row in res_json.get("data", []):
                     name = row[0].strip()
-                    net_val = float(str(row[3]).replace(",", "")) / 100_000_000
+                    net_val = float(str(row[3]).replace(",", "")) / 100_000_000 # 億元
                     if "外資" in name:
                         market_chips["外資"] = net_val
                     elif "投信" in name:
@@ -129,6 +137,7 @@ def get_institutional_data(date_str):
                     elif "自營商" in name:
                         market_chips["自營商"] = market_chips.get("自營商", 0.0) + net_val
 
+        # 2. 個股三大法人買賣超 (上市 T86)
         url_t86 = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_nodash}&selectType=ALL&response=json"
         r_t86 = requests.get(url_t86, headers=headers, timeout=5)
         if r_t86.status_code == 200:
@@ -136,8 +145,8 @@ def get_institutional_data(date_str):
             if res_t86.get("stat") == "OK":
                 for row in res_t86.get("data", []):
                     sid = row[0].strip()
-                    foreign_net = int(str(row[4]).replace(",", "")) // 1000
-                    trust_net = int(str(row[10]).replace(",", "")) // 1000
+                    foreign_net = int(str(row[4]).replace(",", "")) // 1000 # 張
+                    trust_net = int(str(row[10]).replace(",", "")) // 1000   # 張
                     stock_chips[sid] = {"foreign": foreign_net, "trust": trust_net}
     except Exception:
         pass
@@ -219,6 +228,7 @@ def analyze_pattern_stages(df, sid, theme_str):
         if is_target_theme:
             score += 15
 
+        # 每檔獨立動態 SL
         support_levels = [recent_low_5d * 0.992, c_price - atr_14 * 1.5]
         if c_price >= neck_low:
             support_levels.append(neck_low * 0.988)
@@ -228,6 +238,7 @@ def analyze_pattern_stages(df, sid, theme_str):
         sl_price = max(sl_price, round(c_price * 0.920, 2))
         sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
 
+        # 每檔獨立動態 TP（純形態學等幅測幅）
         box_height = neck_high - right_foot
         pattern_target = round(c_price + max(box_height, atr_14 * 2.2), 2)
         tp_price = pattern_target
@@ -399,6 +410,7 @@ def main():
         print("未獲取到股票清單，結束。")
         return
 
+    # 18:00 籌碼時段：額外獲取三大法人數據
     market_chips, stock_chips = get_institutional_data(date_str) if is_chips_session else ({}, {})
 
     futures_sids = list(stock_futures.keys())
@@ -437,6 +449,7 @@ def main():
                     if is_limit_up_locked_over_hour(df, today_close, prev_close):
                         continue
 
+                    # 遠月正價差全域掃描
                     if sid in stock_futures and today_close > 0:
                         f_dict = stock_futures[sid]
                         far_f = f_dict.get("far")
@@ -481,6 +494,7 @@ def main():
                     if gain_5d > 25.0 and yesterday_pct >= 9.0:
                         continue
 
+                    # ----------------- 全域推薦（重構版：排除低波動傳產/金融 + 具備 ATR% >= 3.0% 飆股基因） -----------------
                     recent_high_20d = float(high_s.iloc[-21:-1].max())
                     recent_low_20d = float(low_s.iloc[-21:-1].min())
                     box_range_pct = (recent_high_20d - recent_low_20d) / recent_low_20d if recent_low_20d > 0 else 99
@@ -491,6 +505,7 @@ def main():
                         m_entry_low = round(today_close * 0.992, 2)
                         m_entry_high = round(today_close * 1.006, 2)
                         m_sl = round(max(recent_low_20d * 0.99, today_close - atr_14 * 1.4), 2)
+                        # 飆股爆發測幅：給予 3.5 倍 ATR 之波段噴發空間
                         m_tp = round(today_close + max(recent_high_20d - recent_low_20d, atr_14 * 3.5), 2)
 
                         monster_stocks.append({
@@ -504,6 +519,7 @@ def main():
                             "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100, 2)}%)"
                         })
 
+                    # 波段評分
                     p_res = analyze_pattern_stages(df, sid, theme_str)
                     if p_res:
                         scored_results.append({
@@ -539,6 +555,7 @@ def main():
 
     fields = []
     
+    # 1. 大盤解析（含 18:00 三大法人籌碼匯總）
     if 'spot_close' in market_info:
         fut_text = f"\n> **台指期貨**: {market_info.get('futures_str', '即時撮合中')}"
         chips_summary_text = ""
@@ -564,6 +581,7 @@ def main():
             "inline": False
         })
     
+    # 2. 波段精選 Top 6（已將族群移至標題列）
     fields.append({
         "name": f"───────── 🎯 {session_name}波段精選 Top 6 (核心族群) ─────────",
         "value": "\u200b",
@@ -600,6 +618,7 @@ def main():
                 "inline": False
             })
 
+    # 3. 全域推薦（飆股狂飆預警）
     fields.append({
         "name": "───────── 🚨 全域推薦 (飆股狂飆預警) ─────────",
         "value": "\u200b",
@@ -632,6 +651,7 @@ def main():
             "inline": False
         })
 
+    # 4. 期現貨正價差套利焦點
     fields.append({
         "name": "───────── ⚡ 期現貨正價差套利焦點 ─────────",
         "value": "\u200b",
