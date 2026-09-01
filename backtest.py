@@ -243,7 +243,6 @@ def run_365d_backtest():
                     sub = df_15m.iloc[i-25:i+1]
                     h, l = sub['h'].max(), sub['l'].min()
                     wave = h - l
-                    # 門檻提升至 0.008 (0.8%) 以過濾震盪雜訊
                     if wave > 0 and (wave / l) >= 0.008:
                         fib_0618_l = h - (wave * 0.618)
                         fib_0618_s = l + (wave * 0.618)
@@ -296,4 +295,19 @@ def run_365d_backtest():
         f"初始資金: ${INITIAL_WALLET:.2f} USDT\n"
         f"最終結餘: ${wallet:.2f} USDT ({roi:+.2f}%)\n"
         f"總成交次數: {total_trades} 次\n"
-        f
+        f"總勝場數: {win_trades} 次 | 總敗場數: {loss_trades} 次\n"
+        f"整體策略勝率: {win_rate:.2f}%\n"
+        f"----------------------------------------------------\n"
+        f"各標的績效與勝率統計:\n"
+    )
+    
+    for sym, st in symbol_stats.items():
+        report += f" - {sym.ljust(4)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 淨利: {st['pnl']:+6.2f} USDT\n"
+    
+    report += "```"
+    
+    print(report)
+    send_discord(report)
+
+if __name__ == '__main__':
+    run_365d_backtest()
