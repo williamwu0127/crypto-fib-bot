@@ -1,18 +1,19 @@
 """
-Multi-Asset 365-Day Shared Pool Backtest Engine (GitHub Edition)
+Multi-Asset 365-Day High-Leverage Small-Margin Shared Pool Backtest Engine
 ================================================================================
-【GitHub 365 天回測專用版本 - 合併共用資金池架構 (BTC/ETH 僅觀察)】
+【GitHub 365 天回測專用版本 - 高槓桿 / 小保證金共用資金池架構】
 1. 資金架構:
    - 模式: 實盤標的合併共用單一 100.0 USDT 初始資金池進行動態複利。
-   - 排序: 資金接力順序為 SOL -> BNB -> DOGE -> XAU (BTC 與 ETH 僅列觀察)。
+   - 槓桿升級: 加密貨幣升至 20x~25x，黃金升至 20x，大幅降低單筆保證金佔用，徹底解決多單卡倉。
+   - 排序: 資金接力順序為 SOL -> BNB -> DOGE -> XAU (BTC/ETH 列為純觀察)。
 
 2. 各幣種專屬最佳化配置:
    - BTC : 【純觀察】15m SMC 結構監控，不參與資金池開倉。
    - ETH : 【純觀察】15m SMC 結構監控，不參與資金池開倉。
-   - SOL : 5.0% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
-   - BNB : 2.5% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平30%移保本) + 5.0R (平70%)
-   - DOGE: 5.0% 風控 / 10x / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
-   - XAU : 5.0% 風控 / 10x / 1D MA60 + 4H 唐奇安(20) / 1.5 ATR / 2.0R 保本 / 5.0R 全平
+   - SOL : 5.0% 風控 / 25x 槓桿 / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
+   - BNB : 2.5% 風控 / 25x 槓桿 / 1H 流動性+OB+FVG+OTE / 2.0R (平30%移保本) + 5.0R (平70%)
+   - DOGE: 5.0% 風控 / 20x 槓桿 / 1H 流動性+OB+FVG+OTE / 2.0R (平50%移保本) + 5.0R (全平)
+   - XAU : 5.0% 風控 / 20x 槓桿 / 1D MA60 + 4H 唐奇安(20) / 1.5 ATR / 2.0R 保本 / 5.0R 全平
 ================================================================================
 """
 
@@ -35,19 +36,19 @@ SYMBOLS_CONFIG = {
     },
     'SOL': {
         's': 'SOLUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
-        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5, 'trade': True
+        'lev': 25.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5, 'trade': True
     },
     'BNB': {
         's': 'BNBUSDT', 'interval': '15m', 'mode': 'ict_hybrid',
-        'lev': 10.0, 'risk': 0.025, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.3, 'trade': True
+        'lev': 25.0, 'risk': 0.025, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.3, 'trade': True
     },
     'DOGE': {
         's': 'DOGEUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
-        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5, 'trade': True
+        'lev': 20.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5, 'trade': True
     },
     'XAU': {
         's': 'PAXGUSDT', 'interval': '4h', 'mode': 'gold_donchian',
-        'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0, 'trade': True
+        'lev': 20.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0, 'trade': True
     }
 }
 
@@ -94,7 +95,7 @@ def fetch_binance_klines(symbol, interval, days=365):
 
 def run_shared_portfolio_backtest():
     days = 365
-    period_title = "365 天期 (BTC/ETH 觀察 + 多資產共用 100U 複利池)"
+    period_title = "365 天期 (小保證金高槓桿 + BTC/ETH 觀察 + 100U 共用池)"
     print("\n==================================================")
     print(f">>> 開始執行【{period_title}】合併資金池回測...")
     print("==================================================")
@@ -107,9 +108,9 @@ def run_shared_portfolio_backtest():
         cfg = SYMBOLS_CONFIG[sym]
         start_wallet_for_sym = shared_wallet
         completed_trades = []
-        print(f"執行標的: {sym.ljust(5)} | 模式: {cfg['mode'].ljust(16)} | 當前共用資金池: ${shared_wallet:.2f} USDT...", flush=True)
+        print(f"執行標的: {sym.ljust(5)} | 模式: {cfg['mode'].ljust(16)} | 槓桿: {cfg['lev']}x | 當前共用資金池: ${shared_wallet:.2f} USDT...", flush=True)
 
-        # ---------------- 1. 黃金專屬：唐奇安趨勢 ----------------
+        # ---------------- 1. 黃金專屬：唐奇安趨勢 (20x) ----------------
         if cfg['mode'] == 'gold_donchian':
             df_4h = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
             df_1d = fetch_binance_klines(cfg['s'], '1d', days=days + 60)
@@ -186,7 +187,7 @@ def run_shared_portfolio_backtest():
                                 qty = (shared_wallet * cfg['lev']) / entry
                             pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp': entry - (risk_dist * cfg['tp2_r']), 'be_target': entry - (risk_dist * cfg['tp1_r']), 'qty': qty, 'is_be_moved': False}
 
-        # ---------------- 2. 加密貨幣：SOL / BNB / DOGE ICT Pro 體系 ----------------
+        # ---------------- 2. 加密貨幣：SOL / BNB / DOGE ICT Pro 體系 (20x~25x) ----------------
         elif cfg['mode'] in ['ict_aggressive', 'ict_hybrid']:
             df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
             df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
