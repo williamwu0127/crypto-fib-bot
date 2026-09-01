@@ -1,21 +1,9 @@
 """
-Multi-Asset Quantitative Backtest Engine (365 Days)
-============================================================
-【實盤策略規則說明】
-1. BTC / ETH 實盤策略 (1% 動態風控):
-   - 宏觀定錨: 1D 日線 EMA50 (價格 >= EMA50 僅做多，反之僅做空)
-   - 趨勢過濾: 4H 均線趨勢 (EMA20 vs EMA50 銅牆鐵壁過濾)
-   - 微觀進場: 15m 斐波 0.618 回踩 + RSI 動能確認
-   - 出場機制: 分批止盈 (TP1 達成平倉 50% 並移止損至 TP1，TP2 達斐波 1.272 擴展)
-   - 結構防守: 實體跌破/突破關鍵 EMA50 或起漲點立即平倉
-
-2. XAU (黃金) 實盤策略 (5% 風控 / 10x 槓桿):
-   - 宏觀定錨: 1D 日線 MA60 (價格 > MA60 僅做多，反之僅做空)
-   - 突破進場: 4H 唐奇安通道 (Donchian 20) 突破進場
-   - 風控防守: 1.5 ATR 初始止損
-   - 動態保本: 浮盈達到 2.0R 時自動將止損平移至開倉價 (保本)
-   - 終極止盈: 達到 5.0R 盈虧比全額止盈
-============================================================
+Multi-Asset Independent Sandbox Backtest Engine (365 Days)
+- Assets: BTC, ETH, SOL, BNB, DOGE, XAU (PAXG)
+- Capital: Each asset has an independent 100.0 USDT starting pool
+- Gold Strategy: 1D MA60 -> 4H Donchian(20) -> 1.5 ATR -> 2.0R BE -> 5.0R TP (5% Risk / 10x)
+- Crypto Strategy: 1D EMA50 -> 4H EMA Trend -> 15m Fibonacci 0.618 (1% Risk)
 """
 
 import os
@@ -27,12 +15,15 @@ import numpy as np
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 SYMBOLS = {
-    'BTC': {'s': 'BTCUSDT', 'interval': '15m', 'mode': 'crypto_triple_screen'},
-    'ETH': {'s': 'ETHUSDT', 'interval': '15m', 'mode': 'crypto_triple_screen'},
-    'XAU': {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian'}
+    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
+    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
+    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
+    'BNB':  {'s': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen'},
+    'DOGE': {'s': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_triple_screen'},
+    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian'}
 }
 
-INITIAL_WALLET = 100.0
+INITIAL_WALLET_PER_ASSET = 100.0
 FEE_RATE = 0.0004
 
 def send_discord(text):
@@ -73,18 +64,19 @@ def fetch_binance_klines(symbol, interval, days=365):
         return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
     return None
 
-def run_365d_backtest():
+def run_independent_sandbox_backtest():
     days = 365
-    period_title = "365 天期 (一年完整回測)"
+    period_title = "365 天期 (獨立 100U 沙盒回測)"
     print(f"\n==================================================")
-    print(f">>> 開始執行【{period_title}】多資產量化回測...")
+    print(f">>> 開始執行【{period_title}】多資產獨立資金回測...")
     print(f"==================================================")
 
-    wallet = float(INITIAL_WALLET)
-    completed_trades = []
+    asset_results = {}
 
     for sym, cfg in SYMBOLS.items():
-        print(f"拉取 {sym} 歷史數據 (回測天數: {days} 天)...", flush=True)
+        wallet = float(INITIAL_WALLET_PER_ASSET)
+        completed_trades = []
+        print(f"獨立跑背測標的: {sym} (起始資金: ${wallet:.2f} USDT)...", flush=True)
         
         if cfg['mode'] == 'gold_macro_donchian':
             df_4h = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
@@ -115,13 +107,13 @@ def run_365d_backtest():
                         if bar['l'] <= pos['sl']:
                             pnl = qty * (pos['sl'] - entry) - qty * (entry + pos['sl']) * FEE_RATE
                             wallet += pnl
-                            completed_trades.append({'sym': sym, 'pnl': pnl})
+                            completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if bar['h'] >= tp:
                             pnl = qty * (tp - entry) - qty * (entry + tp) * FEE_RATE
                             wallet += pnl
-                            completed_trades.append({'sym': sym, 'pnl': pnl})
+                            completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                     elif side == 'SHORT':
@@ -131,13 +123,13 @@ def run_365d_backtest():
                         if bar['h'] >= pos['sl']:
                             pnl = qty * (entry - pos['sl']) - qty * (entry + pos['sl']) * FEE_RATE
                             wallet += pnl
-                            completed_trades.append({'sym': sym, 'pnl': pnl})
+                            completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if bar['l'] <= tp:
                             pnl = qty * (entry - tp) - qty * (entry + tp) * FEE_RATE
                             wallet += pnl
-                            completed_trades.append({'sym': sym, 'pnl': pnl})
+                            completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
 
@@ -198,7 +190,7 @@ def run_365d_backtest():
                             rem_qty = qty * 0.5 if tp1_hit else qty
                             pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
                             wallet += pnl
-                            completed_trades.append({'sym': sym, 'pnl': pnl})
+                            completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if not tp1_hit and bar['h'] >= tp1:
@@ -206,11 +198,11 @@ def run_365d_backtest():
                             pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
                             pos['sl'] = tp1
-                            completed_trades.append({'sym': sym, 'pnl': pnl_tp1})
+                            completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['h'] >= tp2:
                             pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
                             wallet += pnl_tp2
-                            completed_trades.append({'sym': sym, 'pnl': pnl_tp2})
+                            completed_trades.append({'pnl': pnl_tp2})
                             pos = None
                             continue
                     elif side == 'SHORT':
@@ -218,7 +210,7 @@ def run_365d_backtest():
                             rem_qty = qty * 0.5 if tp1_hit else qty
                             pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
                             wallet += pnl
-                            completed_trades.append({'sym': sym, 'pnl': pnl})
+                            completed_trades.append({'pnl': pnl})
                             pos = None
                             continue
                         if not tp1_hit and bar['l'] <= tp1:
@@ -226,11 +218,11 @@ def run_365d_backtest():
                             pnl_tp1 = (qty * 0.5) * (entry - tp1) - (qty * 0.5) * (entry + tp1) * FEE_RATE
                             wallet += pnl_tp1
                             pos['sl'] = tp1
-                            completed_trades.append({'sym': sym, 'pnl': pnl_tp1})
+                            completed_trades.append({'pnl': pnl_tp1})
                         if pos['tp1_hit'] and bar['l'] <= tp2:
                             pnl_tp2 = (qty * 0.5) * (entry - tp2) - (qty * 0.5) * (entry + tp2) * FEE_RATE
                             wallet += pnl_tp2
-                            completed_trades.append({'sym': sym, 'pnl': pnl_tp2})
+                            completed_trades.append({'pnl': pnl_tp2})
                             pos = None
                             continue
 
@@ -269,40 +261,34 @@ def run_365d_backtest():
                                 tp2 = l - (wave * 0.272)
                                 pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty}
 
-    total_trades = len(completed_trades)
-    win_trades = sum(1 for t in completed_trades if t['pnl'] > 0)
-    loss_trades = total_trades - win_trades
-    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
-    roi = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
+        tot_t = len(completed_trades)
+        wins = sum(1 for t in completed_trades if t['pnl'] > 0)
+        wr = (wins / tot_t * 100) if tot_t > 0 else 0.0
+        net_pnl = wallet - INITIAL_WALLET_PER_ASSET
+        roi = (net_pnl / INITIAL_WALLET_PER_ASSET) * 100
 
-    symbol_stats = {}
-    for sym in SYMBOLS.keys():
-        sym_trades = [t for t in completed_trades if t['sym'] == sym]
-        sym_total = len(sym_trades)
-        sym_wins = sum(1 for t in sym_trades if t['pnl'] > 0)
-        sym_wr = (sym_wins / sym_total * 100) if sym_total > 0 else 0.0
-        sym_pnl = sum(t['pnl'] for t in sym_trades)
-        symbol_stats[sym] = {'total': sym_total, 'wins': sym_wins, 'wr': sym_wr, 'pnl': sym_pnl}
+        asset_results[sym] = {
+            'total': tot_t, 'wins': wins, 'wr': wr, 'final_wallet': wallet, 'net_pnl': net_pnl, 'roi': roi
+        }
+
+    # 排序：加密貨幣在前 (BTC, ETH, SOL, BNB, DOGE)，黃金在後 (XAU)
+    sorted_symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
 
     report_lines = [
         "```text",
-        f"【量化策略回測報告 - {period_title}】",
+        f"【多資產獨立 100U 沙盒回測報告 - {period_title}】",
         "----------------------------------------------------",
-        "策略架構:",
-        " - BTC/ETH: 1D EMA50 -> 4H EMA 趨勢 -> 15m 斐波 (1% 風控)",
-        " - XAU(黃金): 1D MA60 -> 4H 唐奇安突破 -> 1.5 ATR (5% 風控/10x)",
+        "資金配置: 每種標的各自獨立 100.0 USDT 帳戶",
+        "加密貨幣: BTC, ETH, SOL, BNB, DOGE (1% 風控 / 15m 斐波策略)",
+        "貴金屬:   XAU (5% 風控 / 10x 槓桿 / 4H 唐奇安策略)",
         "----------------------------------------------------",
-        f"初始資金: ${INITIAL_WALLET:.2f} USDT",
-        f"最終結餘: ${wallet:.2f} USDT ({roi:+.2f}%)",
-        f"總成交次數: {total_trades} 次",
-        f"總勝場數: {win_trades} 次 | 總敗場數: {loss_trades} 次",
-        f"整體策略勝率: {win_rate:.2f}%",
-        "----------------------------------------------------",
-        "各標的績效與勝率統計:"
+        "各標的獨立帳戶績效排序:"
     ]
     
-    for sym, st in symbol_stats.items():
-        report_lines.append(f" - {sym.ljust(4)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 淨利: {st['pnl']:+6.2f} USDT")
+    for sym in sorted_symbols:
+        if sym in asset_results:
+            st = asset_results[sym]
+            report_lines.append(f" - {sym.ljust(5)} | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 最終餘額: ${st['final_wallet']:7.2f} ({st['roi']:+.2f}%)")
     
     report_lines.append("```")
     report = "\n".join(report_lines)
@@ -311,4 +297,4 @@ def run_365d_backtest():
     send_discord(report)
 
 if __name__ == '__main__':
-    run_365d_backtest()
+    run_independent_sandbox_backtest()
