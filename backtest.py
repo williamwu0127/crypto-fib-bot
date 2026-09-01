@@ -1,5 +1,5 @@
 """
-Multi-Asset Quantitative Backtest Engine (30 Days & 365 Days)
+Multi-Asset Quantitative Backtest Engine (365 Days)
 ============================================================
 【實盤策略規則說明】
 1. BTC / ETH 實盤策略 (1% 動態風控):
@@ -73,8 +73,9 @@ def fetch_binance_klines(symbol, interval, days=365):
         return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
     return None
 
-def run_backtest(days=365):
-    period_title = f"{days} 天期"
+def run_365d_backtest():
+    days = 365
+    period_title = "365 天期 (一年完整回測)"
     print(f"\n==================================================")
     print(f">>> 開始執行【{period_title}】多資產量化回測...")
     print(f"==================================================")
@@ -274,7 +275,6 @@ def run_backtest(days=365):
     win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
     roi = ((wallet - INITIAL_WALLET) / INITIAL_WALLET) * 100
 
-    # 各標的勝率統計
     symbol_stats = {}
     for sym in SYMBOLS.keys():
         sym_trades = [t for t in completed_trades if t['sym'] == sym]
@@ -310,6 +310,4 @@ def run_backtest(days=365):
     send_discord(report)
 
 if __name__ == '__main__':
-    run_backtest(days=30)
-    time.sleep(1.0)
-    run_backtest(days=365)
+    run_365d_backtest()
