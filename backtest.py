@@ -3,6 +3,7 @@ import time
 import requests
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
@@ -13,20 +14,20 @@ SYMBOLS = {
     'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'},
-    'MSFT':  {'t': 'binance', 's': 'MSFTUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'TSM':   {'t': 'binance', 's': 'TSMUSDT',  'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'NVDA':  {'t': 'binance', 's': 'NVDAUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'AMD':   {'t': 'binance', 's': 'AMDUSDT',  'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'AAPL':  {'t': 'binance', 's': 'AAPLUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'GOOGL': {'t': 'binance', 's': 'GOOGLUSDT','interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'AMZN':  {'t': 'binance', 's': 'AMZNUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'META':  {'t': 'binance', 's': 'METAUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'TSLA':  {'t': 'binance', 's': 'TSLAUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'MU':    {'t': 'binance', 's': 'MUUSDT',   'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'GLW':   {'t': 'binance', 's': 'GLWUSDT',  'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'SPCX':  {'t': 'binance', 's': 'SPCXUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
-    'SNDK':  {'t': 'binance', 's': 'SNDKUSDT', 'interval': '4h',  'mode': 'gold_donchian'}  # 統一換成黃金的唐奇安策略
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 黃金維持幣安 4H 唐奇安
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'gold_donchian'}, # 美股統一改由 stock (yfinance) 抓取並套用黃金唐奇安策略
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'gold_donchian'},
+    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1h',  'mode': 'gold_donchian'},
+    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1h',  'mode': 'gold_donchian'},
+    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1h',  'mode': 'gold_donchian'},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1h',  'mode': 'gold_donchian'},
+    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1h',  'mode': 'gold_donchian'},
+    'META':  {'t': 'stock',   's': 'META',     'interval': '1h',  'mode': 'gold_donchian'},
+    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1h',  'mode': 'gold_donchian'},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1h',  'mode': 'gold_donchian'},
+    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1h',  'mode': 'gold_donchian'},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1h',  'mode': 'gold_donchian'},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1h',  'mode': 'gold_donchian'}
 }
 
 INITIAL_WALLET = 100.0
@@ -56,30 +57,48 @@ def send_discord_safe(content):
 
 def fetch_historical_data(cfg, days=365):
     try:
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
-        all_klines = []
-        curr_start = start_ms
-        
-        while curr_start < now_ms:
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
-            res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0:
-                break
-            all_klines.extend(res)
-            if len(res) < 1000:
-                break
-            curr_start = int(res[-1][0]) + 1
-            time.sleep(0.04)
-        
-        if len(all_klines) > 10:
-            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-            df = pd.DataFrame(all_klines, columns=cols)
-            df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
-            for col in ['o', 'h', 'l', 'c', 'v']:
-                df[col] = df[col].astype(float)
-            df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
-            return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+        if cfg['t'] == 'binance':
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
+            all_klines = []
+            curr_start = start_ms
+            
+            while curr_start < now_ms:
+                url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
+                res = requests.get(url, timeout=10).json()
+                if not isinstance(res, list) or len(res) == 0:
+                    break
+                all_klines.extend(res)
+                if len(res) < 1000:
+                    break
+                curr_start = int(res[-1][0]) + 1
+                time.sleep(0.04)
+            
+            if len(all_klines) > 10:
+                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+                df = pd.DataFrame(all_klines, columns=cols)
+                df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
+                for col in ['o', 'h', 'l', 'c', 'v']:
+                    df[col] = df[col].astype(float)
+                df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+                return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+        else:
+            period_str = "1mo" if days <= 30 else "1y"
+            df = yf.download(cfg['s'], period=period_str, interval="1h", progress=False)
+            if df is not None and not df.empty and len(df) > 10:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.rename(columns=str.lower)
+                t_idx = pd.to_datetime(df.index)
+                if t_idx.tz is not None:
+                    t_idx = t_idx.tz_localize(None)
+                df['time'] = t_idx
+                req_cols = ['open', 'high', 'low', 'close', 'volume']
+                if all(c in df.columns for c in req_cols):
+                    res_df = df[req_cols].copy()
+                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    res_df['time'] = df['time'].values
+                    return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
@@ -104,7 +123,7 @@ def prepare_indicators(df, mode):
 
 def execute_backtest_run(days_target, label_str):
     print("==================================================")
-    print(f">>> 啟動【全面幣安現貨數據源】{label_str} 歷史回測")
+    print(f">>> 啟動【混合穩定數據源】{label_str} 歷史回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -355,7 +374,7 @@ def execute_backtest_run(days_target, label_str):
         f"【抓取狀態 ({label_str})】\n"
         + status_block + "\n"
         "----------------------------------------------------\n"
-        f"判定邏輯: XAU唐奇安策略 + {label_str}回測\n"
+        f"判定邏輯: XAU/美股唐奇安策略 + {label_str}回測\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
