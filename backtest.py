@@ -3,11 +3,12 @@ import time
 import requests
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
-# 已移除在年度回測中表現為負報酬的標的
+# 加密貨幣與黃金走幣安，美股走 yfinance (確保都能成功抓到資料)
 SYMBOLS = {
     'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
@@ -15,12 +16,12 @@ SYMBOLS = {
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
     'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'},
-    'MSFT':  {'t': 'binance', 's': 'MSFTUSDT', 'interval': '4h',  'mode': 'gold_donchian'},
-    'TSM':   {'t': 'binance', 's': 'TSMUSDT',  'interval': '4h',  'mode': 'gold_donchian'},
-    'GOOGL': {'t': 'binance', 's': 'GOOGLUSDT','interval': '4h',  'mode': 'gold_donchian'},
-    'MU':    {'t': 'binance', 's': 'MUUSDT',   'interval': '4h',  'mode': 'gold_donchian'},
-    'SPCX':  {'t': 'binance', 's': 'SPCXUSDT', 'interval': '4h',  'mode': 'gold_donchian'},
-    'SNDK':  {'t': 'binance', 's': 'SNDKUSDT', 'interval': '4h',  'mode': 'gold_donchian'}
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'gold_donchian'},
+    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'gold_donchian'},
+    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1h',  'mode': 'gold_donchian'},
+    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1h',  'mode': 'gold_donchian'},
+    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1h',  'mode': 'gold_donchian'},
+    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1h',  'mode': 'gold_donchian'}
 }
 
 INITIAL_WALLET = 100.0
@@ -50,39 +51,56 @@ def send_discord_safe(content):
 
 def fetch_historical_data(cfg, days=365):
     try:
-        # 改抓 60 天的資料量以滿足 4H 唐奇安滾動計算，若為 365d 則維持一年
-        fetch_days = 60 if days <= 30 else days
-        
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (fetch_days * 24 * 60 * 60 * 1000)
-        all_klines = []
-        curr_start = start_ms
-        
-        while curr_start < now_ms:
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
-            res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0:
-                break
-            all_klines.extend(res)
-            if len(res) < 1000:
-                break
-            curr_start = int(res[-1][0]) + 1
-            time.sleep(0.04)
-        
-        if len(all_klines) > 10:
-            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-            df = pd.DataFrame(all_klines, columns=cols)
-            df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
-            for col in ['o', 'h', 'l', 'c', 'v']:
-                df[col] = df[col].astype(float)
-            df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+        if cfg['t'] == 'binance':
+            fetch_days = 60 if days <= 30 else days
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (fetch_days * 24 * 60 * 60 * 1000)
+            all_klines = []
+            curr_start = start_ms
             
-            # 若為 30d 模式，只回測最近 30 天
-            if days <= 30:
-                cutoff_time = df['time'].max() - timedelta(days=30)
-                df = df[df['time'] >= cutoff_time].reset_index(drop=True)
+            while curr_start < now_ms:
+                url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
+                res = requests.get(url, timeout=10).json()
+                if not isinstance(res, list) or len(res) == 0:
+                    break
+                all_klines.extend(res)
+                if len(res) < 1000:
+                    break
+                curr_start = int(res[-1][0]) + 1
+                time.sleep(0.04)
+            
+            if len(all_klines) > 10:
+                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+                df = pd.DataFrame(all_klines, columns=cols)
+                df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
+                for col in ['o', 'h', 'l', 'c', 'v']:
+                    df[col] = df[col].astype(float)
+                df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 
-            return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+                if days <= 30:
+                    cutoff_time = df['time'].max() - timedelta(days=30)
+                    df = df[df['time'] >= cutoff_time].reset_index(drop=True)
+                return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+        else:
+            period_str = "2mo" if days <= 30 else "1y"
+            df = yf.download(cfg['s'], period=period_str, interval=cfg['interval'], progress=False)
+            if df is not None and not df.empty and len(df) > 10:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.rename(columns=str.lower)
+                t_idx = pd.to_datetime(df.index)
+                if t_idx.tz is not None:
+                    t_idx = t_idx.tz_localize(None)
+                df['time'] = t_idx
+                req_cols = ['open', 'high', 'low', 'close', 'volume']
+                if all(c in df.columns for c in req_cols):
+                    res_df = df[req_cols].copy()
+                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
+                    res_df['time'] = df['time'].values
+                    if days <= 30:
+                        cutoff_time = res_df['time'].max() - timedelta(days=30)
+                        res_df = res_df[res_df['time'] >= cutoff_time].reset_index(drop=True)
+                    return res_df.reset_index(drop=True)
     except Exception:
         pass
     return None
@@ -107,7 +125,7 @@ def prepare_indicators(df, mode):
 
 def execute_backtest_run(days_target, label_str):
     print("==================================================")
-    print(f">>> 啟動【單一錢包複利 + 保證金<=10%】{label_str} 歷史回測")
+    print(f">>> 啟動【穩定混和數據源 + 保證金<=10%】{label_str} 歷史回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -337,7 +355,7 @@ def execute_backtest_run(days_target, label_str):
                         
                         # 保證金限制：確保開倉保證金不超過目前實際錢包總額的 10%
                         max_allowed_margin = current_wallet * 0.10
-                        position_margin = (qty * entry) / 10.0  # 假設 10x 槓桿計算保證金
+                        position_margin = (qty * entry) / 10.0
                         if position_margin > max_allowed_margin:
                             qty = (max_allowed_margin * 10.0) / entry
 
