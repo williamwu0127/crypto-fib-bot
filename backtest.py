@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 # ==================== 1. 回測環境與標的配置 ====================
 BASE_URL = "https://fapi.binance.com"
 
-# 將全部幣種與美股清單改為 trade: True，並各自賦予 100 USDT 初始資金進行測試
 SYMBOLS_CONFIG = {
     'BTC':   {'s': 'BTCUSDT',   'interval': '15m', 'mode': 'ict_crypto',         'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
     'ETH':   {'s': 'ETHUSDT',   'interval': '15m', 'mode': 'ict_crypto',         'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
@@ -31,7 +30,6 @@ SYMBOLS_CONFIG = {
     'SNDK':  {'s': 'SNDKUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True}
 }
 
-# ==================== 2. 歷史數據抓取模組 (支援分頁抓取一年份) ====================
 def fetch_historical_klines(symbol, interval, days=365):
     print(f"📥 正在下載 {symbol} ({interval}) 最近 {days} 天歷史數據...", flush=True)
     end_time = int(time.time() * 1000)
@@ -47,7 +45,7 @@ def fetch_historical_klines(symbol, interval, days=365):
                 break
             all_res.extend(res)
             current_start = int(res[-1][0]) + 1
-            time.sleep(0.2) # 避免觸發頻率限制
+            time.sleep(0.2)
         except Exception as e:
             print(f"⚠️ 下載 {symbol} 歷史數據出錯: {e}", flush=True)
             break
@@ -61,48 +59,33 @@ def fetch_historical_klines(symbol, interval, days=365):
         return df[['time', 'o', 'h', 'l', 'c', 'v']]
     return None
 
-# ==================== 3. 模擬回測核心引擎 ====================
 def run_backtest_for_symbol(sym_key, cfg):
     symbol = cfg['s']
     interval = cfg['interval']
     mode = cfg['mode']
     
-    # 下載 15m / 1h 與對應的 4H 數據供趨勢判斷
     df = fetch_historical_klines(symbol, interval, days=365)
     df_4h = fetch_historical_klines(symbol, '4h', days=365)
     df_1d = fetch_historical_klines(symbol, '1d', days=365) if mode == 'gold_donchian' else None
     
     if df is None or len(df) < 100 or df_4h is None:
-        print(f"❌ {sym} 歷史數據不足，跳過回測。")
+        print(f"❌ {sym_key} 歷史數據不足，跳過回測。") # 已修正變數名稱
         return None
 
-    # 初始化 100 USDT 模擬帳戶
     wallet = 100.0
     initial_wallet = 100.0
-    position = None  # None 或 dict (side, entry, sl, tp1, tp2, qty, is_be)
+    position = None
     trades_history = []
 
-    # 將 4H 數據以時間對齊合併
-    df_4h.set_index('time', inplace=True)
-    df['h4_ema20'] = np.nan
-    df['h4_ema50'] = np.nan
-    
-    # 簡單向量化或迴圈對齊 4H 指標
-    ema20_4h = df_4h['c'].ewm(span=20, adjust=False).mean()
-    ema50_4h = df_4h['c'].ewm(span=50, adjust=False).mean()
-
-    # 逐根 K 線模擬迴圈 (Bar-by-Bar Backtest)
     for i in range(50, len(df)):
         current_bar = df.iloc[i]
         curr_time = current_bar['time']
         price = current_bar['c']
         
-        # 模拟紐約時間 Kill Zone 判斷 (將 UTC+8 轉為美東時間)
         ny_time = curr_time.tz_localize('UTC').tz_convert('America/New_York') if curr_time.tz is None else curr_time.tz_convert('America/New_York')
         hour = ny_time.hour
         in_kill_zone = (2 <= hour < 5) or (7 <= hour < 10)
 
-        # 1. 檢查現有持倉是否觸發止損 (SL) 或止盈 (TP)
         if position is not None:
             side = position['side']
             entry = position['entry']
@@ -116,43 +99,33 @@ def run_backtest_for_symbol(sym_key, cfg):
             hit_tp2 = (current_bar['h'] >= tp2) if side == 'LONG' else (current_bar['l'] <= tp2)
 
             if hit_sl:
-                # 停損出場
                 pnl = (sl - entry) * qty if side == 'LONG' else (entry - sl) * qty
                 wallet += pnl
                 trades_history.append({'type': 'SL', 'pnl': pnl})
                 position = None
             elif hit_tp1 and not position.get('tp1_hit', False):
-                # 達成 TP1，移動保本
                 position['tp1_hit'] = True
-                position['sl'] = entry  # 移至開倉價保本
+                position['sl'] = entry
                 pnl_part = (tp1 - entry) * (qty * cfg['tp1_ratio']) if side == 'LONG' else (entry - tp1) * (qty * cfg['tp1_ratio'])
                 wallet += pnl_part
                 trades_history.append({'type': 'TP1', 'pnl': pnl_part})
             elif hit_tp2:
-                # 達成 TP2 完整出清
                 rem_ratio = (1.0 - cfg['tp1_ratio']) if mode != 'gold_donchian' else 1.0
                 pnl = (tp2 - entry) * (qty * rem_ratio) if side == 'LONG' else (entry - tp2) * (qty * rem_ratio)
                 wallet += pnl
                 trades_history.append({'type': 'TP2', 'pnl': pnl})
                 position = None
 
-        # 2. 若無持倉且符合 Kill Zone，尋找進場訊號
         if position is None and in_kill_zone:
             sig_side = None
             entry_p, sl_p, tp1_p, tp2_p = 0, 0, 0, 0
             
-            if mode == 'gold_donchian' and df_1d is not None:
-                # 黃金唐奇安邏輯
-                # 簡化回測對齊
-                pass
-            elif mode in ['ict_crypto', 'ict_stock_observe']:
-                # ICT / FVG 邏輯簡化回測對齊
+            if mode != 'gold_donchian':
                 sub = df.iloc[max(0, i-20):i]
                 h_w, l_w = sub['h'].max(), sub['l'].min()
                 wave = h_w - l_w
                 
                 if wave > 0:
-                    # 模擬 4H 趨勢與 1H/15m 回踩
                     if current_bar['c'] > current_bar['o'] and current_bar['l'] <= l_w + (wave * 0.382):
                         sig_side = 'LONG'
                         entry_p = price
@@ -170,7 +143,6 @@ def run_backtest_for_symbol(sym_key, cfg):
                             tp1_p = entry_p - (risk_d * cfg['tp1_r'])
                             tp2_p = entry_p - (risk_d * cfg['tp2_r'])
 
-            # 執行模擬開單與風控檢核（30% 保證金限制）
             if sig_side and entry_p != sl_p:
                 price_diff = abs(entry_p - sl_p)
                 risk_amt = wallet * cfg['risk']
@@ -191,7 +163,6 @@ def run_backtest_for_symbol(sym_key, cfg):
                     'tp1_hit': False
                 }
 
-    # 結算統計
     total_trades = len(trades_history)
     wins = sum(1 for t in trades_history if t['pnl'] > 0)
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
@@ -207,7 +178,6 @@ def run_backtest_for_symbol(sym_key, cfg):
         'win_rate': win_rate
     }
 
-# ==================== 4. 主執行入口 ====================
 if __name__ == '__main__':
     print("=" * 65)
     print("🚀 啟動全標的一年期歷史回測引擎 (各 100 USDT 隔離資金)...")
@@ -221,5 +191,5 @@ if __name__ == '__main__':
             print(f"📊 標的: {sym_key.ljust(5)} | 最終資金: {res['final']:>8.2f} USDT | 收益率: {res['return_pct']:>6.2f}% | 交易次數: {res['total_trades']:>3} | 勝率: {res['win_rate']:>5.1f}%")
 
     print("\n" + "=" * 65)
-    print("🎯 一年期回測總結報告已完成，可直接將此腳本部署至 GitHub Actions 定期執行！")
+    print("🎯 一年期回測總結報告已完成！")
     print("=" * 65)
