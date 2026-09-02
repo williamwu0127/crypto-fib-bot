@@ -8,18 +8,11 @@ from datetime import datetime, timedelta
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 SYMBOLS = {
-    'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_fib', 'lev': 100.0},
-    'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_triple_screen', 'lev': 100.0},
-    'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib', 'lev': 20.0},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0},
-    'MSFT':  {'t': 'binance', 's': 'MSFTUSDT', 'interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0},
-    'MU':    {'t': 'binance', 's': 'MUUSDT',   'interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0},
-    'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib', 'lev': 20.0},
-    'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib', 'lev': 20.0},
-    'TSM':   {'t': 'binance', 's': 'TSMUSDT',  'interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0},
-    'GOOGL': {'t': 'binance', 's': 'GOOGLUSDT','interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0},
-    'SPCX':  {'t': 'binance', 's': 'SPCXUSDT', 'interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0},
-    'SNDK':  {'t': 'binance', 's': 'SNDKUSDT', 'interval': '4h',  'mode': 'gold_donchian', 'lev': 10.0}
+    'ETH':   {'s': 'ETHUSDT',  'interval': '15m', 'lev': 100.0, 'mode': 'ict_2022'},
+    'SOL':   {'s': 'SOLUSDT',  'interval': '15m', 'lev': 20.0,  'mode': 'ict_2022'},
+    'XAU':   {'s': 'PAXGUSDT', 'interval': '4h',  'lev': 10.0,  'mode': 'gold_donchian'},
+    'MSFT':  {'s': 'MSFTUSDT', 'interval': '4h',  'lev': 10.0,  'mode': 'gold_donchian'},
+    'MU':    {'s': 'MUUSDT',   'interval': '4h',  'lev': 10.0,  'mode': 'gold_donchian'}
 }
 
 INITIAL_WALLET = 100.0
@@ -82,17 +75,10 @@ def fetch_historical_data(cfg, days=365):
     return None
 
 def prepare_indicators(df, mode):
-    df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
-    tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
-    df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.01)
-
-    delta = df['c'].diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-    df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
+    # ICT FVG 偵測：當前 K 線與兩根前 K 線之間是否有價格缺口
+    df['fvg_bull'] = (df['l'] > df['h'].shift(2))
+    df['fvg_bear'] = (df['h'] < df['l'].shift(2))
     
     if mode == 'gold_donchian':
         df['dc_high'] = df['h'].shift(1).rolling(20).max()
@@ -101,7 +87,7 @@ def prepare_indicators(df, mode):
 
 def execute_backtest_run(days_target, label_str):
     print("==================================================")
-    print(f">>> 啟動【2%餘額×槓桿 + 純結構止盈止損】{label_str} 回測")
+    print(f">>> 啟動【ICT 2022 模型 + 結構防守】{label_str} 回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT")
     print("==================================================\n")
 
@@ -139,13 +125,16 @@ def execute_backtest_run(days_target, label_str):
             if match_row.empty:
                 continue
             idx = match_row.index[0]
-            if idx < 20:
+            if idx < 25:
                 continue
             
             bar = match_row.iloc[0]
-            prev_bar = df.iloc[idx - 1]
             cfg = SYMBOLS[sym]
             mode = cfg['mode']
+            hour = pd.to_datetime(bar['time']).hour
+
+            # ICT Killzone 篩選：紐約時段（UTC 12:00 ~ 16:00 相當於台東時間晚上 20:00 ~ 00:00）
+            is_killzone = (12 <= hour <= 16) if mode == 'ict_2022' else True
 
             # 1. 持倉處理
             if sym in positions:
@@ -173,7 +162,7 @@ def execute_backtest_run(days_target, label_str):
                         pos['tp1_hit'] = True
                         pnl_tp1 = (qty * 0.5) * (tp1 - entry)
                         current_wallet += pnl_tp1
-                        pos['sl'] = entry # 移動至開倉價保本
+                        pos['sl'] = entry # 移動保本
                         symbol_stats[sym]['trades'] += 1
                         symbol_stats[sym]['wins'] += 1
                         symbol_stats[sym]['pnl'] += pnl_tp1
@@ -215,37 +204,46 @@ def execute_backtest_run(days_target, label_str):
                         del positions[sym]
                         continue
 
-            # 2. 開倉信號判定
-            if sym not in positions and current_wallet > 5.0:
+            # 2. 開倉信號判定 (ICT 2022 模型)
+            if sym not in positions and current_wallet > 5.0 and is_killzone:
                 sig_side = None
                 entry, sl, tp1, tp2 = 0, 0, 0, 0
 
-                if mode == 'gold_donchian':
+                if mode == 'ict_2022':
+                    sub = df.iloc[idx-20:idx]
+                    prev_low = sub['l'].min()
+                    prev_high = sub['h'].max()
+                    
+                    # 條件：流動性獵取（插針突破前低/前高後收回） + 伴隨 FVG 缺口
+                    sweep_low = (bar['l'] < prev_low) and (bar['c'] > prev_low)
+                    sweep_high = (bar['h'] > prev_high) and (bar['c'] < prev_high)
+
+                    if sweep_low and bar['fvg_bull']:
+                        sig_side = 'LONG'
+                        entry = bar['c']
+                        sl = bar['l'] - (bar['c'] * 0.002) # 結構防守：插針極值下方
+                        tp1 = prev_high
+                        tp2 = prev_high + (prev_high - entry)
+                    elif sweep_high and bar['fvg_bear']:
+                        sig_side = 'SHORT'
+                        entry = bar['c']
+                        sl = bar['h'] + (bar['c'] * 0.002) # 結構防守：插針極值上方
+                        tp1 = prev_low
+                        tp2 = prev_low - (entry - prev_low)
+                elif mode == 'gold_donchian':
                     macro_trend = 1 if bar['c'] > bar['ema200'] else -1
                     if macro_trend == 1 and bar['c'] > bar['dc_high']:
                         sig_side = 'LONG'
                         entry = bar['c']
-                        sl = bar['dc_low']  # 結構止損：唐奇安通道下軌
+                        sl = bar['dc_low']
                         tp1 = bar['dc_high'] + (bar['dc_high'] - bar['dc_low'])
                         tp2 = entry + ((entry - sl) * 3.0)
                     elif macro_trend == -1 and bar['c'] < bar['dc_low']:
                         sig_side = 'SHORT'
                         entry = bar['c']
-                        sl = bar['dc_high'] # 結構止損：唐奇安通道上軌
+                        sl = bar['dc_high']
                         tp1 = bar['dc_low'] - (bar['dc_high'] - bar['dc_low'])
                         tp2 = entry - ((sl - entry) * 3.0)
-                else:
-                    sub = df.iloc[max(0, idx-25):idx+1]
-                    h, l = sub['h'].max(), sub['l'].min()
-                    wave = h - l
-                    if wave > 0 and (wave / l) >= 0.005:
-                        fib_0618_l = h - (wave * 0.618)
-                        if bar['c'] >= bar['ema50'] and bar['l'] <= fib_0618_l * 1.002:
-                            sig_side = 'LONG'
-                            entry = bar['c']
-                            sl = l  # 結構止損：波段低點
-                            tp1 = h
-                            tp2 = h + (wave * 0.5)
 
                 if sig_side:
                     target_lev = cfg['lev']
@@ -271,10 +269,10 @@ def execute_backtest_run(days_target, label_str):
     status_block = " | ".join(fetch_status)
     report_text = (
         "```text\n"
-        f"【回測狀態 ({label_str})】\n"
+        f"【ICT 回測狀態 ({label_str})】\n"
         + status_block + "\n"
         "----------------------------------------------------\n"
-        f"策略: 2%餘額×槓桿 + 純結構防守 + {label_str}回測\n"
+        f"策略: ICT Killzone + FVG + 結構防守 + {label_str}回測\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
