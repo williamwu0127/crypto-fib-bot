@@ -14,11 +14,11 @@ SYMBOLS = {
     'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 黃金改回專屬 4H 唐奇安通道邏輯
+    'MSFT':  {'t': 'binance', 's': 'MSFTUSDT', 'interval': '15m', 'mode': 'crypto_fib'}, # MSFT 改用與 BTC/ETH 相同的標準斐波邏輯
     'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'stock_pullback'},
     'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1h',  'mode': 'stock_pullback'},
     'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1h',  'mode': 'stock_pullback'},
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'stock_pullback'},
     'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1h',  'mode': 'stock_pullback'},
     'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1h',  'mode': 'stock_pullback'},
     'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1h',  'mode': 'stock_pullback'},
@@ -55,7 +55,6 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-# 使用你原本驗證過、穩定的資料抓取邏輯 (Binance Vision + Yahoo Finance)
 def fetch_1year_historical_data(cfg):
     try:
         if cfg['t'] == 'binance':
@@ -63,6 +62,7 @@ def fetch_1year_historical_data(cfg):
             start_ms = now_ms - (365 * 24 * 60 * 60 * 1000)
             all_klines = []
             curr_start = start_ms
+            step_ms = 1000 * 15 * 60 * 1000 if cfg['interval'] == '15m' else 1000 * 4 * 60 * 60 * 1000
             
             while curr_start < now_ms:
                 url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
@@ -70,10 +70,10 @@ def fetch_1year_historical_data(cfg):
                 if not isinstance(res, list) or len(res) == 0:
                     break
                 all_klines.extend(res)
-                curr_start = res[-1][0] + (15 * 60 * 1000)
+                curr_start = res[-1][0] + step_ms
                 time.sleep(0.04)
             
-            if len(all_klines) > 200:
+            if len(all_klines) > 50:
                 cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
                 df = pd.DataFrame(all_klines, columns=cols)
                 df = df.drop_duplicates(subset=['t'])
@@ -113,15 +113,20 @@ def prepare_indicators(df):
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
+    
+    # 專屬黃金 4H 唐奇安通道指標
+    df['dc_high'] = df['h'].shift(1).rolling(20).max()
+    df['dc_low'] = df['l'].shift(1).rolling(20).min()
     return df
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【穩定資料源】1 年期回測")
+    print(">>> 啟動【XAU還原 + MSFT轉斐波 + 抓取狀態檢核】1年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
     dfs = {}
+    fetch_status = []
     earliest_start, latest_end = None, None
 
     for sym, cfg in SYMBOLS.items():
@@ -136,9 +141,11 @@ def run_backtest():
                 earliest_start = s_date
             if latest_end is None or e_date > latest_end:
                 latest_end = e_date
-            print(f"完成 ({len(df)} 根 K 線)")
+            print(f"成功 ({len(df)} 根)")
+            fetch_status.append(f"{sym.ljust(5)}: 🟢 成功")
         else:
-            print("資料不足略過")
+            print("失敗 (資料不足)")
+            fetch_status.append(f"{sym.ljust(5)}: 🔴 失敗")
 
     if not dfs:
         print("無可用數據。")
@@ -177,74 +184,143 @@ def run_backtest():
                 qty = pos['qty']
                 tp1_hit = pos['tp1_hit']
 
-                if side == 'LONG':
-                    if bar['l'] <= sl:
-                        rem_qty = qty * 0.5 if tp1_hit else qty
-                        pnl = rem_qty * (sl - entry)
-                        current_wallet += pnl
-                        symbol_stats[sym]['trades'] += 1
-                        symbol_stats[sym]['pnl'] += pnl
-                        if pnl > 0:
+                if mode == 'gold_donchian':
+                    # 黃金專屬 2.0R 保本與 5.0R 止盈
+                    if side == 'LONG':
+                        if bar['l'] <= sl:
+                            pnl = qty * (sl - entry)
+                            current_wallet += pnl
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['pnl'] += pnl
+                            if pnl > 0:
+                                symbol_stats[sym]['wins'] += 1
+                            completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'SL_OR_BE', 'time': curr_time})
+                            del positions[sym]
+                            continue
+                        if not tp1_hit and bar['h'] >= pos['be_target']:
+                            pos['tp1_hit'] = True
+                            pos['sl'] = entry # 移至開倉價保本
+                        if bar['h'] >= tp2:
+                            pnl = qty * (tp2 - entry)
+                            current_wallet += pnl
+                            symbol_stats[sym]['trades'] += 1
                             symbol_stats[sym]['wins'] += 1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
-                        del positions[sym]
-                        continue
-                    if not tp1_hit and bar['h'] >= tp1:
-                        pos['tp1_hit'] = True
-                        pnl_tp1 = (qty * 0.5) * (tp1 - entry)
-                        current_wallet += pnl_tp1
-                        pos['sl'] = tp1
-                        symbol_stats[sym]['trades'] += 1
-                        symbol_stats[sym]['wins'] += 1
-                        symbol_stats[sym]['pnl'] += pnl_tp1
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    if pos['tp1_hit'] and bar['h'] >= tp2:
-                        pnl_tp2 = (qty * 0.5) * (tp2 - entry)
-                        current_wallet += pnl_tp2
-                        symbol_stats[sym]['trades'] += 1
-                        symbol_stats[sym]['wins'] += 1
-                        symbol_stats[sym]['pnl'] += pnl_tp2
-                        completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
-                        del positions[sym]
-                        continue
+                            symbol_stats[sym]['pnl'] += pnl
+                            completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'GOLD_TP_5R', 'time': curr_time})
+                            del positions[sym]
+                            continue
+                    else:
+                        if bar['h'] >= sl:
+                            pnl = qty * (entry - sl)
+                            current_wallet += pnl
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['pnl'] += pnl
+                            if pnl > 0:
+                                symbol_stats[sym]['wins'] += 1
+                            completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'SL_OR_BE', 'time': curr_time})
+                            del positions[sym]
+                            continue
+                        if not tp1_hit and bar['l'] <= pos['be_target']:
+                            pos['tp1_hit'] = True
+                            pos['sl'] = entry
+                        if bar['l'] <= tp2:
+                            pnl = qty * (entry - tp2)
+                            current_wallet += pnl
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['wins'] += 1
+                            symbol_stats[sym]['pnl'] += pnl
+                            completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'GOLD_TP_5R', 'time': curr_time})
+                            del positions[sym]
+                            continue
+                else:
+                    # 標準斐波 / 美股回踩邏輯
+                    if side == 'LONG':
+                        if bar['l'] <= sl:
+                            rem_qty = qty * 0.5 if tp1_hit else qty
+                            pnl = rem_qty * (sl - entry)
+                            current_wallet += pnl
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['pnl'] += pnl
+                            if pnl > 0:
+                                symbol_stats[sym]['wins'] += 1
+                            completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
+                            del positions[sym]
+                            continue
+                        if not tp1_hit and bar['h'] >= tp1:
+                            pos['tp1_hit'] = True
+                            pnl_tp1 = (qty * 0.5) * (tp1 - entry)
+                            current_wallet += pnl_tp1
+                            pos['sl'] = tp1
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['wins'] += 1
+                            symbol_stats[sym]['pnl'] += pnl_tp1
+                            completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                        if pos['tp1_hit'] and bar['h'] >= tp2:
+                            pnl_tp2 = (qty * 0.5) * (tp2 - entry)
+                            current_wallet += pnl_tp2
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['wins'] += 1
+                            symbol_stats[sym]['pnl'] += pnl_tp2
+                            completed_trades.append({'symbol': sym, 'side': 'LONG', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                            del positions[sym]
+                            continue
 
-                elif side == 'SHORT':
-                    if bar['h'] >= sl:
-                        rem_qty = qty * 0.5 if tp1_hit else qty
-                        pnl = rem_qty * (entry - sl)
-                        current_wallet += pnl
-                        symbol_stats[sym]['trades'] += 1
-                        symbol_stats[sym]['pnl'] += pnl
-                        if pnl > 0:
+                    elif side == 'SHORT':
+                        if bar['h'] >= sl:
+                            rem_qty = qty * 0.5 if tp1_hit else qty
+                            pnl = rem_qty * (entry - sl)
+                            current_wallet += pnl
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['pnl'] += pnl
+                            if pnl > 0:
+                                symbol_stats[sym]['wins'] += 1
+                            completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
+                            del positions[sym]
+                            continue
+                        if not tp1_hit and bar['l'] <= tp1:
+                            pos['tp1_hit'] = True
+                            pnl_tp1 = (qty * 0.5) * (entry - tp1)
+                            current_wallet += pnl_tp1
+                            pos['sl'] = tp1
+                            symbol_stats[sym]['trades'] += 1
                             symbol_stats[sym]['wins'] += 1
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl, 'type': 'TP1_TRAIL_SL' if tp1_hit else 'SL', 'time': curr_time})
-                        del positions[sym]
-                        continue
-                    if not tp1_hit and bar['l'] <= tp1:
-                        pos['tp1_hit'] = True
-                        pnl_tp1 = (qty * 0.5) * (entry - tp1)
-                        current_wallet += pnl_tp1
-                        pos['sl'] = tp1
-                        symbol_stats[sym]['trades'] += 1
-                        symbol_stats[sym]['wins'] += 1
-                        symbol_stats[sym]['pnl'] += pnl_tp1
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
-                    if pos['tp1_hit'] and bar['l'] <= tp2:
-                        pnl_tp2 = (qty * 0.5) * (entry - tp2)
-                        current_wallet += pnl_tp2
-                        symbol_stats[sym]['trades'] += 1
-                        symbol_stats[sym]['wins'] += 1
-                        symbol_stats[sym]['pnl'] += pnl_tp2
-                        completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
-                        del positions[sym]
-                        continue
+                            symbol_stats[sym]['pnl'] += pnl_tp1
+                            completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp1, 'type': 'TP1', 'time': curr_time})
+                        if pos['tp1_hit'] and bar['l'] <= tp2:
+                            pnl_tp2 = (qty * 0.5) * (entry - tp2)
+                            current_wallet += pnl_tp2
+                            symbol_stats[sym]['trades'] += 1
+                            symbol_stats[sym]['wins'] += 1
+                            symbol_stats[sym]['pnl'] += pnl_tp2
+                            completed_trades.append({'symbol': sym, 'side': 'SHORT', 'pnl': pnl_tp2, 'type': 'TP2', 'time': curr_time})
+                            del positions[sym]
+                            continue
 
             # 2. 開倉信號判定
             if sym not in positions and current_wallet > 5.0:
                 sig_side = None
                 entry, sl, tp1, tp2 = 0, 0, 0, 0
+                be_target = 0
 
-                if mode == 'stock_pullback':
+                if mode == 'gold_donchian':
+                    # 黃金唐奇安邏輯
+                    df_1d = df # 簡化使用同源數據
+                    macro_trend = 1 if bar['c'] > bar['ema200'] else -1
+                    if macro_trend == 1 and bar['c'] > bar['dc_high']:
+                        sig_side = 'LONG'
+                        entry = bar['c']
+                        sl = entry - (bar['atr'] * 1.5)
+                        risk_dist = entry - sl
+                        be_target = entry + (risk_dist * 2.0)
+                        tp2 = entry + (risk_dist * 5.0)
+                    elif macro_trend == -1 and bar['c'] < bar['dc_low']:
+                        sig_side = 'SHORT'
+                        entry = bar['c']
+                        sl = entry + (bar['atr'] * 1.5)
+                        risk_dist = sl - entry
+                        be_target = entry - (risk_dist * 2.0)
+                        tp2 = entry - (risk_dist * 5.0)
+                elif mode == 'stock_pullback':
                     trend_bull = (bar['ema20'] > bar['ema50']) and (bar['c'] > bar['ema200'])
                     trend_bear = (bar['ema20'] < bar['ema50']) and (bar['c'] < bar['ema200'])
                     
@@ -301,7 +377,7 @@ def run_backtest():
                         qty = (current_wallet * RISK_PCT) / price_diff
                         positions[sym] = {
                             'side': sig_side, 'entry': entry, 'sl': sl,
-                            'tp1': tp1, 'tp2': tp2, 'tp1_hit': False, 'qty': qty
+                            'tp1': tp1, 'tp2': tp2, 'be_target': be_target, 'tp1_hit': False, 'qty': qty
                         }
 
     if not completed_trades:
@@ -321,9 +397,15 @@ def run_backtest():
         wr = (w / c * 100) if c > 0 else 0.0
         symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.2f}% | 收益貢獻: {r['pnl']:+12.6f}")
 
+    # 將抓取狀態整理排版置頂
+    status_block = " | ".join(fetch_status)
+
     report_text = (
         "```text\n"
-        "判定邏輯: Binance Vision / Yahoo Finance 穩定抓取回測版 (1年期回測)\n"
+        "【數據抓取來源狀態】\n"
+        + status_block + "\n"
+        "----------------------------------------------------\n"
+        "判定邏輯: XAU還原唐奇安 + MSFT轉斐波 + 1年期回測\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
