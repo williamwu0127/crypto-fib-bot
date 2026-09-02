@@ -14,8 +14,8 @@ SYMBOLS = {
     'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 黃金改回專屬 4H 唐奇安通道邏輯
-    'MSFT':  {'t': 'binance', 's': 'MSFTUSDT', 'interval': '15m', 'mode': 'crypto_fib'}, # MSFT 改用與 BTC/ETH 相同的標準斐波邏輯
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 黃金維持 4H 唐奇安
+    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'gold_donchian'}, # MSFT 改為 stock 來源並套用與黃金相同的唐奇安/趨勢突破邏輯
     'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'stock_pullback'},
     'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1h',  'mode': 'stock_pullback'},
     'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1h',  'mode': 'stock_pullback'},
@@ -82,6 +82,7 @@ def fetch_1year_historical_data(cfg):
                 df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
                 return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
         else:
+            # 針對美股（含修正後的 MSFT）透過 Yahoo Finance 穩定抓取
             df = yf.download(cfg['s'], period="1y", interval="1h", progress=False)
             if df is not None and not df.empty and len(df) > 50:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -114,14 +115,14 @@ def prepare_indicators(df):
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     df['rsi_ema'] = df['rsi'].ewm(span=9, adjust=False).mean()
     
-    # 專屬黃金 4H 唐奇安通道指標
+    # 唐奇安通道指標（供黃金與 MSFT 使用）
     df['dc_high'] = df['h'].shift(1).rolling(20).max()
     df['dc_low'] = df['l'].shift(1).rolling(20).min()
     return df
 
 def run_backtest():
     print("==================================================")
-    print(">>> 啟動【XAU還原 + MSFT轉斐波 + 抓取狀態檢核】1年期回測")
+    print(">>> 啟動【MSFT修復 + 黃金還原4H邏輯】1年期回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -185,7 +186,7 @@ def run_backtest():
                 tp1_hit = pos['tp1_hit']
 
                 if mode == 'gold_donchian':
-                    # 黃金專屬 2.0R 保本與 5.0R 止盈
+                    # 黃金與 MSFT 專屬唐奇安邏輯
                     if side == 'LONG':
                         if bar['l'] <= sl:
                             pnl = qty * (sl - entry)
@@ -199,7 +200,7 @@ def run_backtest():
                             continue
                         if not tp1_hit and bar['h'] >= pos['be_target']:
                             pos['tp1_hit'] = True
-                            pos['sl'] = entry # 移至開倉價保本
+                            pos['sl'] = entry
                         if bar['h'] >= tp2:
                             pnl = qty * (tp2 - entry)
                             current_wallet += pnl
@@ -303,8 +304,6 @@ def run_backtest():
                 be_target = 0
 
                 if mode == 'gold_donchian':
-                    # 黃金唐奇安邏輯
-                    df_1d = df # 簡化使用同源數據
                     macro_trend = 1 if bar['c'] > bar['ema200'] else -1
                     if macro_trend == 1 and bar['c'] > bar['dc_high']:
                         sig_side = 'LONG'
@@ -397,7 +396,6 @@ def run_backtest():
         wr = (w / c * 100) if c > 0 else 0.0
         symbol_lines.append(f"{sym.ljust(5)} | 交易: {str(c).rjust(4)}次 | 勝率: {wr:5.2f}% | 收益貢獻: {r['pnl']:+12.6f}")
 
-    # 將抓取狀態整理排版置頂
     status_block = " | ".join(fetch_status)
 
     report_text = (
@@ -405,7 +403,7 @@ def run_backtest():
         "【數據抓取來源狀態】\n"
         + status_block + "\n"
         "----------------------------------------------------\n"
-        "判定邏輯: XAU還原唐奇安 + MSFT轉斐波 + 1年期回測\n"
+        "判定邏輯: XAU/MSFT唐奇安策略 + 1年期回測\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
