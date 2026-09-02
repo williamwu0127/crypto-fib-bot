@@ -3,12 +3,11 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-import yfinance as yf
 from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
-# 移除 365d 回測中呈現負報酬的標的 (保留正報酬與 BTC/ETH/SOL/BNB/DOGE/XAU/MSFT/TSM/GOOGL/MU/SPCX/SNDK)
+# 已移除在年度回測中表現為負報酬的標的
 SYMBOLS = {
     'BTC':   {'t': 'binance', 's': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'ETH':   {'t': 'binance', 's': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
@@ -51,8 +50,11 @@ def send_discord_safe(content):
 
 def fetch_historical_data(cfg, days=365):
     try:
+        # 改抓 60 天的資料量以滿足 4H 唐奇安滾動計算，若為 365d 則維持一年
+        fetch_days = 60 if days <= 30 else days
+        
         now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
+        start_ms = now_ms - (fetch_days * 24 * 60 * 60 * 1000)
         all_klines = []
         curr_start = start_ms
         
@@ -74,6 +76,12 @@ def fetch_historical_data(cfg, days=365):
             for col in ['o', 'h', 'l', 'c', 'v']:
                 df[col] = df[col].astype(float)
             df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+            
+            # 若為 30d 模式，只回測最近 30 天
+            if days <= 30:
+                cutoff_time = df['time'].max() - timedelta(days=30)
+                df = df[df['time'] >= cutoff_time].reset_index(drop=True)
+                
             return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
     except Exception:
         pass
@@ -99,7 +107,7 @@ def prepare_indicators(df, mode):
 
 def execute_backtest_run(days_target, label_str):
     print("==================================================")
-    print(f">>> 啟動【單一錢包複利 + 保證金控制<=10%】{label_str} 歷史回測")
+    print(f">>> 啟動【單一錢包複利 + 保證金<=10%】{label_str} 歷史回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -329,7 +337,7 @@ def execute_backtest_run(days_target, label_str):
                         
                         # 保證金限制：確保開倉保證金不超過目前實際錢包總額的 10%
                         max_allowed_margin = current_wallet * 0.10
-                        position_margin = (qty * entry) / 10.0  # 假設預設 10x 槓桿計算保證金
+                        position_margin = (qty * entry) / 10.0  # 假設 10x 槓桿計算保證金
                         if position_margin > max_allowed_margin:
                             qty = (max_allowed_margin * 10.0) / entry
 
