@@ -30,35 +30,51 @@ SYMBOLS_CONFIG = {
     'SNDK':  {'s': 'SNDKUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True}
 }
 
+# ==================== 2. 安全分頁歷史數據下載模組 ====================
 def fetch_historical_klines(symbol, interval, days=365):
-    print(f"📥 正在下載 {symbol} ({interval}) 最近 {days} 天歷史數據...", flush=True)
+    print(f"📥 正在分段下載 {symbol} ({interval}) 最近 {days} 天歷史數據...", flush=True)
     end_time = int(time.time() * 1000)
     start_time = end_time - (days * 24 * 60 * 60 * 1000)
-    all_res = []
     
+    interval_ms = {
+        '15m': 15 * 60 * 1000 * 1400,
+        '1h': 60 * 60 * 1000 * 1400,
+        '4h': 4 * 60 * 60 * 1000 * 1400,
+        '1d': 24 * 60 * 60 * 1000 * 1400
+    }.get(interval, 60 * 60 * 1000 * 1400)
+
+    all_res = []
     current_start = start_time
+    
     while current_start < end_time:
-        url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&limit=1500"
+        current_end = min(current_start + interval_ms, end_time)
+        url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&endTime={current_end}&limit=1500"
         try:
             res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0:
-                break
-            all_res.extend(res)
-            current_start = int(res[-1][0]) + 1
-            time.sleep(0.2)
+            if isinstance(res, list) and len(res) > 0:
+                all_res.extend(res)
+                current_start = int(res[-1][0]) + 1
+            else:
+                current_start = current_end + 1
+            time.sleep(0.15)
         except Exception as e:
-            print(f"⚠️ 下載 {symbol} 歷史數據出錯: {e}", flush=True)
-            break
+            print(f"⚠️ 下載 {symbol} 分段數據出錯: {e}", flush=True)
+            current_start = current_end + 1
             
     if len(all_res) > 0:
         cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
         df = pd.DataFrame(all_res, columns=cols)
+        df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
         for col in ['o', 'h', 'l', 'c', 'v']:
             df[col] = df[col].astype(float)
         df['time'] = pd.to_datetime(df['t'], unit='ms')
+        print(f"✅ {symbol} ({interval}) 成功載入 {len(df)} 筆歷史 K 線。", flush=True)
         return df[['time', 'o', 'h', 'l', 'c', 'v']]
+        
+    print(f"❌ {symbol} ({interval}) 無法取得任何歷史數據。", flush=True)
     return None
 
+# ==================== 3. 模擬回測核心引擎 ====================
 def run_backtest_for_symbol(sym_key, cfg):
     symbol = cfg['s']
     interval = cfg['interval']
@@ -69,7 +85,7 @@ def run_backtest_for_symbol(sym_key, cfg):
     df_1d = fetch_historical_klines(symbol, '1d', days=365) if mode == 'gold_donchian' else None
     
     if df is None or len(df) < 100 or df_4h is None:
-        print(f"❌ {sym_key} 歷史數據不足，跳過回測。") # 已修正變數名稱
+        print(f"❌ {sym_key} 歷史數據不足，跳過回測。")
         return None
 
     wallet = 100.0
