@@ -3,7 +3,6 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-import yfinance as yf
 from datetime import datetime, timedelta
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
@@ -14,20 +13,20 @@ SYMBOLS = {
     'SOL':   {'t': 'binance', 's': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'BNB':   {'t': 'binance', 's': 'BNBUSDT',  'interval': '15m', 'mode': 'crypto_fib'},
     'DOGE':  {'t': 'binance', 's': 'DOGEUSDT', 'interval': '15m', 'mode': 'crypto_fib'},
-    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 幣安現貨黃金 4H 唐奇安
-    'MSFT':  {'t': 'stock',   's': 'MSFT',     'interval': '1h',  'mode': 'gold_donchian'}, # 美股來源，策略與黃金唐奇安完全相同
-    'TSM':   {'t': 'stock',   's': 'TSM',      'interval': '1h',  'mode': 'stock_pullback'},
-    'NVDA':  {'t': 'stock',   's': 'NVDA',     'interval': '1h',  'mode': 'stock_pullback'},
-    'AMD':   {'t': 'stock',   's': 'AMD',      'interval': '1h',  'mode': 'stock_pullback'},
-    'AAPL':  {'t': 'stock',   's': 'AAPL',     'interval': '1h',  'mode': 'stock_pullback'},
-    'GOOGL': {'t': 'stock',   's': 'GOOGL',    'interval': '1h',  'mode': 'stock_pullback'},
-    'AMZN':  {'t': 'stock',   's': 'AMZN',     'interval': '1h',  'mode': 'stock_pullback'},
-    'META':  {'t': 'stock',   's': 'META',     'interval': '1h',  'mode': 'stock_pullback'},
-    'TSLA':  {'t': 'stock',   's': 'TSLA',     'interval': '1h',  'mode': 'stock_pullback'},
-    'MU':    {'t': 'stock',   's': 'MU',       'interval': '1h',  'mode': 'stock_pullback'},
-    'GLW':   {'t': 'stock',   's': 'GLW',      'interval': '1h',  'mode': 'stock_pullback'},
-    'SPCX':  {'t': 'stock',   's': 'SPCX',     'interval': '1h',  'mode': 'stock_pullback'},
-    'SNDK':  {'t': 'stock',   's': 'SNDK',     'interval': '1h',  'mode': 'stock_pullback'}
+    'XAU':   {'t': 'binance', 's': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_donchian'},
+    'MSFT':  {'t': 'binance', 's': 'MSFTUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'TSM':   {'t': 'binance', 's': 'TSMUSDT',  'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'NVDA':  {'t': 'binance', 's': 'NVDAUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'AMD':   {'t': 'binance', 's': 'AMDUSDT',  'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'AAPL':  {'t': 'binance', 's': 'AAPLUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'GOOGL': {'t': 'binance', 's': 'GOOGLUSDT','interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'AMZN':  {'t': 'binance', 's': 'AMZNUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'META':  {'t': 'binance', 's': 'METAUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'TSLA':  {'t': 'binance', 's': 'TSLAUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'MU':    {'t': 'binance', 's': 'MUUSDT',   'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'GLW':   {'t': 'binance', 's': 'GLWUSDT',  'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'SPCX':  {'t': 'binance', 's': 'SPCXUSDT', 'interval': '4h',  'mode': 'gold_donchian'}, # 統一換成黃金的唐奇安策略
+    'SNDK':  {'t': 'binance', 's': 'SNDKUSDT', 'interval': '4h',  'mode': 'gold_donchian'}  # 統一換成黃金的唐奇安策略
 }
 
 INITIAL_WALLET = 100.0
@@ -57,50 +56,30 @@ def send_discord_safe(content):
 
 def fetch_historical_data(cfg, days=365):
     try:
-        if cfg['t'] == 'binance':
-            now_ms = int(time.time() * 1000)
-            start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
-            all_klines = []
-            curr_start = start_ms
-            
-            while curr_start < now_ms:
-                url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
-                res = requests.get(url, timeout=10).json()
-                if not isinstance(res, list) or len(res) == 0:
-                    break
-                all_klines.extend(res)
-                if len(res) < 1000:
-                    break
-                # 精準無縫接續下一根 K 線，修復跳過 K 線的邏輯漏洞
-                curr_start = int(res[-1][0]) + 1
-                time.sleep(0.04)
-            
-            if len(all_klines) > 10:
-                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-                df = pd.DataFrame(all_klines, columns=cols)
-                df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
-                for col in ['o', 'h', 'l', 'c', 'v']:
-                    df[col] = df[col].astype(float)
-                df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
-                return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
-        else:
-            # 美股數據 (支援 30d 與 365d)
-            period_str = "1mo" if days <= 30 else "1y"
-            df = yf.download(cfg['s'], period=period_str, interval=cfg['interval'], progress=False)
-            if df is not None and not df.empty and len(df) > 10:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                df = df.rename(columns=str.lower)
-                t_idx = pd.to_datetime(df.index)
-                if t_idx.tz is not None:
-                    t_idx = t_idx.tz_localize(None)
-                df['time'] = t_idx
-                req_cols = ['open', 'high', 'low', 'close', 'volume']
-                if all(c in df.columns for c in req_cols):
-                    res_df = df[req_cols].copy()
-                    res_df.columns = ['o', 'h', 'l', 'c', 'v']
-                    res_df['time'] = df['time'].values
-                    return res_df.reset_index(drop=True)
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
+        all_klines = []
+        curr_start = start_ms
+        
+        while curr_start < now_ms:
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
+            res = requests.get(url, timeout=10).json()
+            if not isinstance(res, list) or len(res) == 0:
+                break
+            all_klines.extend(res)
+            if len(res) < 1000:
+                break
+            curr_start = int(res[-1][0]) + 1
+            time.sleep(0.04)
+        
+        if len(all_klines) > 10:
+            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+            df = pd.DataFrame(all_klines, columns=cols)
+            df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
+            for col in ['o', 'h', 'l', 'c', 'v']:
+                df[col] = df[col].astype(float)
+            df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+            return df[['time', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
     except Exception:
         pass
     return None
@@ -125,7 +104,7 @@ def prepare_indicators(df, mode):
 
 def execute_backtest_run(days_target, label_str):
     print("==================================================")
-    print(f">>> 啟動【XAU/MSFT唐奇安策略 + 美股均線回踩】{label_str} 歷史回測")
+    print(f">>> 啟動【全面幣安現貨數據源】{label_str} 歷史回測")
     print(f">>> 初始本金: ${INITIAL_WALLET} USDT | 風控: 1.0%")
     print("==================================================\n")
 
@@ -146,10 +125,10 @@ def execute_backtest_run(days_target, label_str):
             if latest_end is None or e_date > latest_end:
                 latest_end = e_date
             print(f"成功 ({len(df)} 根)")
-            fetch_status.append(f"{sym.ljust(5)}: 🟢 成功")
+            fetch_status.append(f"{sym}: 🟢")
         else:
             print("失敗 (資料不足)")
-            fetch_status.append(f"{sym.ljust(5)}: 🔴 失敗")
+            fetch_status.append(f"{sym}: 🔴")
 
     if not dfs:
         print(f"[{label_str}] 無可用數據。")
@@ -187,7 +166,6 @@ def execute_backtest_run(days_target, label_str):
                 tp1_hit = pos['tp1_hit']
 
                 if mode == 'gold_donchian':
-                    # 黃金與 MSFT 專屬唐奇安邏輯 (2.0R 保本 / 5.0R 止盈)
                     if side == 'LONG':
                         if bar['l'] <= sl:
                             pnl = qty * (sl - entry)
@@ -319,27 +297,6 @@ def execute_backtest_run(days_target, label_str):
                         risk_dist = sl - entry
                         be_target = entry - (risk_dist * 2.0)
                         tp2 = entry - (risk_dist * 5.0)
-                elif mode == 'stock_pullback':
-                    trend_bull = (bar['ema20'] > bar['ema50']) and (bar['c'] > bar['ema200'])
-                    trend_bear = (bar['ema20'] < bar['ema50']) and (bar['c'] < bar['ema200'])
-                    
-                    pullback_long = (bar['l'] <= bar['ema20']) and (bar['l'] >= bar['ema50'] * 0.995) and (bar['c'] > bar['o']) and (bar['rsi'] >= 45 and bar['rsi'] <= 60)
-                    pullback_short = (bar['h'] >= bar['ema20']) and (bar['h'] <= bar['ema50'] * 1.005) and (bar['c'] < bar['o']) and (bar['rsi'] <= 55 and bar['rsi'] >= 40)
-
-                    if trend_bull and pullback_long:
-                        sig_side = 'LONG'
-                        entry = bar['c']
-                        sl = min(bar['l'], bar['ema50'] - (bar['atr'] * 1.0))
-                        r = abs(entry - sl)
-                        tp1 = entry + (r * 1.5)
-                        tp2 = entry + (r * 3.0)
-                    elif trend_bear and pullback_short:
-                        sig_side = 'SHORT'
-                        entry = bar['c']
-                        sl = max(bar['h'], bar['ema50'] + (bar['atr'] * 1.0))
-                        r = abs(sl - entry)
-                        tp1 = entry - (r * 1.5)
-                        tp2 = entry - (r * 3.0)
                 else:
                     sub = df.iloc[max(0, idx-25):idx+1]
                     h, l = sub['h'].max(), sub['l'].min()
@@ -395,10 +352,10 @@ def execute_backtest_run(days_target, label_str):
 
     report_text = (
         "```text\n"
-        f"【數據抓取來源狀態 ({label_str})】\n"
+        f"【抓取狀態 ({label_str})】\n"
         + status_block + "\n"
         "----------------------------------------------------\n"
-        f"判定邏輯: XAU/MSFT唐奇安策略 + {label_str}回測\n"
+        f"判定邏輯: XAU唐奇安策略 + {label_str}回測\n"
         f"回測區間: {earliest_start} ~ {latest_end}\n"
         f"初始資金: ${format_full_num(INITIAL_WALLET)} USDT\n"
         f"最終結餘: ${format_full_num(current_wallet, 6)} USDT ({roi_pct:+.4f}%)\n"
@@ -414,6 +371,5 @@ def execute_backtest_run(days_target, label_str):
     print(f">>> [{label_str}] 完成推播！\n")
 
 if __name__ == '__main__':
-    # 同時執行 30天 與 365天 雙版本回測
     execute_backtest_run(30, "30d")
     execute_backtest_run(365, "365d")
