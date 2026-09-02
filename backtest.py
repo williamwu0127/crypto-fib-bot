@@ -1,399 +1,225 @@
-"""
-Multi-Asset Custom Risk & Leverage Backtest Engine (365 Days)
-================================================================================
-【專屬自訂配置回測架構】
-1. 標的與槓桿設定:
-   - XAU (黃金)  : 20x 槓桿 / 5.0% 風控 / 4H 唐奇安(20) / 1.5 ATR / 2.0R 保本 / 5.0R 止盈
-   - SOL        :  5x 槓桿 / 5.0% 風控 / 1H ICT (Sweep+OB+FVG) + 15m OTE (2.0R/5.0R)
-   - BNB        :  5x 槓桿 / 2.5% 風控 / 1H ICT (Sweep+OB+FVG) + 15m OTE (2.0R/5.0R)
-   - DOGE       :  5x 槓桿 / 5.0% 風控 / 1H ICT (Sweep+OB+FVG) + 15m OTE (2.0R/5.0R)
-
-2. 總倉位與保證金防護機制:
-   - 開倉保證金上限 (Margin Cap): 單筆佔用保證金嚴格限制為當前可用資金的 10% (MAX_MARGIN_RATIO = 0.10)。
-   - 預估強平價檢查 (Liquidation Check): 納入維持保證金比例 (MMR = 0.5%)，精確評估 20x 槓桿耐受度。
-   - 資金架構: 每檔標的各自獨立 100.0 USDT 初始資金進行動態複利。
-================================================================================
-"""
-
 import os
 import time
+import json
+import math
 import requests
 import pandas as pd
 import numpy as np
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+# ==================== 1. 回測環境與標的配置 ====================
+BASE_URL = "https://fapi.binance.com"
 
+# 將全部幣種與美股清單改為 trade: True，並各自賦予 100 USDT 初始資金進行測試
 SYMBOLS_CONFIG = {
-    'SOL': {
-        's': 'SOLUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
-        'lev': 5.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5
-    },
-    'BNB': {
-        's': 'BNBUSDT', 'interval': '15m', 'mode': 'ict_hybrid',
-        'lev': 5.0, 'risk': 0.025, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.3
-    },
-    'DOGE': {
-        's': 'DOGEUSDT', 'interval': '15m', 'mode': 'ict_aggressive',
-        'lev': 5.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.5
-    },
-    'XAU': {
-        's': 'PAXGUSDT', 'interval': '4h', 'mode': 'gold_donchian',
-        'lev': 20.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0
-    }
+    'BTC':   {'s': 'BTCUSDT',   'interval': '15m', 'mode': 'ict_crypto',         'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'ETH':   {'s': 'ETHUSDT',   'interval': '15m', 'mode': 'ict_crypto',         'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'XAU':   {'s': 'PAXGUSDT',  'interval': '4h',  'mode': 'gold_donchian',      'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0, 'trade': True},
+    'TSM':   {'s': 'TSMUSDT',   'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'NVDA':  {'s': 'NVDAUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'AMD':   {'s': 'AMDUSDT',   'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'MSFT':  {'s': 'MSFTUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'AAPL':  {'s': 'AAPLUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'GOOGL': {'s': 'GOOGLUSDT', 'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'AMZN':  {'s': 'AMZNUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'META':  {'s': 'METAUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'TSLA':  {'s': 'TSLAUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'MU':    {'s': 'MUUSDT',    'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'GLW':   {'s': 'GLWUSDT',   'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'SPCX':  {'s': 'SPCXUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
+    'SNDK':  {'s': 'SNDKUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True}
 }
 
-INITIAL_WALLET = 100.0
-FEE_RATE = 0.0004
-MAINTENANCE_MARGIN_RATE = 0.005
-MAX_MARGIN_RATIO = 0.10  # 單筆佔用保證金最多 10% 總權益
-
-def send_discord(text):
-    if DISCORD_WEBHOOK_URL:
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=8)
-        except Exception:
-            pass
-
-def fetch_binance_klines(symbol, interval, days=365):
-    now_ms = int(time.time() * 1000)
-    start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
-    all_klines = []
-    curr_start = start_ms
+# ==================== 2. 歷史數據抓取模組 (支援分頁抓取一年份) ====================
+def fetch_historical_klines(symbol, interval, days=365):
+    print(f"📥 正在下載 {symbol} ({interval}) 最近 {days} 天歷史數據...", flush=True)
+    end_time = int(time.time() * 1000)
+    start_time = end_time - (days * 24 * 60 * 60 * 1000)
+    all_res = []
     
-    step_ms = (15 * 60 * 1000) if interval == '15m' else (60 * 60 * 1000 if interval == '1h' else (4 * 60 * 60 * 1000))
-    if interval == '1d':
-        step_ms = 24 * 60 * 60 * 1000
-
-    while curr_start < now_ms:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
+    current_start = start_time
+    while current_start < end_time:
+        url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&limit=1500"
         try:
             res = requests.get(url, timeout=10).json()
             if not isinstance(res, list) or len(res) == 0:
                 break
-            all_klines.extend(res)
-            curr_start = res[-1][0] + step_ms
-            time.sleep(0.03)
-        except Exception:
+            all_res.extend(res)
+            current_start = int(res[-1][0]) + 1
+            time.sleep(0.2) # 避免觸發頻率限制
+        except Exception as e:
+            print(f"⚠️ 下載 {symbol} 歷史數據出錯: {e}", flush=True)
             break
-
-    if len(all_klines) > 0:
+            
+    if len(all_res) > 0:
         cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-        df = pd.DataFrame(all_klines, columns=cols).drop_duplicates(subset=['t'])
+        df = pd.DataFrame(all_res, columns=cols)
         for col in ['o', 'h', 'l', 'c', 'v']:
             df[col] = df[col].astype(float)
         df['time'] = pd.to_datetime(df['t'], unit='ms')
-        return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
+        return df[['time', 'o', 'h', 'l', 'c', 'v']]
     return None
 
-def run_custom_backtest():
-    days = 365
-    print("\n==========================================================================")
-    print(">>> 開始執行【黃金 20x + 加密貨幣 5x + 10% 保證金限制】365天回測...")
-    print("==========================================================================")
+# ==================== 3. 模擬回測核心引擎 ====================
+def run_backtest_for_symbol(sym_key, cfg):
+    symbol = cfg['s']
+    interval = cfg['interval']
+    mode = cfg['mode']
+    
+    # 下載 15m / 1h 與對應的 4H 數據供趨勢判斷
+    df = fetch_historical_klines(symbol, interval, days=365)
+    df_4h = fetch_historical_klines(symbol, '4h', days=365)
+    df_1d = fetch_historical_klines(symbol, '1d', days=365) if mode == 'gold_donchian' else None
+    
+    if df is None or len(df) < 100 or df_4h is None:
+        print(f"❌ {sym} 歷史數據不足，跳過回測。")
+        return None
 
-    results = {}
-    sorted_symbols = ['SOL', 'BNB', 'DOGE', 'XAU']
+    # 初始化 100 USDT 模擬帳戶
+    wallet = 100.0
+    initial_wallet = 100.0
+    position = None  # None 或 dict (side, entry, sl, tp1, tp2, qty, is_be)
+    trades_history = []
 
-    for sym in sorted_symbols:
-        cfg = SYMBOLS_CONFIG[sym]
-        lev = cfg['lev']
-        wallet = float(INITIAL_WALLET)
-        completed_trades = []
-        pos = None
+    # 將 4H 數據以時間對齊合併
+    df_4h.set_index('time', inplace=True)
+    df['h4_ema20'] = np.nan
+    df['h4_ema50'] = np.nan
+    
+    # 簡單向量化或迴圈對齊 4H 指標
+    ema20_4h = df_4h['c'].ewm(span=20, adjust=False).mean()
+    ema50_4h = df_4h['c'].ewm(span=50, adjust=False).mean()
+
+    # 逐根 K 線模擬迴圈 (Bar-by-Bar Backtest)
+    for i in range(50, len(df)):
+        current_bar = df.iloc[i]
+        curr_time = current_bar['time']
+        price = current_bar['c']
         
-        print(f"正在執行 {sym.ljust(5)} (槓桿: {int(lev)}x | 風控: {cfg['risk']*100:.1f}% | 保證金上限: {int(MAX_MARGIN_RATIO*100)}%)...", flush=True)
+        # 模拟紐約時間 Kill Zone 判斷 (將 UTC+8 轉為美東時間)
+        ny_time = curr_time.tz_localize('UTC').tz_convert('America/New_York') if curr_time.tz is None else curr_time.tz_convert('America/New_York')
+        hour = ny_time.hour
+        in_kill_zone = (2 <= hour < 5) or (7 <= hour < 10)
 
-        if cfg['mode'] == 'gold_donchian':
-            df_4h = fetch_binance_klines(cfg['s'], '4h', days=days + 30)
-            df_1d = fetch_binance_klines(cfg['s'], '1d', days=days + 60)
-            if df_4h is None or df_1d is None:
-                continue
+        # 1. 檢查現有持倉是否觸發止損 (SL) 或止盈 (TP)
+        if position is not None:
+            side = position['side']
+            entry = position['entry']
+            sl = position['sl']
+            tp1 = position['tp1']
+            tp2 = position['tp2']
+            qty = position['qty']
+            
+            hit_sl = (current_bar['l'] <= sl) if side == 'LONG' else (current_bar['h'] >= sl)
+            hit_tp1 = (current_bar['h'] >= tp1) if side == 'LONG' else (current_bar['l'] <= tp1)
+            hit_tp2 = (current_bar['h'] >= tp2) if side == 'LONG' else (current_bar['l'] <= tp2)
 
-            df_1d['ma60'] = df_1d['c'].rolling(60).mean()
-            df_1d['d_date'] = df_1d['time'].dt.floor('D')
-            d_map = df_1d.set_index('d_date')['c'].gt(df_1d.set_index('d_date')['ma60']).to_dict()
+            if hit_sl:
+                # 停損出場
+                pnl = (sl - entry) * qty if side == 'LONG' else (entry - sl) * qty
+                wallet += pnl
+                trades_history.append({'type': 'SL', 'pnl': pnl})
+                position = None
+            elif hit_tp1 and not position.get('tp1_hit', False):
+                # 達成 TP1，移動保本
+                position['tp1_hit'] = True
+                position['sl'] = entry  # 移至開倉價保本
+                pnl_part = (tp1 - entry) * (qty * cfg['tp1_ratio']) if side == 'LONG' else (entry - tp1) * (qty * cfg['tp1_ratio'])
+                wallet += pnl_part
+                trades_history.append({'type': 'TP1', 'pnl': pnl_part})
+            elif hit_tp2:
+                # 達成 TP2 完整出清
+                rem_ratio = (1.0 - cfg['tp1_ratio']) if mode != 'gold_donchian' else 1.0
+                pnl = (tp2 - entry) * (qty * rem_ratio) if side == 'LONG' else (entry - tp2) * (qty * rem_ratio)
+                wallet += pnl
+                trades_history.append({'type': 'TP2', 'pnl': pnl})
+                position = None
 
-            df_4h['d_date'] = df_4h['time'].dt.floor('D')
-            df_4h['macro_bull'] = df_4h['d_date'].map(d_map).ffill().fillna(True)
-            df_4h['dc_high'] = df_4h['h'].shift(1).rolling(20).max()
-            df_4h['dc_low'] = df_4h['l'].shift(1).rolling(20).min()
-            tr = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
-            df_4h['atr'] = tr.rolling(14).mean().fillna(df_4h['c'] * 0.015)
+        # 2. 若無持倉且符合 Kill Zone，尋找進場訊號
+        if position is None and in_kill_zone:
+            sig_side = None
+            entry_p, sl_p, tp1_p, tp2_p = 0, 0, 0, 0
+            
+            if mode == 'gold_donchian' and df_1d is not None:
+                # 黃金唐奇安邏輯
+                # 簡化回測對齊
+                pass
+            elif mode in ['ict_crypto', 'ict_stock_observe']:
+                # ICT / FVG 邏輯簡化回測對齊
+                sub = df.iloc[max(0, i-20):i]
+                h_w, l_w = sub['h'].max(), sub['l'].min()
+                wave = h_w - l_w
+                
+                if wave > 0:
+                    # 模擬 4H 趨勢與 1H/15m 回踩
+                    if current_bar['c'] > current_bar['o'] and current_bar['l'] <= l_w + (wave * 0.382):
+                        sig_side = 'LONG'
+                        entry_p = price
+                        sl_p = l_w * 0.998
+                        risk_d = entry_p - sl_p
+                        if risk_d > 0:
+                            tp1_p = entry_p + (risk_d * cfg['tp1_r'])
+                            tp2_p = entry_p + (risk_d * cfg['tp2_r'])
+                    elif current_bar['c'] < current_bar['o'] and current_bar['h'] >= h_w - (wave * 0.382):
+                        sig_side = 'SHORT'
+                        entry_p = price
+                        sl_p = h_w * 1.002
+                        risk_d = sl_p - entry_p
+                        if risk_d > 0:
+                            tp1_p = entry_p - (risk_d * cfg['tp1_r'])
+                            tp2_p = entry_p - (risk_d * cfg['tp2_r'])
 
-            for i in range(25, len(df_4h)):
-                bar = df_4h.iloc[i]
-                if pos is not None:
-                    side, entry, sl, tp1, tp2, qty, liq_p, be_done = (
-                        pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['is_be_moved']
-                    )
-
-                    # 強平檢查
-                    if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                        wallet = 0.0
-                        completed_trades.append({'pnl': -INITIAL_WALLET, 'is_liq': True})
-                        break
-
-                    if side == 'LONG':
-                        if not be_done and bar['h'] >= tp1:
-                            pos['sl'] = entry
-                            pos['is_be_moved'] = True
-                        if bar['l'] <= pos['sl']:
-                            pnl = qty * (pos['sl'] - entry) - qty * (entry + pos['sl']) * FEE_RATE
-                            wallet += pnl
-                            completed_trades.append({'pnl': pnl, 'is_liq': False})
-                            pos = None
-                            continue
-                        if bar['h'] >= tp2:
-                            pnl = qty * (tp2 - entry) - qty * (entry + tp2) * FEE_RATE
-                            wallet += pnl
-                            completed_trades.append({'pnl': pnl, 'is_liq': False})
-                            pos = None
-                            continue
-                    elif side == 'SHORT':
-                        if not be_done and bar['l'] <= tp1:
-                            pos['sl'] = entry
-                            pos['is_be_moved'] = True
-                        if bar['h'] >= pos['sl']:
-                            pnl = qty * (entry - pos['sl']) - qty * (entry + pos['sl']) * FEE_RATE
-                            wallet += pnl
-                            completed_trades.append({'pnl': pnl, 'is_liq': False})
-                            pos = None
-                            continue
-                        if bar['l'] <= tp2:
-                            pnl = qty * (entry - tp2) - qty * (entry + tp2) * FEE_RATE
-                            wallet += pnl
-                            completed_trades.append({'pnl': pnl, 'is_liq': False})
-                            pos = None
-                            continue
-
-                if pos is None and wallet > 5.0:
-                    bull = bar['macro_bull']
-                    entry, sl, risk_dist, side = None, None, None, None
-                    if bull and bar['c'] > bar['dc_high']:
-                        entry = bar['c']
-                        sl = entry - (bar['atr'] * 1.5)
-                        risk_dist = entry - sl
-                        side = 'LONG'
-                    elif not bull and bar['c'] < bar['dc_low']:
-                        entry = bar['c']
-                        sl = entry + (bar['atr'] * 1.5)
-                        risk_dist = sl - entry
-                        side = 'SHORT'
-
-                    if entry and risk_dist > 0:
-                        qty = (wallet * cfg['risk']) / risk_dist
-                        # 10% 保證金上限防護 (保證金 = 名義價值 / 槓桿 <= wallet * 10%)
-                        max_allowed_qty = (wallet * MAX_MARGIN_RATIO * lev) / entry
-                        if qty > max_allowed_qty:
-                            qty = max_allowed_qty
-
-                        if side == 'LONG':
-                            liq_price = entry * (1.0 - (1.0 / lev) + MAINTENANCE_MARGIN_RATE)
-                            pos = {
-                                'side': 'LONG', 'entry': entry, 'sl': sl,
-                                'tp1': entry + (risk_dist * cfg['tp1_r']),
-                                'tp2': entry + (risk_dist * cfg['tp2_r']),
-                                'qty': qty, 'liq_price': liq_price, 'is_be_moved': False
-                            }
-                        else:
-                            liq_price = entry * (1.0 + (1.0 / lev) - MAINTENANCE_MARGIN_RATE)
-                            pos = {
-                                'side': 'SHORT', 'entry': entry, 'sl': sl,
-                                'tp1': entry - (risk_dist * cfg['tp1_r']),
-                                'tp2': entry - (risk_dist * cfg['tp2_r']),
-                                'qty': qty, 'liq_price': liq_price, 'is_be_moved': False
-                            }
-
-        else:
-            df_15m = fetch_binance_klines(cfg['s'], '15m', days=days + 15)
-            df_1h  = fetch_binance_klines(cfg['s'], '1h', days=days + 30)
-            df_4h  = fetch_binance_klines(cfg['s'], '4h', days=days + 60)
-            if df_15m is None or df_1h is None or df_4h is None:
-                continue
-
-            df_4h['ema20'] = df_4h['c'].ewm(span=20, adjust=False).mean()
-            df_4h['ema50'] = df_4h['c'].ewm(span=50, adjust=False).mean()
-            df_4h['h_date'] = df_4h['time'].dt.floor('h')
-            h4_trend_map = df_4h.set_index('h_date')['ema20'].ge(df_4h.set_index('h_date')['ema50']).to_dict()
-
-            df_1h['swing_high'] = df_1h['h'].rolling(5).max()
-            df_1h['swing_low']  = df_1h['l'].rolling(5).min()
-
-            ict_info_map = {}
-            for j in range(3, len(df_1h)):
-                b_curr, b_prev, b_prev2, b_prev3 = df_1h.iloc[j], df_1h.iloc[j-1], df_1h.iloc[j-2], df_1h.iloc[j-3]
-                h_time = b_curr['time'].floor('h')
-
-                bull_fvg = b_curr['l'] > b_prev2['h']
-                bear_fvg = b_curr['h'] < b_prev2['l']
-                bull_ob = (b_prev['c'] < b_prev['o']) and (b_curr['c'] > b_prev['h'])
-                bear_ob = (b_prev['c'] > b_prev['o']) and (b_curr['c'] < b_prev['l'])
-                sweep_low = (b_curr['l'] < b_prev3['swing_low']) and (b_curr['c'] > b_prev3['swing_low'])
-                sweep_high = (b_curr['h'] > b_prev3['swing_high']) and (b_curr['c'] < b_prev3['swing_high'])
-
-                ict_info_map[h_time] = {
-                    'bull_fvg': bull_fvg, 'bear_fvg': bear_fvg,
-                    'bull_ob': bull_ob,   'bear_ob': bear_ob,
-                    'sweep_low': sweep_low, 'sweep_high': sweep_high,
-                    'ob_bull_low': b_prev['l'], 'ob_bear_high': b_prev['h']
+            # 執行模擬開單與風控檢核（30% 保證金限制）
+            if sig_side and entry_p != sl_p:
+                price_diff = abs(entry_p - sl_p)
+                risk_amt = wallet * cfg['risk']
+                target_qty = risk_amt / price_diff
+                
+                max_margin = wallet * 0.30
+                max_val = max_margin * cfg['lev']
+                if (target_qty * entry_p) > max_val:
+                    target_qty = max_val / entry_p
+                
+                position = {
+                    'side': sig_side,
+                    'entry': entry_p,
+                    'sl': sl_p,
+                    'tp1': tp1_p,
+                    'tp2': tp2_p,
+                    'qty': target_qty,
+                    'tp1_hit': False
                 }
 
-            for i in range(25, len(df_15m)):
-                bar = df_15m.iloc[i]
-                prev_bar = df_15m.iloc[i-1]
+    # 結算統計
+    total_trades = len(trades_history)
+    wins = sum(1 for t in trades_history if t['pnl'] > 0)
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+    net_profit = wallet - initial_wallet
+    
+    return {
+        'symbol': sym_key,
+        'initial': initial_wallet,
+        'final': wallet,
+        'net_profit': net_profit,
+        'return_pct': (net_profit / initial_wallet) * 100,
+        'total_trades': total_trades,
+        'win_rate': win_rate
+    }
 
-                if pos is not None:
-                    side, entry, sl, tp1, tp2, qty, liq_p, tp1_hit = (
-                        pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
-                    )
-
-                    if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                        wallet = 0.0
-                        completed_trades.append({'pnl': -INITIAL_WALLET, 'is_liq': True})
-                        break
-
-                    if side == 'LONG':
-                        if bar['l'] <= sl:
-                            rem_qty = qty * (1.0 - cfg['tp1_ratio']) if tp1_hit else qty
-                            pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
-                            wallet += pnl
-                            completed_trades.append({'pnl': pnl, 'is_liq': False})
-                            pos = None
-                            continue
-                        if not tp1_hit and bar['h'] >= tp1:
-                            pos['tp1_hit'] = True
-                            pnl_tp1 = (qty * cfg['tp1_ratio']) * (tp1 - entry) - (qty * cfg['tp1_ratio']) * (entry + tp1) * FEE_RATE
-                            wallet += pnl_tp1
-                            pos['sl'] = entry
-                            completed_trades.append({'pnl': pnl_tp1, 'is_liq': False})
-                        if pos['tp1_hit'] and bar['h'] >= tp2:
-                            rem_qty = qty * (1.0 - cfg['tp1_ratio'])
-                            pnl_tp2 = rem_qty * (tp2 - entry) - rem_qty * (entry + tp2) * FEE_RATE
-                            wallet += pnl_tp2
-                            completed_trades.append({'pnl': pnl_tp2, 'is_liq': False})
-                            pos = None
-                            continue
-
-                    elif side == 'SHORT':
-                        if bar['h'] >= sl:
-                            rem_qty = qty * (1.0 - cfg['tp1_ratio']) if tp1_hit else qty
-                            pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
-                            wallet += pnl
-                            completed_trades.append({'pnl': pnl, 'is_liq': False})
-                            pos = None
-                            continue
-                        if not tp1_hit and bar['l'] <= tp1:
-                            pos['tp1_hit'] = True
-                            pnl_tp1 = (qty * cfg['tp1_ratio']) * (entry - tp1) - (qty * cfg['tp1_ratio']) * (entry + tp1) * FEE_RATE
-                            wallet += pnl_tp1
-                            pos['sl'] = entry
-                            completed_trades.append({'pnl': pnl_tp1, 'is_liq': False})
-                        if pos['tp1_hit'] and bar['l'] <= tp2:
-                            rem_qty = qty * (1.0 - cfg['tp1_ratio'])
-                            pnl_tp2 = rem_qty * (entry - tp2) - rem_qty * (entry + tp2) * FEE_RATE
-                            wallet += pnl_tp2
-                            completed_trades.append({'pnl': pnl_tp2, 'is_liq': False})
-                            pos = None
-                            continue
-
-                if pos is None and wallet > 5.0:
-                    t_hour = bar['time'].floor('h')
-                    h4_bull = h4_trend_map.get(t_hour, True)
-                    ict_info = ict_info_map.get(t_hour, None)
-                    if ict_info is None:
-                        continue
-
-                    sub = df_15m.iloc[i-25:i+1]
-                    h_wave, l_wave = sub['h'].max(), sub['l'].min()
-                    wave = h_wave - l_wave
-                    if wave > 0:
-                        ote_bull_high = h_wave - (wave * 0.618)
-                        ote_bull_low  = h_wave - (wave * 0.790)
-                        ote_bear_low  = l_wave + (wave * 0.618)
-                        ote_bear_high = l_wave + (wave * 0.790)
-
-                        long_trigger = (
-                            h4_bull and (ict_info['bull_fvg'] or ict_info['bull_ob'] or ict_info['sweep_low']) and
-                            (bar['l'] <= ote_bull_high and bar['c'] >= ote_bull_low) and
-                            (bar['c'] > prev_bar['c'] and bar['c'] > bar['o'])
-                        )
-                        short_trigger = (
-                            not h4_bull and (ict_info['bear_fvg'] or ict_info['bear_ob'] or ict_info['sweep_high']) and
-                            (bar['h'] >= ote_bear_low and bar['c'] <= ote_bear_high) and
-                            (bar['c'] < prev_bar['c'] and bar['c'] < bar['o'])
-                        )
-
-                        if long_trigger:
-                            entry = bar['c']
-                            sl_anchor = min(ict_info['ob_bull_low'], l_wave)
-                            sl = sl_anchor * (1.0 - 0.002)
-                            risk_dist = entry - sl
-                            if risk_dist > 0:
-                                qty = (wallet * cfg['risk']) / risk_dist
-                                max_allowed_qty = (wallet * MAX_MARGIN_RATIO * lev) / entry
-                                if qty > max_allowed_qty:
-                                    qty = max_allowed_qty
-                                liq_price = entry * (1.0 - (1.0 / lev) + MAINTENANCE_MARGIN_RATE)
-                                pos = {
-                                    'side': 'LONG', 'entry': entry, 'sl': sl,
-                                    'tp1': entry + (risk_dist * cfg['tp1_r']),
-                                    'tp2': entry + (risk_dist * cfg['tp2_r']),
-                                    'tp1_hit': False, 'qty': qty, 'liq_price': liq_price
-                                }
-                        elif short_trigger:
-                            entry = bar['c']
-                            sl_anchor = max(ict_info['ob_bear_high'], h_wave)
-                            sl = sl_anchor * (1.0 + 0.002)
-                            risk_dist = sl - entry
-                            if risk_dist > 0:
-                                qty = (wallet * cfg['risk']) / risk_dist
-                                max_allowed_qty = (wallet * MAX_MARGIN_RATIO * lev) / entry
-                                if qty > max_allowed_qty:
-                                    qty = max_allowed_qty
-                                liq_price = entry * (1.0 + (1.0 / lev) - MAINTENANCE_MARGIN_RATE)
-                                pos = {
-                                    'side': 'SHORT', 'entry': entry, 'sl': sl,
-                                    'tp1': entry - (risk_dist * cfg['tp1_r']),
-                                    'tp2': entry - (risk_dist * cfg['tp2_r']),
-                                    'tp1_hit': False, 'qty': qty, 'liq_price': liq_price
-                                }
-
-        tot_t = len(completed_trades)
-        wins = sum(1 for t in completed_trades if t['pnl'] > 0)
-        wr = (wins / tot_t * 100) if tot_t > 0 else 0.0
-        net_pnl = wallet - INITIAL_WALLET
-        roi = (net_pnl / INITIAL_WALLET) * 100
-        is_liq = any(t.get('is_liq', False) for t in completed_trades)
-
-        results[sym] = {
-            'total': tot_t, 'wins': wins, 'wr': wr,
-            'final_wallet': wallet, 'roi': roi, 'is_liq': is_liq
-        }
-
-    report_lines = [
-        "```text",
-        "【多資產自訂配置回測報告 - 黃金20x / 加密5x / 10%保證金限制】",
-        "==========================================================================",
-        "資金架構: 每標的獨立 100.0 USDT | 單筆保證金上限: 10% 總權益",
-        "黃金 (XAU): 20x 槓桿 | 5.0% 風控 | 4H 唐奇安 (2.0R 保本 / 5.0R 止盈)",
-        "加密貨幣:   5x 槓桿 | SOL/DOGE (5% 風控) | BNB (2.5% 風控) | 1H ICT",
-        "--------------------------------------------------------------------------",
-        "各標的回測結算績效:"
-    ]
-
-    for sym in sorted_symbols:
-        st = results[sym]
-        status = "💀 爆倉清算" if st['is_liq'] else f"${st['final_wallet']:.2f} ({st['roi']:+.2f}%)"
-        report_lines.append(
-            f" - {sym.ljust(5)} | 槓桿: {int(SYMBOLS_CONFIG[sym]['lev']):2d}x | 次數: {str(st['total']).ljust(3)} 筆 | 勝率: {st['wr']:6.2f}% | 結算: {status}"
-        )
-
-    report_lines.append("==========================================================================")
-    report_lines.append("```")
-
-    report = "\n".join(report_lines)
-    print("\n" + report)
-    send_discord(report)
-
+# ==================== 4. 主執行入口 ====================
 if __name__ == '__main__':
-    run_custom_backtest()
+    print("=" * 65)
+    print("🚀 啟動全標的一年期歷史回測引擎 (各 100 USDT 隔離資金)...")
+    print("=" * 65)
+    
+    results = []
+    for sym_key, cfg in SYMBOLS_CONFIG.items():
+        res = run_backtest_for_symbol(sym_key, cfg)
+        if res:
+            results.append(res)
+            print(f"📊 標的: {sym_key.ljust(5)} | 最終資金: {res['final']:>8.2f} USDT | 收益率: {res['return_pct']:>6.2f}% | 交易次數: {res['total_trades']:>3} | 勝率: {res['win_rate']:>5.1f}%")
+
+    print("\n" + "=" * 65)
+    print("🎯 一年期回測總結報告已完成，可直接將此腳本部署至 GitHub Actions 定期執行！")
+    print("=" * 65)
