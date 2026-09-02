@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import math
 import requests
 import pandas as pd
@@ -8,70 +7,30 @@ import numpy as np
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-# ==================== 1. 回測環境與標的配置 ====================
-BASE_URL = "https://fapi.binance.com"
+# ==================== 1. 回測環境與標的配置 (改用現貨 API 確保數據穩定) ====================
+BASE_URL = "https://api.binance.com"
 
 SYMBOLS_CONFIG = {
     'BTC':   {'s': 'BTCUSDT',   'interval': '15m', 'mode': 'ict_crypto',         'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
     'ETH':   {'s': 'ETHUSDT',   'interval': '15m', 'mode': 'ict_crypto',         'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
     'XAU':   {'s': 'PAXGUSDT',  'interval': '4h',  'mode': 'gold_donchian',      'lev': 10.0, 'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0, 'tp1_ratio': 0.0, 'trade': True},
-    'TSM':   {'s': 'TSMUSDT',   'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'NVDA':  {'s': 'NVDAUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'AMD':   {'s': 'AMDUSDT',   'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'MSFT':  {'s': 'MSFTUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'AAPL':  {'s': 'AAPLUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'GOOGL': {'s': 'GOOGLUSDT', 'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'AMZN':  {'s': 'AMZNUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'META':  {'s': 'METAUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'TSLA':  {'s': 'TSLAUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'MU':    {'s': 'MUUSDT',    'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'GLW':   {'s': 'GLWUSDT',   'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'SPCX':  {'s': 'SPCXUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True},
-    'SNDK':  {'s': 'SNDKUSDT',  'interval': '1h',  'mode': 'ict_stock_observe',  'lev': 10.0, 'risk': 0.05, 'tp1_r': 1.5, 'tp2_r': 3.0, 'tp1_ratio': 0.5, 'trade': True}
 }
 
-# ==================== 2. 安全分頁歷史數據下載模組 ====================
-def fetch_historical_klines(symbol, interval, days=365):
-    print(f"📥 正在分段下載 {symbol} ({interval}) 最近 {days} 天歷史數據...", flush=True)
-    end_time = int(time.time() * 1000)
-    start_time = end_time - (days * 24 * 60 * 60 * 1000)
-    
-    interval_ms = {
-        '15m': 15 * 60 * 1000 * 1400,
-        '1h': 60 * 60 * 1000 * 1400,
-        '4h': 4 * 60 * 60 * 1000 * 1400,
-        '1d': 24 * 60 * 60 * 1000 * 1400
-    }.get(interval, 60 * 60 * 1000 * 1400)
-
-    all_res = []
-    current_start = start_time
-    
-    while current_start < end_time:
-        current_end = min(current_start + interval_ms, end_time)
-        url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&endTime={current_end}&limit=1500"
-        try:
-            res = requests.get(url, timeout=10).json()
-            if isinstance(res, list) and len(res) > 0:
-                all_res.extend(res)
-                current_start = int(res[-1][0]) + 1
-            else:
-                current_start = current_end + 1
-            time.sleep(0.15)
-        except Exception as e:
-            print(f"⚠️ 下載 {symbol} 分段數據出錯: {e}", flush=True)
-            current_start = current_end + 1
-            
-    if len(all_res) > 0:
-        cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-        df = pd.DataFrame(all_res, columns=cols)
-        df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
-        for col in ['o', 'h', 'l', 'c', 'v']:
-            df[col] = df[col].astype(float)
-        df['time'] = pd.to_datetime(df['t'], unit='ms')
-        print(f"✅ {symbol} ({interval}) 成功載入 {len(df)} 筆歷史 K 線。", flush=True)
-        return df[['time', 'o', 'h', 'l', 'c', 'v']]
-        
-    print(f"❌ {symbol} ({interval}) 無法取得任何歷史數據。", flush=True)
+# ==================== 2. 現貨歷史數據抓取函式 ====================
+def get_market_data(symbol, interval, limit=1000):
+    try:
+        url = f"{BASE_URL}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        res = requests.get(url, timeout=10).json()
+        if isinstance(res, list) and len(res) > 0:
+            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+            df = pd.DataFrame(res, columns=cols)
+            for col in ['o', 'h', 'l', 'c', 'v']:
+                df[col] = df[col].astype(float)
+            df['time'] = pd.to_datetime(df['t'], unit='ms')
+            print(f"✅ {symbol} ({interval}) 成功載入 {len(df)} 筆歷史 K 線。", flush=True)
+            return df[['time', 'o', 'h', 'l', 'c', 'v']]
+    except Exception as e:
+        print(f"⚠️ {symbol} ({interval}) 行情獲取失敗: {e}", flush=True)
     return None
 
 # ==================== 3. 模擬回測核心引擎 ====================
@@ -80,11 +39,9 @@ def run_backtest_for_symbol(sym_key, cfg):
     interval = cfg['interval']
     mode = cfg['mode']
     
-    df = fetch_historical_klines(symbol, interval, days=365)
-    df_4h = fetch_historical_klines(symbol, '4h', days=365)
-    df_1d = fetch_historical_klines(symbol, '1d', days=365) if mode == 'gold_donchian' else None
+    df = get_market_data(symbol, interval, limit=1000)
     
-    if df is None or len(df) < 100 or df_4h is None:
+    if df is None or len(df) < 50:
         print(f"❌ {sym_key} 歷史數據不足，跳過回測。")
         return None
 
@@ -93,15 +50,17 @@ def run_backtest_for_symbol(sym_key, cfg):
     position = None
     trades_history = []
 
-    for i in range(50, len(df)):
+    for i in range(20, len(df)):
         current_bar = df.iloc[i]
         curr_time = current_bar['time']
         price = current_bar['c']
         
+        # 時區轉換與 Kill Zone 判定
         ny_time = curr_time.tz_localize('UTC').tz_convert('America/New_York') if curr_time.tz is None else curr_time.tz_convert('America/New_York')
         hour = ny_time.hour
         in_kill_zone = (2 <= hour < 5) or (7 <= hour < 10)
 
+        # 1. 持倉防守檢查 (SL / TP)
         if position is not None:
             side = position['side']
             entry = position['entry']
@@ -132,6 +91,7 @@ def run_backtest_for_symbol(sym_key, cfg):
                 trades_history.append({'type': 'TP2', 'pnl': pnl})
                 position = None
 
+        # 2. 無持倉時在 Kill Zone 尋找進場訊號
         if position is None and in_kill_zone:
             sig_side = None
             entry_p, sl_p, tp1_p, tp2_p = 0, 0, 0, 0
@@ -196,7 +156,7 @@ def run_backtest_for_symbol(sym_key, cfg):
 
 if __name__ == '__main__':
     print("=" * 65)
-    print("🚀 啟動全標的一年期歷史回測引擎 (各 100 USDT 隔離資金)...")
+    print("🚀 啟動幣安現貨歷史數據回測引擎 (各 100 USDT 隔離資金)...")
     print("=" * 65)
     
     results = []
@@ -207,5 +167,5 @@ if __name__ == '__main__':
             print(f"📊 標的: {sym_key.ljust(5)} | 最終資金: {res['final']:>8.2f} USDT | 收益率: {res['return_pct']:>6.2f}% | 交易次數: {res['total_trades']:>3} | 勝率: {res['win_rate']:>5.1f}%")
 
     print("\n" + "=" * 65)
-    print("🎯 一年期回測總結報告已完成！")
+    print("🎯 回測總結報告已完成！")
     print("=" * 65)
