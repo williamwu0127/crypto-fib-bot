@@ -32,35 +32,58 @@ def send_discord_safe(content):
 
 # ==================== 3. 歷史資料抓取與指標處理 ====================
 def fetch_historical_data(cfg, days):
-    try:
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
-        all_klines = []
-        curr_start = start_ms
-        
-        while curr_start < now_ms:
-            # 統一改回 v1 實盤使用的 fapi 合約終端
-            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
-            res = requests.get(url, timeout=10)
-            if res.status_code != 200:
-                break
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
+    
+    # 【修復】加入輪詢機制與偽裝標頭，防止 GitHub Actions 被幣安牆阻擋
+    endpoints = [
+        "https://fapi.binance.com/fapi/v1/klines",       # 首選: 合約
+        "https://api.binance.com/api/v3/klines",         # 備用1: 現貨主站
+        "https://api1.binance.com/api/v3/klines",        # 備用2: 現貨分站
+        "https://data-api.binance.vision/api/v3/klines"  # 備用3: 歷史資料庫
+    ]
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
+    for base_url in endpoints:
+        try:
+            all_klines = []
+            curr_start = start_ms
+            is_failed = False
             
-            data = res.json()
-            if not isinstance(data, list) or len(data) == 0: break
-            all_klines.extend(data)
-            if len(data) < 1000: break
-            curr_start = int(data[-1][0]) + 1
-            time.sleep(0.05)
+            while curr_start < now_ms:
+                url = f"{base_url}?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
+                res = requests.get(url, headers=headers, timeout=10)
+                
+                # 若該節點拒絕連線 (如 403 / 400)，直接換下一個節點
+                if res.status_code != 200:
+                    is_failed = True
+                    break
+                
+                data = res.json()
+                if not isinstance(data, list) or len(data) == 0: 
+                    break
+                
+                all_klines.extend(data)
+                if len(data) < 1000: 
+                    break
+                
+                curr_start = int(data[-1][0]) + 1
+                time.sleep(0.05)
+                
+            if not is_failed and len(all_klines) > 10:
+                cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+                df = pd.DataFrame(all_klines, columns=cols)
+                df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
+                for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
+                df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
+                return df[['time', 'o', 'h', 'l', 'c']]
+                
+        except Exception:
+            continue # 發生例外狀況直接嘗試下一個節點
             
-        if len(all_klines) > 10:
-            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-            df = pd.DataFrame(all_klines, columns=cols)
-            df = df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
-            for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
-            df['time'] = pd.to_datetime(df['t'], unit='ms').dt.tz_localize(None)
-            return df[['time', 'o', 'h', 'l', 'c']]
-    except Exception as e:
-        print(f"⚠️ {cfg['s']} 獲取失敗: {e}")
     return None
 
 def prepare_indicators(df, mode):
@@ -103,7 +126,6 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
 
     for t in all_times:
         for sym, cfg in SYMBOLS.items():
-            # 【修復】安全跳過未抓取到資料的標的，防止 KeyError 崩潰
             if sym not in fast_data or t not in fast_data[sym]: 
                 continue
                 
@@ -277,19 +299,19 @@ def run_backtest_pipeline(days):
     start_dt, end_dt = None, None
 
     for sym, cfg in SYMBOLS.items():
-        print(f"   └ 載入 {sym:<5} ({cfg['interval']})...", end=" ")
+        print(f"   └ 載入 {sym:<5} ({cfg['interval']})...", end=" ", flush=True)
         df = fetch_historical_data(cfg, days)
         if df is not None and len(df) > 100:
             df = prepare_indicators(df, cfg['mode'])
             data_records[sym] = df
-            print("🟢 成功")
+            print("🟢 成功", flush=True)
             fetch_status.append(f"{sym}: 🟢")
             s_dt = df.iloc[50]['time'].strftime("%Y-%m-%d")
             e_dt = df.iloc[-1]['time'].strftime("%Y-%m-%d")
             if start_dt is None or s_dt < start_dt: start_dt = s_dt
             if end_dt is None or e_dt > end_dt: end_dt = e_dt
         else:
-            print("🔴 失敗")
+            print("🔴 失敗", flush=True)
             fetch_status.append(f"{sym}: 🔴")
 
     if not data_records: return
@@ -298,10 +320,10 @@ def run_backtest_pipeline(days):
     for df in data_records.values(): all_times.update(df['time'].tolist())
     all_times = sorted(list(all_times))
 
-    print(f"\n⏳ 運算 {days} 天 [各自獨立 100U] 模式...")
+    print(f"\n⏳ 運算 {days} 天 [各自獨立 100U] 模式...", flush=True)
     iso_fin, iso_ini, iso_trades, iso_stats = run_simulation(data_records, all_times, "isolated")
     
-    print(f"⏳ 運算 {days} 天 [資金池共享 100U] 模式...")
+    print(f"⏳ 運算 {days} 天 [資金池共享 100U] 模式...", flush=True)
     cmb_fin, cmb_ini, cmb_trades, cmb_stats = run_simulation(data_records, all_times, "combined")
 
     def build_report(mode_name, fin_bal, ini_bal, trades, stats):
@@ -334,7 +356,7 @@ def run_backtest_pipeline(days):
         f"```"
     )
 
-    print("\n" + full_report)
+    print("\n" + full_report, flush=True)
     send_discord_safe(full_report)
 
 if __name__ == '__main__':
