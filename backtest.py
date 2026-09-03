@@ -1,10 +1,7 @@
-import os
 import time
 import requests
 import pandas as pd
 import numpy as np
-
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 BACKTEST_SYMBOLS = {
     'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'risk': 0.01},
@@ -16,17 +13,9 @@ BACKTEST_SYMBOLS = {
 }
 
 TEST_PERIODS = [30, 365]
-INITIAL_CAPITAL_PER_ASSET = 1000.0
 INITIAL_SHARED_CAPITAL = 1000.0
 FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
-
-def send_discord(text):
-    if DISCORD_WEBHOOK_URL:
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=8)
-        except Exception:
-            pass
 
 def fetch_binance_klines(symbol, interval, days=365):
     all_klines = []
@@ -42,7 +31,7 @@ def fetch_binance_klines(symbol, interval, days=365):
                 break
             all_klines.extend(res)
             curr_start = res[-1][0] + 1
-            time.sleep(0.05)
+            time.sleep(0.03)
         except Exception:
             break
 
@@ -55,162 +44,46 @@ def fetch_binance_klines(symbol, interval, days=365):
         return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
     return None
 
-def simulate_single_asset(df, cfg, initial_wallet):
-    wallet = float(initial_wallet)
-    completed_trades = []
-    pos = None
-
-    for i in range(25, len(df)):
-        bar = df.iloc[i]
-        prev_bar = df.iloc[i-1]
-
-        if pos is not None:
-            side, entry, sl, tp1, tp2, qty, liq_p, tp1_hit = (
-                pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
-            )
-            if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                loss_val = (qty * entry) / cfg['lev']
-                wallet = max(0.0, wallet - loss_val)
-                completed_trades.append({'pnl': -loss_val, 'is_liq': True})
-                break
-
-            closed = False
-            if side == 'LONG':
-                if bar['l'] <= sl:
-                    rem_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
-                    wallet += pnl
-                    completed_trades.append({'pnl': pnl})
-                    closed = True
-                elif not tp1_hit and bar['h'] >= tp1:
-                    pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
-                    wallet += pnl_tp1
-                    pos['sl'] = entry
-                    completed_trades.append({'pnl': pnl_tp1})
-                elif pos['tp1_hit'] and bar['h'] >= tp2:
-                    pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
-                    wallet += pnl_tp2
-                    completed_trades.append({'pnl': pnl_tp2})
-                    closed = True
-            elif side == 'SHORT':
-                if bar['h'] >= sl:
-                    rem_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
-                    wallet += pnl
-                    completed_trades.append({'pnl': pnl})
-                    closed = True
-                elif not tp1_hit and bar['l'] <= tp1:
-                    pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (entry - tp1) - (qty * 0.5) * (entry + tp1) * FEE_RATE
-                    wallet += pnl_tp1
-                    pos['sl'] = entry
-                    completed_trades.append({'pnl': pnl_tp1})
-                elif pos['tp1_hit'] and bar['l'] <= tp2:
-                    pnl_tp2 = (qty * 0.5) * (entry - tp2) - (qty * 0.5) * (entry + tp2) * FEE_RATE
-                    wallet += pnl_tp2
-                    completed_trades.append({'pnl': pnl_tp2})
-                    closed = True
-            if closed: pos = None
-
-        if pos is None and wallet > 10.0:
-            sig_side, entry, sl, tp1, tp2 = None, 0, 0, 0, 0
-            mode = cfg['mode']
-
-            if mode == 'gold_macro_donchian':
-                if i >= 20:
-                    dc_high = df['h'].iloc[i-20:i].max()
-                    dc_low = df['l'].iloc[i-20:i].min()
-                    atr = (df['h'] - df['l']).rolling(14).mean().iloc[i]
-                    if pd.isna(atr): atr = bar['c'] * 0.015
-                    if bar['c'] > dc_high:
-                        sig_side, entry = 'LONG', bar['c']
-                        sl = entry - (atr * 1.5)
-                        tp1 = tp2 = entry + ((entry - sl) * 5.0)
-                    elif bar['c'] < dc_low:
-                        sig_side, entry = 'SHORT', bar['c']
-                        sl = entry + (atr * 1.5)
-                        tp1 = tp2 = entry - ((sl - entry) * 5.0)
-            elif mode in ['crypto_ict_fvg', 'stock_pullback']:
-                recent_low = df['l'].iloc[max(0, i-20):i].min()
-                recent_high = df['h'].iloc[max(0, i-20):i].max()
-                if bar['l'] <= recent_low * 1.005 and bar['c'] > prev_bar['c']:
-                    sig_side, entry = 'LONG', bar['c']
-                    sl = recent_low * 0.995
-                    tp1 = entry + (entry - sl) * 2.0
-                    tp2 = recent_high
-                elif bar['h'] >= recent_high * 0.995 and bar['c'] < prev_bar['c']:
-                    sig_side, entry = 'SHORT', bar['c']
-                    sl = recent_high * 1.005
-                    tp1 = entry - (sl - entry) * 2.0
-                    tp2 = recent_low
-
-            if sig_side and abs(entry - sl) > 0:
-                risk_amount = wallet * cfg['risk']
-                risk_dist = abs(entry - sl)
-                target_qty = risk_amount / risk_dist
-                if (target_qty * entry) < 25.0: target_qty = 25.0 / entry
-                max_qty = (wallet * cfg['lev']) / entry
-                if target_qty > max_qty: target_qty = max_qty
-
-                lev = cfg['lev']
-                liq_price = entry * (1.0 - (1.0 / lev) + MAINTENANCE_MARGIN_RATE) if sig_side == 'LONG' else entry * (1.0 + (1.0 / lev) - MAINTENANCE_MARGIN_RATE)
-                pos = {'side': sig_side, 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2, 'qty': target_qty, 'liq_price': liq_price, 'tp1_hit': False}
-
-    return wallet, completed_trades
-
-def run_simulation(days):
+def run_v3_combined_simulation(days):
     dfs = {}
+    data_status = {}
     max_len = 0
+    
     for sym, cfg in BACKTEST_SYMBOLS.items():
         df = fetch_binance_klines(cfg['s'], cfg['interval'], days=days + 15)
         if df is not None and not df.empty:
             dfs[sym] = df
-            if len(df) > max_len: max_len = len(df)
-
-    isolated_results = {}
-    total_iso_start = len(BACKTEST_SYMBOLS) * INITIAL_CAPITAL_PER_ASSET
-    total_iso_final = 0.0
-    iso_trades_count = 0
-    iso_wins_count = 0
-
-    for sym, cfg in BACKTEST_SYMBOLS.items():
-        if sym not in dfs: 
-            isolated_results[sym] = {'final': INITIAL_CAPITAL_PER_ASSET, 'net': 0.0, 'trades': 0, 'wins': 0, 'wr': 0.0}
-            total_iso_final += INITIAL_CAPITAL_PER_ASSET
-            continue
-        final_w, trades = simulate_single_asset(dfs[sym], cfg, INITIAL_CAPITAL_PER_ASSET)
-        net = final_w - INITIAL_CAPITAL_PER_ASSET
-        wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
-        t_count = len(trades)
-        wr = (wins / t_count * 100) if t_count > 0 else 0.0
-        
-        isolated_results[sym] = {'final': final_w, 'net': net, 'trades': t_count, 'wins': wins, 'wr': wr}
-        total_iso_final += final_w
-        iso_trades_count += t_count
-        iso_wins_count += wins
-
-    iso_roi = ((total_iso_final - total_iso_start) / total_iso_start) * 100
-    iso_global_wr = (iso_wins_count / iso_trades_count * 100) if iso_trades_count > 0 else 0.0
+            data_status[sym] = '🟢'
+            if len(df) > max_len: 
+                max_len = len(df)
+        else:
+            data_status[sym] = '🔴'
 
     shared_wallet = float(INITIAL_SHARED_CAPITAL)
     active_positions = {}
     combined_trades = []
+    asset_trade_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in BACKTEST_SYMBOLS.keys()}
 
     for i in range(25, max_len):
-        if shared_wallet <= 10.0: break
+        if shared_wallet <= 10.0: 
+            break
+
         for sym in list(active_positions.keys()):
             pos = active_positions[sym]
             df = dfs.get(sym)
             if df is None or i >= len(df): continue
             bar = df.iloc[i]
+            
             side, entry, sl, tp1, tp2, qty, liq_p, tp1_hit = (
                 pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
             )
+
             if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
                 loss_val = (qty * entry) / pos['lev']
                 shared_wallet = max(0.0, shared_wallet - loss_val)
-                combined_trades.append({'sym': sym, 'pnl': -loss_val, 'is_liq': True})
+                combined_trades.append({'sym': sym, 'pnl': -loss_val})
+                asset_trade_stats[sym]['trades'] += 1
+                asset_trade_stats[sym]['pnl'] -= loss_val
                 del active_positions[sym]
                 continue
 
@@ -221,6 +94,9 @@ def run_simulation(days):
                     pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
                     shared_wallet += pnl
                     combined_trades.append({'sym': sym, 'pnl': pnl})
+                    asset_trade_stats[sym]['trades'] += 1
+                    asset_trade_stats[sym]['pnl'] += pnl
+                    if pnl > 0: asset_trade_stats[sym]['wins'] += 1
                     closed = True
                 elif not tp1_hit and bar['h'] >= tp1:
                     pos['tp1_hit'] = True
@@ -228,10 +104,16 @@ def run_simulation(days):
                     shared_wallet += pnl_tp1
                     pos['sl'] = entry
                     combined_trades.append({'sym': sym, 'pnl': pnl_tp1})
+                    asset_trade_stats[sym]['trades'] += 1
+                    asset_trade_stats[sym]['pnl'] += pnl_tp1
+                    if pnl_tp1 > 0: asset_trade_stats[sym]['wins'] += 1
                 elif pos['tp1_hit'] and bar['h'] >= tp2:
                     pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
                     shared_wallet += pnl_tp2
                     combined_trades.append({'sym': sym, 'pnl': pnl_tp2})
+                    asset_trade_stats[sym]['trades'] += 1
+                    asset_trade_stats[sym]['pnl'] += pnl_tp2
+                    if pnl_tp2 > 0: asset_trade_stats[sym]['wins'] += 1
                     closed = True
             elif side == 'SHORT':
                 if bar['h'] >= sl:
@@ -239,6 +121,9 @@ def run_simulation(days):
                     pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
                     shared_wallet += pnl
                     combined_trades.append({'sym': sym, 'pnl': pnl})
+                    asset_trade_stats[sym]['trades'] += 1
+                    asset_trade_stats[sym]['pnl'] += pnl
+                    if pnl > 0: asset_trade_stats[sym]['wins'] += 1
                     closed = True
                 elif not tp1_hit and bar['l'] <= tp1:
                     pos['tp1_hit'] = True
@@ -246,10 +131,16 @@ def run_simulation(days):
                     shared_wallet += pnl_tp1
                     pos['sl'] = entry
                     combined_trades.append({'sym': sym, 'pnl': pnl_tp1})
+                    asset_trade_stats[sym]['trades'] += 1
+                    asset_trade_stats[sym]['pnl'] += pnl_tp1
+                    if pnl_tp1 > 0: asset_trade_stats[sym]['wins'] += 1
                 elif pos['tp1_hit'] and bar['l'] <= tp2:
                     pnl_tp2 = (qty * 0.5) * (entry - tp2) - (qty * 0.5) * (entry + tp2) * FEE_RATE
                     shared_wallet += pnl_tp2
                     combined_trades.append({'sym': sym, 'pnl': pnl_tp2})
+                    asset_trade_stats[sym]['trades'] += 1
+                    asset_trade_stats[sym]['pnl'] += pnl_tp2
+                    if pnl_tp2 > 0: asset_trade_stats[sym]['wins'] += 1
                     closed = True
             if closed: del active_positions[sym]
 
@@ -305,65 +196,57 @@ def run_simulation(days):
                     'qty': target_qty, 'liq_price': liq_price, 'tp1_hit': False, 'lev': lev
                 }
 
-    com_net = shared_wallet - INITIAL_SHARED_CAPITAL
-    com_roi = (com_net / INITIAL_SHARED_CAPITAL) * 100
-    com_trades_count = len(combined_trades)
-    com_wins = sum(1 for t in combined_trades if t.get('pnl', 0) > 0)
-    com_wr = (com_wins / com_trades_count * 100) if com_trades_count > 0 else 0.0
+    net_pnl = shared_wallet - INITIAL_SHARED_CAPITAL
+    roi = (net_pnl / INITIAL_SHARED_CAPITAL) * 100
+    total_trades = len(combined_trades)
+    wins = sum(1 for t in combined_trades if t.get('pnl', 0) > 0)
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
 
     return {
-        'iso_results': isolated_results,
-        'iso_total_final': total_iso_final,
-        'iso_roi': iso_roi,
-        'iso_trades': iso_trades_count,
-        'iso_wr': iso_global_wr,
-        'com_final': shared_wallet,
-        'com_roi': com_roi,
-        'com_trades': com_trades_count,
-        'com_wr': com_wr
+        'final': shared_wallet,
+        'net': net_pnl,
+        'roi': roi,
+        'trades': total_trades,
+        'wr': win_rate,
+        'stats': asset_trade_stats,
+        'status': data_status
     }
 
-def master_ui_backtest():
+def run_v3_backtest_report():
     print("==========================================================================")
-    print(" >>> 啟動仿照附圖格式之多資產策略回測程序...")
+    print(" >>> 啟動 v3 版【共享 1000U 資金池】30d 與 365d 回測...")
     print("==========================================================================")
 
     for days in TEST_PERIODS:
-        print(f"\n計算 {days} 天期回測數據中...")
-        res = run_simulation(days)
+        print(f"\n正在計算 {days} 天期回測...")
+        res = run_v3_combined_simulation(days)
+        
+        status_str = " | ".join([f"{sym}: {res['status'].get(sym, '🔴')}" for sym in BACKTEST_SYMBOLS.keys()])
         
         lines = [
             "```text",
-            f"📈 【實戰策略 {days} 天高淨值回測報告】",
-            f"數據狀態: BTC: 🟢 | ETH: 🟢 | SOL: 🟢 | XAU: 🟢 | MSFT: 🔴 | MU: 🔴",
-            "==========================================================================",
-            f"【獨立配資各 1000U (Isolated) 模式 ({days}d)】",
-            f"回測區間: 動態近 {days} 天",
-            f"初始資金: ${len(BACKTEST_SYMBOLS) * INITIAL_CAPITAL_PER_ASSET:.2f} USDT",
-            f"最終結餘: ${res['iso_total_final']:.2f} USDT ({res['iso_roi']:+.2f}%)",
-            f"總交易次數: {res['iso_trades']} 次 | 綜合勝率: {res['iso_wr']:.2f}%",
-            "--------------------------------------------------------------------------"
-        ]
-
-        for sym in BACKTEST_SYMBOLS.keys():
-            if sym in res['iso_results']:
-                r = res['iso_results'][sym]
-                lines.append(f"{sym:<5} | 交易: {str(r['trades']).ljust(4)}次 | 勝率: {r['wr']:6.2f}% | 收益: {r['net']:+8.2f} U")
-
-        lines.extend([
+            f"📈 【實戰策略 v3 版 {days} 天高淨值回測報告】",
+            f"數據狀態: {status_str}",
             "==========================================================================",
             f"【共享資金池 1000U (Combined) 模式 ({days}d)】",
             f"回測區間: 動態近 {days} 天",
             f"初始資金: ${INITIAL_SHARED_CAPITAL:.2f} USDT",
-            f"最終結餘: ${res['com_final']:.2f} USDT ({res['com_roi']:+.2f}%)",
-            f"總交易次數: {res['com_trades']} 次 | 綜合勝率: {res['com_wr']:.2f}%",
+            f"最終結餘: ${res['final']:.2f} USDT ({res['roi']:+.2f}%)",
+            f"總交易次數: {res['trades']} 次 | 綜合勝率: {res['wr']:.2f}%",
+            "--------------------------------------------------------------------------"
+        ]
+
+        for sym in BACKTEST_SYMBOLS.keys():
+            st = res['stats'][sym]
+            s_wr = (st['wins'] / st['trades'] * 100) if st['trades'] > 0 else 0.0
+            lines.append(f"{sym:<5} | 交易: {str(st['trades']).ljust(4)}次 | 勝率: {s_wr:6.2f}% | 收益: {st['pnl']:+8.2f} U")
+
+        lines.extend([
             "=========================================================================="
         ])
         lines.append("```")
 
-        report_str = "\n".join(lines)
-        print("\n" + report_str)
-        send_discord(report_str)
+        print("\n" + "\n".join(lines))
 
 if __name__ == '__main__':
-    master_ui_backtest()
+    run_v3_backtest_report()
