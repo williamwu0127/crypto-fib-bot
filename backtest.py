@@ -16,7 +16,7 @@ SYMBOLS = {
 
 def fetch_binance_vision_data(symbol, interval, days):
     print(f"📥 正在從 Binance Data Vision 下載 {symbol} ({interval}) 過去 {days} 天歷史資料...")
-    end_date = datetime.date.today() - datetime.timedelta(days=1) # 避免抓取當天或未完成的當月
+    end_date = datetime.date.today() - datetime.timedelta(days=1)
     start_date = end_date - datetime.timedelta(days=days)
     
     current = start_date.replace(day=1)
@@ -30,6 +30,7 @@ def fetch_binance_vision_data(symbol, interval, days):
     
     all_dfs = []
     for year, month in months_to_fetch:
+        # 【關鍵修正】補上正確的 /data/ 路徑結構
         url = f"https://data.binance.vision/data/futures/um/monthly/klines/{symbol}/{interval}/{symbol}-{interval}-{year}-{month:02d}.zip"
         try:
             res = requests.get(url, timeout=30)
@@ -37,7 +38,6 @@ def fetch_binance_vision_data(symbol, interval, days):
                 with zipfile.ZipFile(io.BytesIO(res.content)) as z:
                     for filename in z.namelist():
                         with z.open(filename) as f:
-                            # 讀取 CSV，自動適應有沒有 header
                             df_month = pd.read_csv(f, header=None)
                             all_dfs.append(df_month)
             else:
@@ -51,11 +51,9 @@ def fetch_binance_vision_data(symbol, interval, days):
         
     df = pd.concat(all_dfs, ignore_index=True)
     
-    # 清理掉可能存在的字串表頭行 (將非數字的行過濾掉)
     df = df.iloc[:, [0, 1, 2, 3, 4, 5]]
     df.columns = ['t', 'o', 'h', 'l', 'c', 'v']
     
-    # 強制轉型，並把無法轉成數字的標題列（如 'open' 等字串）自動轉為 NaN 並濾除
     for col in ['t', 'o', 'h', 'l', 'c', 'v']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna().reset_index(drop=True)
