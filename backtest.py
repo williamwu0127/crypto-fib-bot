@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 import numpy as np
 
-# ==================== 參數設定 ====================
+# ==================== 回測核心參數設定 ====================
 FRICTION_RATE = 0.0004  # 單邊摩擦成本 (手續費 + 滑價) 預設為萬分之四
 
 SYMBOLS = {
@@ -30,7 +30,7 @@ def fetch_binance_vision_data(symbol, interval, days):
     
     all_dfs = []
     for year, month in months_to_fetch:
-        # 【關鍵修正】補上正確的 /data/ 路徑結構
+        # 使用官方正確的期貨月度數據路徑
         url = f"https://data.binance.vision/data/futures/um/monthly/klines/{symbol}/{interval}/{symbol}-{interval}-{year}-{month:02d}.zip"
         try:
             res = requests.get(url, timeout=30)
@@ -41,7 +41,7 @@ def fetch_binance_vision_data(symbol, interval, days):
                             df_month = pd.read_csv(f, header=None)
                             all_dfs.append(df_month)
             else:
-                print(f"⚠️ 找不到 {symbol} {year}-{month:02d} 的月度公開數據檔案 (狀態碼 {res.status_code})")
+                print(f"⚠️ 找不到 {symbol} {year}-{month:02d} 的公開數據檔案 (狀態碼 {res.status_code})")
         except Exception as e:
             print(f"❌ 下載 {symbol} {year}-{month:02d} 失敗: {e}")
     
@@ -51,6 +51,7 @@ def fetch_binance_vision_data(symbol, interval, days):
         
     df = pd.concat(all_dfs, ignore_index=True)
     
+    # 確保只取前 6 欄 (Open time, Open, High, Low, Close, Volume)
     df = df.iloc[:, [0, 1, 2, 3, 4, 5]]
     df.columns = ['t', 'o', 'h', 'l', 'c', 'v']
     
@@ -103,6 +104,7 @@ def generate_trades(symbol, cfg, df_main):
                 exit_price = sl_price if is_loss else tp_price
                 raw_pnl_pct = ((exit_price - entry_price) / entry_price) if position_side == 'LONG' else ((entry_price - exit_price) / entry_price)
                 
+                # 扣除雙邊手續費與滑價摩擦成本
                 net_pnl_pct = raw_pnl_pct - (FRICTION_RATE * 2) 
                 
                 trades.append({
@@ -117,6 +119,7 @@ def generate_trades(symbol, cfg, df_main):
                 in_position = False
             continue
 
+        # 黃金唐奇安突破策略邏輯
         if mode == 'gold_macro_donchian':
             if bar['c'] > bar['dc_high']:
                 position_side, entry_price = 'LONG', bar['c']
@@ -129,6 +132,7 @@ def generate_trades(symbol, cfg, df_main):
                 tp_price = entry_price - (sl_price - entry_price) * 5.0
                 in_position, current_entry_time = True, bar['time']
                 
+        # 加密貨幣 ICT FVG 策略邏輯
         elif mode == 'crypto_ict_fvg':
             ob_condition = (bar['c'] < bar['o']) if df_main.iloc[i-1]['c'] > df_main.iloc[i-1]['ema20'] else (bar['c'] > bar['o'])
             if ob_condition:
@@ -144,6 +148,7 @@ def generate_trades(symbol, cfg, df_main):
 
 def simulate_portfolio(trades, initial_balances):
     if not trades: return {b: {'balance': b, 'peak': b, 'mdd': 0.0} for b in initial_balances}
+    # 按照出場時間排序，確保合併資金池的現金流順序正確
     trades.sort(key=lambda x: x['exit_time'])
     
     results = {b: {'balance': b, 'peak': b, 'mdd': 0.0} for b in initial_balances}
@@ -153,6 +158,7 @@ def simulate_portfolio(trades, initial_balances):
             if results[b]['balance'] <= 0: continue
             
             lev = SYMBOLS[t['symbol']]['lev']
+            # 動態分配錢包 1% 作為保證金
             trade_margin = results[b]['balance'] * 0.01
             position_size = trade_margin * lev
             
@@ -172,7 +178,7 @@ def simulate_portfolio(trades, initial_balances):
     return results
 
 def run_backtest(days):
-    print(f"\n{'='*25} 啟動 {days} 天期合併倉回測 (Binance Vision CSV) {'='*25}")
+    print(f"\n{'='*25} 啟動 {days} 天期合併倉回測 (Binance Vision) {'='*25}")
     all_trades = []
     
     for sym, cfg in SYMBOLS.items():
