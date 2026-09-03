@@ -29,28 +29,28 @@ def send_discord(text):
             pass
 
 def fetch_binance_klines(symbol, interval, days=365):
-    now_ms = int(time.time() * 1000)
-    start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
     all_klines = []
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
     curr_start = start_ms
-    
-    step_ms = (15 * 60 * 1000) if interval == '15m' else (60 * 60 * 1000 if interval == '1h' else (4 * 60 * 60 * 1000))
-    if interval == '1d': step_ms = 24 * 60 * 60 * 1000
 
-    while curr_start < now_ms:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
+    while curr_start < end_ms:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
         try:
             res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0: break
+            if not isinstance(res, list) or len(res) == 0:
+                break
             all_klines.extend(res)
-            curr_start = res[-1][0] + step_ms
-            time.sleep(0.02)
-        except Exception: break
+            curr_start = res[-1][0] + 1
+            time.sleep(0.05)
+        except Exception:
+            break
 
     if len(all_klines) > 0:
         cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
         df = pd.DataFrame(all_klines, columns=cols).drop_duplicates(subset=['t'])
-        for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
+        for col in ['o', 'h', 'l', 'c', 'v']:
+            df[col] = df[col].astype(float)
         df['time'] = pd.to_datetime(df['t'], unit='ms')
         return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
     return None
@@ -69,8 +69,9 @@ def simulate_single_asset(df, cfg, initial_wallet):
                 pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
             )
             if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                wallet = max(0.0, wallet - ((qty * entry) / cfg['lev']))
-                completed_trades.append({'pnl': -wallet, 'is_liq': True})
+                loss_val = (qty * entry) / cfg['lev']
+                wallet = max(0.0, wallet - loss_val)
+                completed_trades.append({'pnl': -loss_val, 'is_liq': True})
                 break
 
             closed = False
@@ -121,6 +122,7 @@ def simulate_single_asset(df, cfg, initial_wallet):
                     dc_high = df['h'].iloc[i-20:i].max()
                     dc_low = df['l'].iloc[i-20:i].min()
                     atr = (df['h'] - df['l']).rolling(14).mean().iloc[i]
+                    if pd.isna(atr): atr = bar['c'] * 0.015
                     if bar['c'] > dc_high:
                         sig_side, entry = 'LONG', bar['c']
                         sl = entry - (atr * 1.5)
@@ -130,8 +132,8 @@ def simulate_single_asset(df, cfg, initial_wallet):
                         sl = entry + (atr * 1.5)
                         tp1 = tp2 = entry - ((sl - entry) * 5.0)
             elif mode in ['crypto_ict_fvg', 'stock_pullback']:
-                recent_low = df['l'].iloc[i-20:i].min()
-                recent_high = df['h'].iloc[i-20:i].max()
+                recent_low = df['l'].iloc[max(0, i-20):i].min()
+                recent_high = df['h'].iloc[max(0, i-20):i].max()
                 if bar['l'] <= recent_low * 1.005 and bar['c'] > prev_bar['c']:
                     sig_side, entry = 'LONG', bar['c']
                     sl = recent_low * 0.995
@@ -173,7 +175,10 @@ def run_simulation(days):
     iso_wins_count = 0
 
     for sym, cfg in BACKTEST_SYMBOLS.items():
-        if sym not in dfs: continue
+        if sym not in dfs: 
+            isolated_results[sym] = {'final': INITIAL_CAPITAL_PER_ASSET, 'net': 0.0, 'trades': 0, 'wins': 0, 'wr': 0.0}
+            total_iso_final += INITIAL_CAPITAL_PER_ASSET
+            continue
         final_w, trades = simulate_single_asset(dfs[sym], cfg, INITIAL_CAPITAL_PER_ASSET)
         net = final_w - INITIAL_CAPITAL_PER_ASSET
         wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
@@ -196,15 +201,16 @@ def run_simulation(days):
         if shared_wallet <= 10.0: break
         for sym in list(active_positions.keys()):
             pos = active_positions[sym]
-            df = dfs[sym]
-            if i >= len(df): continue
+            df = dfs.get(sym)
+            if df is None or i >= len(df): continue
             bar = df.iloc[i]
             side, entry, sl, tp1, tp2, qty, liq_p, tp1_hit = (
                 pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
             )
             if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                shared_wallet = max(0.0, shared_wallet - ((qty * entry) / pos['lev']))
-                combined_trades.append({'sym': sym, 'pnl': -((qty * entry) / pos['lev']), 'is_liq': True})
+                loss_val = (qty * entry) / pos['lev']
+                shared_wallet = max(0.0, shared_wallet - loss_val)
+                combined_trades.append({'sym': sym, 'pnl': -loss_val, 'is_liq': True})
                 del active_positions[sym]
                 continue
 
@@ -261,6 +267,7 @@ def run_simulation(days):
                     dc_high = df['h'].iloc[i-20:i].max()
                     dc_low = df['l'].iloc[i-20:i].min()
                     atr = (df['h'] - df['l']).rolling(14).mean().iloc[i]
+                    if pd.isna(atr): atr = bar['c'] * 0.015
                     if bar['c'] > dc_high:
                         sig_side, entry = 'LONG', bar['c']
                         sl = entry - (atr * 1.5)
@@ -270,8 +277,8 @@ def run_simulation(days):
                         sl = entry + (atr * 1.5)
                         tp1 = tp2 = entry - ((sl - entry) * 5.0)
             elif mode in ['crypto_ict_fvg', 'stock_pullback']:
-                recent_low = df['l'].iloc[i-20:i].min()
-                recent_high = df['h'].iloc[i-20:i].max()
+                recent_low = df['l'].iloc[max(0, i-20):i].min()
+                recent_high = df['h'].iloc[max(0, i-20):i].max()
                 if bar['l'] <= recent_low * 1.005 and bar['c'] > prev_bar['c']:
                     sig_side, entry = 'LONG', bar['c']
                     sl = recent_low * 0.995
