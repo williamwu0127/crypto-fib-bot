@@ -1,19 +1,12 @@
-import time
+import io
+import zipfile
+import datetime
 import requests
 import pandas as pd
 import numpy as np
 
-# ==================== 參數與代理設定 ====================
-BASE_URL = "https://fapi.binance.com"
+# ==================== 參數設定 ====================
 FRICTION_RATE = 0.0004  # 單邊摩擦成本 (手續費 + 滑價) 預設為萬分之四
-
-# 如果你的伺服器位於美國/歐洲等受限機房（會報 451 錯誤），
-# 請在此處填入你未受限地區（如台灣/日本/新加坡）的 Proxy 代理，例如：
-# PROXIES = {
-#     'http': 'http://your_proxy_ip:port',
-#     'https': 'http://your_proxy_ip:port'
-# }
-PROXIES = None 
 
 SYMBOLS = {
     'ETH':   {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'trade': True},
@@ -21,43 +14,55 @@ SYMBOLS = {
     'XAU':   {'s': 'XAUUSDT',  'interval': '4h',  'mode': 'gold_macro_donchian','lev': 20.0,  'trade': True}
 }
 
-def fetch_historical_data(symbol, interval, days):
-    print(f"📥 正在下載 {symbol} ({interval}) 過去 {days} 天歷史數據...")
-    end_time = int(time.time() * 1000)
-    start_time = end_time - (days * 24 * 60 * 60 * 1000)
+def fetch_binance_vision_data(symbol, interval, days):
+    print(f"📥 正在從 Binance Data Vision 下載 {symbol} ({interval}) 過去 {days} 天歷史資料...")
+    end_date = datetime.date.today()
+    start_date = end_date - datetime.timedelta(days=days)
     
-    all_klines = []
-    current_start = start_time
+    # 產生需要抓取的年月清單（透過月度壓縮檔下載，速度最快且完全不受 API IP 地理限制）
+    current = start_date.replace(day=1)
+    months_to_fetch = []
+    while current <= end_date:
+        months_to_fetch.append((current.year, current.month))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
     
-    while current_start < end_time:
+    all_dfs = []
+    for year, month in months_to_fetch:
+        url = f"https://data.binance.vision/data/futures/um/monthly/klines/{symbol}/{interval}/{symbol}-{interval}-{year}-{month:02d}.zip"
         try:
-            url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&limit=1500"
-            res = requests.get(url, proxies=PROXIES, timeout=10)
-            
-            if res.status_code != 200:
-                print(f"❌ [API 錯誤] 伺服器回應狀態碼 {res.status_code}，可能遭地區阻擋。內容: {res.text[:200]}")
-                break
-                
-            data = res.json()
-            if not data or not isinstance(data, list): 
-                break
-                
-            all_klines.extend(data)
-            current_start = data[-1][0] + 1
-            time.sleep(0.1)
+            res = requests.get(url, timeout=30)
+            if res.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+                    for filename in z.namelist():
+                        with z.open(filename) as f:
+                            df_month = pd.read_csv(f, header=None)
+                            all_dfs.append(df_month)
+            else:
+                print(f"⚠️ 找不到 {symbol} {year}-{month:02d} 的月度公開數據檔案 (狀態碼 {res.status_code})")
         except Exception as e:
-            print(f"❌ [連線例外] 下載 {symbol} 失敗: {e}")
-            break
-
-    if not all_klines:
-        print(f"⚠️ {symbol} 未能成功抓取任何 K 線數據！")
+            print(f"❌ 下載 {symbol} {year}-{month:02d} 失敗: {e}")
+    
+    if not all_dfs:
+        print(f"⚠️ {symbol} 未能成功取得任何 CSV 歷史資料。")
         return pd.DataFrame()
-
-    cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-    df = pd.DataFrame(all_klines, columns=cols)
-    for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
+        
+    df = pd.concat(all_dfs, ignore_index=True)
+    # 取前 6 欄：開盤時間、開、高、低、收、量
+    df = df.iloc[:, [0, 1, 2, 3, 4, 5]]
+    df.columns = ['t', 'o', 'h', 'l', 'c', 'v']
+    for col in ['o', 'h', 'l', 'c', 'v']:
+        df[col] = df[col].astype(float)
     df['time'] = pd.to_datetime(df['t'], unit='ms')
-    return df.drop_duplicates(subset=['t']).reset_index(drop=True)
+    
+    # 精確裁切回測的時間範圍
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date) + pd.Timedelta(days=1)
+    df = df[(df['time'] >= start_ts) & (df['time'] < end_ts)]
+    
+    return df.drop_duplicates(subset=['t']).sort_values('t').reset_index(drop=True)
 
 def prepare_indicators(df, mode):
     if df.empty: return df
@@ -166,12 +171,12 @@ def simulate_portfolio(trades, initial_balances):
     return results
 
 def run_backtest(days):
-    print(f"\n{'='*25} 啟動 {days} 天期合併倉回測 {'='*25}")
+    print(f"\n{'='*25} 啟動 {days} 天期合併倉回測 (Binance Vision CSV) {'='*25}")
     all_trades = []
     
     for sym, cfg in SYMBOLS.items():
         if not cfg['trade']: continue
-        df = fetch_historical_data(cfg['s'], cfg['interval'], days)
+        df = fetch_binance_vision_data(cfg['s'], cfg['interval'], days)
         df = prepare_indicators(df, cfg['mode'])
         trades = generate_trades(sym, cfg, df)
         all_trades.extend(trades)
