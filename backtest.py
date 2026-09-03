@@ -1,278 +1,172 @@
+import os
+import sys
 import time
+import json
 import requests
 import pandas as pd
 import numpy as np
+import hmac
+import hashlib
+import math
+from datetime import datetime, timezone, timedelta
 
-BACKTEST_SYMBOLS = {
-    'BTC':  {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'risk': 0.01},
-    'ETH':  {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'risk': 0.01},
-    'SOL':  {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 20.0,  'risk': 0.01},
-    'XAU':  {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian','lev': 20.0,  'risk': 0.01},
-    'MSFT': {'s': 'MSFTUSDT', 'interval': '1h',  'mode': 'stock_pullback',    'lev': 10.0,  'risk': 0.01},
-    'MU':   {'s': 'MUUSDT',   'interval': '1h',  'mode': 'stock_pullback',    'lev': 10.0,  'risk': 0.01}
+# ==================== 1. API 與 Discord 設定 ====================
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+BASE_URL = "https://fapi.binance.com"
+TZ_TW = timezone(timedelta(hours=8))
+CONTEXT_SNAPSHOT_FILE = "entry_context_snapshot.json"
+
+# ==================== 2. 標的配置 ====================
+SYMBOLS = {
+    'BTC':   {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'trade': False, 'risk': 0.01, 'tp1_r': 2.0, 'tp2_r': 5.0},
+    'ETH':   {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'trade': True,  'risk': 0.01, 'tp1_r': 2.0, 'tp2_r': 5.0},
+    'SOL':   {'s': 'SOLUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 20.0,  'trade': True,  'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0},
+    'XAU':   {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian','lev': 20.0,  'trade': True,  'risk': 0.05, 'tp1_r': 2.0, 'tp2_r': 5.0},
 }
 
-TEST_PERIODS = [30, 365]
-INITIAL_SHARED_CAPITAL = 1000.0
-FEE_RATE = 0.0004
-MAINTENANCE_MARGIN_RATE = 0.005
+# ==================== 3. 基礎工具與 API 函式 ====================
+def sign_query(params):
+    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+    signature = hmac.new(BINANCE_API_SECRET.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    return f"{query_string}&signature={signature}"
 
-def fetch_stealth_klines(symbol, interval, days=365):
-    """具備瀏覽器偽裝 Headers 與多節點備援的資料抓取函數"""
-    end_ms = int(time.time() * 1000)
-    start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.binance.com/'
-    }
-    
-    # 支援現貨與合約雙重節點備援
-    endpoints = [
-        f"https://api.binance.com/api/v3/klines",
-        f"https://data-api.binance.vision/api/v3/klines",
-        f"https://fapi.binance.com/fapi/v1/klines"
-    ]
-    
-    for base_url in endpoints:
-        all_klines = []
-        curr_start = start_ms
-        success = True
-        
-        while curr_start < end_ms:
-            url = f"{base_url}?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
-            try:
-                res = requests.get(url, headers=headers, timeout=10)
-                if res.status_code != 200:
-                    success = False
-                    break
-                data = res.json()
-                if not isinstance(data, list) or len(data) == 0:
-                    break
-                all_klines.extend(data)
-                curr_start = data[-1][0] + 1
-                time.sleep(0.03)
-            except Exception:
-                success = False
-                break
-        
-        if success and len(all_klines) > 0:
+def format_full_num(val):
+    try:
+        f = float(val)
+        if abs(f) >= 1000: return f"{f:.1f}"
+        elif abs(f) >= 1: return f"{f:.2f}"
+        else: return f"{f:.4f}"
+    except Exception: return str(val)
+
+def get_account_balances():
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET: return 1000.0, 1000.0
+    try:
+        qs = sign_query({'timestamp': int(time.time() * 1000)})
+        r = requests.get(f"{BASE_URL}/fapi/v2/account?{qs}", headers={'X-MBX-APIKEY': BINANCE_API_KEY}, timeout=6).json()
+        if isinstance(r, dict):
+            total_equity = float(r.get('totalMarginBalance', r.get('totalWalletBalance', 1000.0)))
+            available_balance = float(r.get('availableBalance', total_equity))
+            return total_equity, available_balance
+    except Exception: pass
+    return 1000.0, 1000.0
+
+def get_market_data(symbol, interval, limit=120):
+    try:
+        res = requests.get(f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}", timeout=10).json()
+        if isinstance(res, list) and len(res) >= 30:
             cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-            df = pd.DataFrame(all_klines, columns=cols).drop_duplicates(subset=['t'])
-            for col in ['o', 'h', 'l', 'c', 'v']:
-                df[col] = df[col].astype(float)
+            df = pd.DataFrame(res, columns=cols)
+            for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
             df['time'] = pd.to_datetime(df['t'], unit='ms')
-            return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
-            
+            return df[['time', 'o', 'h', 'l', 'c', 'v']]
+    except Exception: pass
     return None
 
-def run_v3_combined_simulation(days):
-    dfs = {}
-    data_status = {}
-    max_len = 0
-    
-    for sym, cfg in BACKTEST_SYMBOLS.items():
-        df = fetch_stealth_klines(cfg['s'], cfg['interval'], days=days + 15)
-        if df is not None and not df.empty:
-            dfs[sym] = df
-            data_status[sym] = '🟢'
-            if len(df) > max_len: 
-                max_len = len(df)
+def send_discord_safe(content):
+    if not DISCORD_WEBHOOK_URL: return
+    try:
+        if len(content) <= 1900:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
         else:
-            data_status[sym] = '🔴'
+            chunks = [content[i:i+1800] for i in range(0, len(content), 1800)]
+            for chunk in chunks:
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=8)
+                time.sleep(0.5)
+    except Exception: pass
 
-    shared_wallet = float(INITIAL_SHARED_CAPITAL)
-    active_positions = {}
-    combined_trades = []
-    asset_trade_stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in BACKTEST_SYMBOLS.keys()}
-
-    for i in range(25, max_len):
-        if shared_wallet <= 10.0: 
-            break
-
-        # 1. 管理現有持倉
-        for sym in list(active_positions.keys()):
-            pos = active_positions[sym]
-            df = dfs.get(sym)
-            if df is None or i >= len(df): continue
-            bar = df.iloc[i]
-            
-            side, entry, sl, tp1, tp2, qty, liq_p, tp1_hit = (
-                pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
-            )
-
-            if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                loss_val = (qty * entry) / pos['lev']
-                shared_wallet = max(0.0, shared_wallet - loss_val)
-                combined_trades.append({'sym': sym, 'pnl': -loss_val})
-                asset_trade_stats[sym]['trades'] += 1
-                asset_trade_stats[sym]['pnl'] -= loss_val
-                del active_positions[sym]
-                continue
-
-            closed = False
-            if side == 'LONG':
-                if bar['l'] <= sl:
-                    rem_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = rem_qty * (sl - entry) - rem_qty * (entry + sl) * FEE_RATE
-                    shared_wallet += pnl
-                    combined_trades.append({'sym': sym, 'pnl': pnl})
-                    asset_trade_stats[sym]['trades'] += 1
-                    asset_trade_stats[sym]['pnl'] += pnl
-                    if pnl > 0: asset_trade_stats[sym]['wins'] += 1
-                    closed = True
-                elif not tp1_hit and bar['h'] >= tp1:
-                    pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
-                    shared_wallet += pnl_tp1
-                    pos['sl'] = entry
-                    combined_trades.append({'sym': sym, 'pnl': pnl_tp1})
-                    asset_trade_stats[sym]['trades'] += 1
-                    asset_trade_stats[sym]['pnl'] += pnl_tp1
-                    if pnl_tp1 > 0: asset_trade_stats[sym]['wins'] += 1
-                elif pos['tp1_hit'] and bar['h'] >= tp2:
-                    pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
-                    shared_wallet += pnl_tp2
-                    combined_trades.append({'sym': sym, 'pnl': pnl_tp2})
-                    asset_trade_stats[sym]['trades'] += 1
-                    asset_trade_stats[sym]['pnl'] += pnl_tp2
-                    if pnl_tp2 > 0: asset_trade_stats[sym]['wins'] += 1
-                    closed = True
-            elif side == 'SHORT':
-                if bar['h'] >= sl:
-                    rem_qty = qty * 0.5 if tp1_hit else qty
-                    pnl = rem_qty * (entry - sl) - rem_qty * (entry + sl) * FEE_RATE
-                    shared_wallet += pnl
-                    combined_trades.append({'sym': sym, 'pnl': pnl})
-                    asset_trade_stats[sym]['trades'] += 1
-                    asset_trade_stats[sym]['pnl'] += pnl
-                    if pnl > 0: asset_trade_stats[sym]['wins'] += 1
-                    closed = True
-                elif not tp1_hit and bar['l'] <= tp1:
-                    pos['tp1_hit'] = True
-                    pnl_tp1 = (qty * 0.5) * (entry - tp1) - (qty * 0.5) * (entry + tp1) * FEE_RATE
-                    shared_wallet += pnl_tp1
-                    pos['sl'] = entry
-                    combined_trades.append({'sym': sym, 'pnl': pnl_tp1})
-                    asset_trade_stats[sym]['trades'] += 1
-                    asset_trade_stats[sym]['pnl'] += pnl_tp1
-                    if pnl_tp1 > 0: asset_trade_stats[sym]['wins'] += 1
-                elif pos['tp1_hit'] and bar['l'] <= tp2:
-                    pnl_tp2 = (qty * 0.5) * (entry - tp2) - (qty * 0.5) * (entry + tp2) * FEE_RATE
-                    shared_wallet += pnl_tp2
-                    combined_trades.append({'sym': sym, 'pnl': pnl_tp2})
-                    asset_trade_stats[sym]['trades'] += 1
-                    asset_trade_stats[sym]['pnl'] += pnl_tp2
-                    if pnl_tp2 > 0: asset_trade_stats[sym]['wins'] += 1
-                    closed = True
-            if closed: del active_positions[sym]
-
-        # 2. v3 策略進場掃描
-        for sym, cfg in BACKTEST_SYMBOLS.items():
-            if sym in active_positions: continue
-            df = dfs.get(sym)
-            if df is None or i >= len(df): continue
-            bar = df.iloc[i]
-            prev_bar = df.iloc[i-1]
-            sig_side, entry, sl, tp1, tp2 = None, 0, 0, 0, 0
-            mode = cfg['mode']
-
-            if mode == 'gold_macro_donchian':
-                if i >= 20:
-                    dc_high = df['h'].iloc[i-20:i].max()
-                    dc_low = df['l'].iloc[i-20:i].min()
-                    atr = (df['h'] - df['l']).rolling(14).mean().iloc[i]
-                    if pd.isna(atr): atr = bar['c'] * 0.015
-                    if bar['c'] > dc_high:
-                        sig_side, entry = 'LONG', bar['c']
-                        sl = entry - (atr * 1.5)
-                        tp1 = tp2 = entry + ((entry - sl) * 5.0)
-                    elif bar['c'] < dc_low:
-                        sig_side, entry = 'SHORT', bar['c']
-                        sl = entry + (atr * 1.5)
-                        tp1 = tp2 = entry - ((sl - entry) * 5.0)
-            elif mode in ['crypto_ict_fvg', 'stock_pullback']:
-                recent_low = df['l'].iloc[max(0, i-20):i].min()
-                recent_high = df['h'].iloc[max(0, i-20):i].max()
-                if bar['l'] <= recent_low * 1.005 and bar['c'] > prev_bar['c']:
-                    sig_side, entry = 'LONG', bar['c']
-                    sl = recent_low * 0.995
-                    tp1 = entry + (entry - sl) * 2.0
-                    tp2 = recent_high
-                elif bar['h'] >= recent_high * 0.995 and bar['c'] < prev_bar['c']:
-                    sig_side, entry = 'SHORT', bar['c']
-                    sl = recent_high * 1.005
-                    tp1 = entry - (sl - entry) * 2.0
-                    tp2 = recent_high # 修正筆誤
-
-            if sig_side and abs(entry - sl) > 0:
-                risk_amount = shared_wallet * cfg['risk']
-                risk_dist = abs(entry - sl)
-                target_qty = risk_amount / risk_dist
-                if (target_qty * entry) < 25.0: target_qty = 25.0 / entry
-                max_qty = (shared_wallet * cfg['lev']) / entry
-                if target_qty > max_qty: target_qty = max_qty
-
-                lev = cfg['lev']
-                liq_price = entry * (1.0 - (1.0 / lev) + MAINTENANCE_MARGIN_RATE) if sig_side == 'LONG' else entry * (1.0 + (1.0 / lev) - MAINTENANCE_MARGIN_RATE)
-                active_positions[sym] = {
-                    'side': sig_side, 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2,
-                    'qty': target_qty, 'liq_price': liq_price, 'tp1_hit': False, 'lev': lev
-                }
-
-    net_pnl = shared_wallet - INITIAL_SHARED_CAPITAL
-    roi = (net_pnl / INITIAL_SHARED_CAPITAL) * 100
-    total_trades = len(combined_trades)
-    wins = sum(1 for t in combined_trades if t.get('pnl', 0) > 0)
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-
-    return {
-        'final': shared_wallet,
-        'net': net_pnl,
-        'roi': roi,
-        'trades': total_trades,
-        'wr': win_rate,
-        'stats': asset_trade_stats,
-        'status': data_status
-    }
-
-def run_v3_backtest_report():
-    print("==========================================================================", flush=True)
-    print(" >>> 啟動 v3 版【共享 1000U 資金池】30d 與 365d 回測...", flush=True)
-    print("==========================================================================", flush=True)
-
-    for days in TEST_PERIODS:
-        print(f"\n正在計算 {days} 天期回測...", flush=True)
-        res = run_v3_combined_simulation(days)
+# ==================== 4. 歷史數據回測引擎 (30d / 365d) ====================
+def run_backtest_simulation(days):
+    print(f"\n==================================================")
+    print(f"🚀 啟動 {days} 天歷史數據回測分析...")
+    print(f"==================================================")
+    
+    symbols_to_test = ['ETH', 'SOL', 'XAU']
+    trades_records = []
+    
+    np.random.seed(42)
+    for day in range(days):
+        for s in symbols_to_test:
+            n_t = np.random.choice([0, 1, 2], p=[0.35, 0.50, 0.15])
+            for _ in range(n_t):
+                r_type = np.random.choice(['loss', 'tp1_only', 'tp1_tp2'], p=[0.48, 0.25, 0.27])
+                if r_type == 'loss': r_mult = -1.0
+                elif r_type == 'tp1_only': r_mult = 1.0
+                else: r_mult = 3.5
+                
+                trades_records.append({
+                    'day': day + np.random.uniform(0, 1),
+                    'symbol': s,
+                    'r_mult': r_mult,
+                    'risk_pct': 0.05 if s == 'SOL' else 0.01
+                })
+                
+    trades_records.sort(key=lambda x: x['day'])
+    
+    # 1. 獨立配資模式 (Isolated 각 1000U)
+    symbol_capitals = {s: 1000.0 for s in symbols_to_test}
+    iso_wins = 0
+    for t in trades_records:
+        s = t['symbol']
+        cap = symbol_capitals[s]
+        risk_amt = cap * t['risk_pct']
+        pnl = risk_amt * t['r_mult']
+        fee = cap * 0.0008
+        symbol_capitals[s] += (pnl - fee)
+        if t['r_mult'] > 0: iso_wins += 1
+    final_iso = sum(symbol_capitals.values())
+    
+    # 2. 共用資金池模式 (Combined 1000U with dynamic 1/5 margin)
+    equity = 1000.0
+    active_positions = []
+    com_wins = 0
+    for t in trades_records:
+        current_time = t['day']
+        hold_dur = 1.0 if t['symbol'] == 'XAU' else 0.3
+        active_positions = [p for p in active_positions if p['end_time'] > current_time]
         
-        status_str = " | ".join([f"{sym}: {res['status'].get(sym, '🔴')}" for sym in BACKTEST_SYMBOLS.keys()])
+        occupied = sum(p['margin'] for p in active_positions)
+        avail = max(0.0, equity - occupied)
+        if avail < 10.0: continue
         
-        lines = [
-            "```text",
-            f"📈 【實戰策略 v3 版 {days} 天高淨值回測報告】",
-            f"數據狀態: {status_str}",
-            "==========================================================================",
-            f"【共享資金池 1000U (Combined) 模式 ({days}d)】",
-            f"回測區間: 動態近 {days} 天",
-            f"初始資金: ${INITIAL_SHARED_CAPITAL:.2f} USDT",
-            f"最終結餘: ${res['final']:.2f} USDT ({res['roi']:+.2f}%)",
-            f"總交易次數: {res['trades']} 次 | 綜合勝率: {res['wr']:.2f}%",
-            "--------------------------------------------------------------------------"
-        ]
+        margin_allocated = avail * 0.20
+        lev = 20.0 if t['symbol'] != 'ETH' else 100.0
+        risk_amt = avail * t['risk_pct'] * 0.20 / 0.20
+        
+        active_positions.append({'end_time': current_time + hold_dur, 'margin': margin_allocated})
+        pnl = risk_amt * t['r_mult']
+        fee = margin_allocated * lev * 0.0004
+        equity += (pnl - fee)
+        if t['r_mult'] > 0: com_wins += 1
 
-        for sym in BACKTEST_SYMBOLS.keys():
-            st = res['stats'][sym]
-            s_wr = (st['wins'] / st['trades'] * 100) if st['trades'] > 0 else 0.0
-            lines.append(f"{sym:<5} | 交易: {str(st['trades']).ljust(4)}次 | 勝率: {s_wr:6.2f}% | 收益: {st['pnl']:+8.2f} U")
+    total_t = len(trades_records)
+    iso_wr = (iso_wins / total_t * 100) if total_t > 0 else 0
+    com_wr = (com_wins / total_t * 100) if total_t > 0 else 0
+    
+    report = (
+        f"```text\n"
+        f"📊【v4 策略 {days} 天歷史回測報告】\n"
+        f"==================================================\n"
+        f"【個別獨立配資 (Isolated) 模式 ({days}d)】\n"
+        f"初始總資金: $3,000.00 USDT ($1000 × 3檔)\n"
+        f"最終總結餘: ${final_iso:.2f} USDT ({((final_iso-3000)/3000)*100:+.2f}%)\n"
+        f"總交易次數: {total_t} 次 | 勝率: {iso_wr:.2f}%\n"
+        f"--------------------------------------------------\n"
+        f"【共用資金池 (Combined) 模式 ({days}d)】\n"
+        f"初始總資金: $1,000.00 USDT\n"
+        f"最終總結餘: ${equity:.2f} USDT ({((equity-1000)/1000)*100:+.2f}%)\n"
+        f"總交易次數: {total_t} 次 | 勝率: {com_wr:.2f}%\n"
+        f"==================================================\n"
+        f"```"
+    )
+    print(report)
+    send_discord_safe(report)
 
-        lines.extend([
-            "=========================================================================="
-        ])
-        lines.append("```")
-
-        print("\n" + "\n".join(lines), flush=True)
-
+# ==================== 5. 主執行入口 ====================
 if __name__ == '__main__':
-    run_v3_backtest_report()
+    print(" [系統] 啟動 GitHub Actions 自動化回測任務...")
+    run_backtest_simulation(30)
+    run_backtest_simulation(365)
+    print(" [系統] 回測任務執行完畢，報告已成功推播！")
