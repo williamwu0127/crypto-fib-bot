@@ -17,26 +17,34 @@ INITIAL_SHARED_CAPITAL = 1000.0
 FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
 
-def fetch_robust_klines(symbol, interval, days=365):
-    """具備雙源備援與自動分頁的強固資料抓取邏輯"""
+def fetch_stealth_klines(symbol, interval, days=365):
+    """具備瀏覽器偽裝 Headers 與多節點備援的資料抓取函數"""
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
     
-    # 針對不同標的優先選擇正確的 API 來源
-    urls = [
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.binance.com/'
+    }
+    
+    # 支援現貨與合約雙重節點備援
+    endpoints = [
         f"https://api.binance.com/api/v3/klines",
+        f"https://data-api.binance.vision/api/v3/klines",
         f"https://fapi.binance.com/fapi/v1/klines"
     ]
     
-    for base_url in urls:
+    for base_url in endpoints:
         all_klines = []
         curr_start = start_ms
         success = True
         
         while curr_start < end_ms:
-            target_url = f"{base_url}?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
+            url = f"{base_url}?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
             try:
-                res = requests.get(target_url, timeout=8)
+                res = requests.get(url, headers=headers, timeout=10)
                 if res.status_code != 200:
                     success = False
                     break
@@ -45,7 +53,7 @@ def fetch_robust_klines(symbol, interval, days=365):
                     break
                 all_klines.extend(data)
                 curr_start = data[-1][0] + 1
-                time.sleep(0.02)
+                time.sleep(0.03)
             except Exception:
                 success = False
                 break
@@ -66,7 +74,7 @@ def run_v3_combined_simulation(days):
     max_len = 0
     
     for sym, cfg in BACKTEST_SYMBOLS.items():
-        df = fetch_robust_klines(cfg['s'], cfg['interval'], days=days + 15)
+        df = fetch_stealth_klines(cfg['s'], cfg['interval'], days=days + 15)
         if df is not None and not df.empty:
             dfs[sym] = df
             data_status[sym] = '🟢'
@@ -197,7 +205,7 @@ def run_v3_combined_simulation(days):
                     sig_side, entry = 'SHORT', bar['c']
                     sl = recent_high * 1.005
                     tp1 = entry - (sl - entry) * 2.0
-                    tp2 = recent_low
+                    tp2 = recent_high # 修正筆誤
 
             if sig_side and abs(entry - sl) > 0:
                 risk_amount = shared_wallet * cfg['risk']
@@ -231,12 +239,12 @@ def run_v3_combined_simulation(days):
     }
 
 def run_v3_backtest_report():
-    print("==========================================================================")
-    print(" >>> 啟動 v3 版【共享 1000U 資金池】30d 與 365d 回測...")
-    print("==========================================================================")
+    print("==========================================================================", flush=True)
+    print(" >>> 啟動 v3 版【共享 1000U 資金池】30d 與 365d 回測...", flush=True)
+    print("==========================================================================", flush=True)
 
     for days in TEST_PERIODS:
-        print(f"\n正在計算 {days} 天期回測...")
+        print(f"\n正在計算 {days} 天期回測...", flush=True)
         res = run_v3_combined_simulation(days)
         
         status_str = " | ".join([f"{sym}: {res['status'].get(sym, '🔴')}" for sym in BACKTEST_SYMBOLS.keys()])
@@ -264,7 +272,7 @@ def run_v3_backtest_report():
         ])
         lines.append("```")
 
-        print("\n" + "\n".join(lines))
+        print("\n" + "\n".join(lines), flush=True)
 
 if __name__ == '__main__':
     run_v3_backtest_report()
