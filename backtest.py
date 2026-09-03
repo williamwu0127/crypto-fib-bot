@@ -2,7 +2,6 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 
 BASE_URL = "https://fapi.binance.com"
 FRICTION_RATE = 0.0004  # 單邊摩擦成本 (手續費 + 滑價) 預設為萬分之四
@@ -24,12 +23,28 @@ def fetch_historical_data(symbol, interval, days):
     while current_start < end_time:
         try:
             url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&limit=1500"
-            res = requests.get(url, timeout=10).json()
-            if not res or not isinstance(res, list): break
-            all_klines.extend(res)
-            current_start = res[-1][0] + 1
+            res = requests.get(url, timeout=10)
+            
+            # 檢查是否遭到地區阻擋 (常見如 451, 403 或者是字串錯誤)
+            if res.status_code != 200:
+                print(f"❌ [API 錯誤] 伺服器回應狀態碼 {res.status_code}，可能遭地區阻擋 (請確認伺服器 IP 是否在美國/歐盟等受限區)。內容: {res.text[:200]}")
+                break
+                
+            data = res.json()
+            if not data or not isinstance(data, list): 
+                print(f"⚠️ [警告] {symbol} 取得的資料格式異常: {data}")
+                break
+                
+            all_klines.extend(data)
+            current_start = data[-1][0] + 1
             time.sleep(0.1)
-        except Exception: break
+        except Exception as e:
+            print(f"❌ [連線例外] 下載 {symbol} 失敗: {e}")
+            break
+
+    if not all_klines:
+        print(f"⚠️ {symbol} 未能成功抓取任何 K 線數據！")
+        return pd.DataFrame()
 
     cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
     df = pd.DataFrame(all_klines, columns=cols)
@@ -51,6 +66,7 @@ def prepare_indicators(df, mode):
     return df
 
 def generate_trades(symbol, cfg, df_main):
+    if df_main.empty: return []
     trades = []
     mode = cfg['mode']
     in_position = False
@@ -114,6 +130,7 @@ def generate_trades(symbol, cfg, df_main):
     return trades
 
 def simulate_portfolio(trades, initial_balances):
+    if not trades: return {b: {'balance': b, 'peak': b, 'mdd': 0.0} for b in initial_balances}
     trades.sort(key=lambda x: x['exit_time'])
     
     results = {b: {'balance': b, 'peak': b, 'mdd': 0.0} for b in initial_balances}
@@ -129,11 +146,9 @@ def simulate_portfolio(trades, initial_balances):
             pnl_val = position_size * t['pnl_pct']
             results[b]['balance'] += pnl_val
             
-            # 破產判定
             if results[b]['balance'] < 0: 
                 results[b]['balance'] = 0
             
-            # 更新最高水位與 MDD
             if results[b]['balance'] > results[b]['peak']:
                 results[b]['peak'] = results[b]['balance']
             
