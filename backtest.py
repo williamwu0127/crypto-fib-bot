@@ -39,12 +39,17 @@ def fetch_historical_data(cfg, days):
         curr_start = start_ms
         
         while curr_start < now_ms:
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
-            res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0: break
-            all_klines.extend(res)
-            if len(res) < 1000: break
-            curr_start = int(res[-1][0]) + 1
+            # 統一改回 v1 實盤使用的 fapi 合約終端
+            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={cfg['s']}&interval={cfg['interval']}&startTime={curr_start}&limit=1000"
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                break
+            
+            data = res.json()
+            if not isinstance(data, list) or len(data) == 0: break
+            all_klines.extend(data)
+            if len(data) < 1000: break
+            curr_start = int(data[-1][0]) + 1
             time.sleep(0.05)
             
         if len(all_klines) > 10:
@@ -59,7 +64,6 @@ def fetch_historical_data(cfg, days):
     return None
 
 def prepare_indicators(df, mode):
-    # 共用指標
     df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
@@ -71,22 +75,19 @@ def prepare_indicators(df, mode):
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
 
-    # 策略特製化指標
     if mode == 'gold_macro_donchian':
-        df['ma360'] = df['c'].rolling(360).mean() # 近似 4H 線上的 1D MA60
+        df['ma360'] = df['c'].rolling(360).mean()
         df['dc_high'] = df['h'].shift(1).rolling(20).max()
         df['dc_low'] = df['l'].shift(1).rolling(20).min()
     elif mode == 'crypto_ict_ob':
-        df['recent_l_80'] = df['l'].rolling(80).min().shift(1) # 近似 HTF 低點
-        df['recent_h_80'] = df['h'].rolling(80).max().shift(1) # 近似 HTF 高點
+        df['recent_l_80'] = df['l'].rolling(80).min().shift(1)
+        df['recent_h_80'] = df['h'].rolling(80).max().shift(1)
         df['sweep_long'] = (df['l'] < df['recent_l_80']) & (df['c'] > df['recent_l_80'])
         df['sweep_short'] = (df['h'] > df['recent_h_80']) & (df['c'] < df['recent_h_80'])
     return df
 
 # ==================== 4. 核心回測引擎 ====================
 def run_simulation(data_records, all_times, mode_type="isolated"):
-    """ mode_type: 'isolated' (各自100U) 或 'combined' (共用100U) """
-    
     if mode_type == "isolated":
         wallets = {sym: 100.0 for sym in SYMBOLS.keys()}
     else:
@@ -96,18 +97,19 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
     completed_trades = []
     stats = {sym: {'trades': 0, 'wins': 0, 'pnl': 0.0} for sym in SYMBOLS.keys()}
 
-    # 將 DataFrame 轉為 dict 以加速 O(1) 搜尋
     fast_data = {}
     for sym, df in data_records.items():
         fast_data[sym] = df.set_index('time').to_dict('index')
 
     for t in all_times:
         for sym, cfg in SYMBOLS.items():
-            if t not in fast_data[sym]: continue
+            # 【修復】安全跳過未抓取到資料的標的，防止 KeyError 崩潰
+            if sym not in fast_data or t not in fast_data[sym]: 
+                continue
+                
             row = fast_data[sym][t]
             current_bal = wallets[sym] if mode_type == "isolated" else shared_wallet
             
-            # 1. 處理現有持倉
             if sym in positions:
                 pos = positions[sym]
                 side, entry, qty = pos['side'], pos['entry'], pos['qty']
@@ -115,7 +117,6 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
                 tp1_hit = pos['tp1_hit']
 
                 if side == 'LONG':
-                    # 停損或保本觸發
                     if row['l'] <= sl:
                         pnl = qty * (sl - entry)
                         if mode_type == "isolated": wallets[sym] += pnl
@@ -128,29 +129,25 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
                         del positions[sym]
                         continue
                     
-                    # 觸及 2R 保本位 (黃金專屬)
                     if 'be_tgt' in pos and not pos['be_moved'] and row['h'] >= pos['be_tgt']:
                         pos['sl'] = entry
                         pos['be_moved'] = True
 
-                    # 觸發 TP1 (分批平倉 50%)
                     if not tp1_hit and row['h'] >= tp1:
                         pnl_tp1 = (qty * 0.5) * (tp1 - entry)
                         if mode_type == "isolated": wallets[sym] += pnl_tp1
                         else: shared_wallet += pnl_tp1
                         pos['tp1_hit'] = True
-                        pos['sl'] = entry # 鎖利保本
+                        pos['sl'] = entry
                         stats[sym]['trades'] += 1
                         stats[sym]['wins'] += 1
                         stats[sym]['pnl'] += pnl_tp1
                         
-                        # 黃金 TP1 即是 5R 全部平倉
                         if cfg['mode'] == 'gold_macro_donchian':
                             completed_trades.append({'sym': sym, 'pnl': pnl_tp1})
                             del positions[sym]
                             continue
                             
-                    # 觸發 TP2 (剩餘 50%)
                     if pos['tp1_hit'] and row['h'] >= tp2:
                         pnl_tp2 = (qty * 0.5) * (tp2 - entry)
                         if mode_type == "isolated": wallets[sym] += pnl_tp2
@@ -204,7 +201,6 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
                         del positions[sym]
                         continue
 
-            # 2. 開倉信號判定
             if sym not in positions and current_bal > 5.0:
                 sig_side, entry, sl, tp1, tp2, be_tgt = None, 0, 0, 0, 0, 0
                 mode = cfg['mode']
@@ -224,7 +220,6 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
                         tp2 = tp1
 
                 elif mode == 'crypto_ict_ob':
-                    # 使用 15 分鐘資料進行粗估的 20 根 K 線掃蕩與觸發
                     df = data_records[sym]
                     idx_arr = df.index[df['time'] == t].tolist()
                     if not idx_arr or idx_arr[0] < 25: continue
@@ -232,7 +227,6 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
                     
                     sub = df.iloc[idx-20:idx]
                     if sub['sweep_long'].any():
-                        # 找紅 K 做訂單塊
                         ob_reds = sub[sub['c'] < sub['o']]
                         if not ob_reds.empty:
                             ob = ob_reds.loc[ob_reds['l'].idxmin()]
@@ -261,7 +255,6 @@ def run_simulation(data_records, all_times, mode_type="isolated"):
                         sl = max(row['h'], row['ema50'] + row['atr'])
                         tp1, tp2 = entry - (sl - entry)*1.5, entry - (sl - entry)*3.0
 
-                # 建立倉位 (1% 餘額 × 槓桿倍數)
                 if sig_side:
                     notional = (current_bal * 0.01) * cfg['lev']
                     qty = notional / entry
@@ -305,15 +298,12 @@ def run_backtest_pipeline(days):
     for df in data_records.values(): all_times.update(df['time'].tolist())
     all_times = sorted(list(all_times))
 
-    # --- 執行 Isolated 回測 ---
     print(f"\n⏳ 運算 {days} 天 [各自獨立 100U] 模式...")
     iso_fin, iso_ini, iso_trades, iso_stats = run_simulation(data_records, all_times, "isolated")
     
-    # --- 執行 Combined 回測 ---
     print(f"⏳ 運算 {days} 天 [資金池共享 100U] 模式...")
     cmb_fin, cmb_ini, cmb_trades, cmb_stats = run_simulation(data_records, all_times, "combined")
 
-    # --- 整理報表 ---
     def build_report(mode_name, fin_bal, ini_bal, trades, stats):
         roi = ((fin_bal - ini_bal) / ini_bal) * 100
         win_rate = (len([t for t in trades if t['pnl'] > 0]) / len(trades) * 100) if trades else 0
