@@ -3,8 +3,17 @@ import requests
 import pandas as pd
 import numpy as np
 
+# ==================== 參數與代理設定 ====================
 BASE_URL = "https://fapi.binance.com"
 FRICTION_RATE = 0.0004  # 單邊摩擦成本 (手續費 + 滑價) 預設為萬分之四
+
+# 如果你的伺服器位於美國/歐洲等受限機房（會報 451 錯誤），
+# 請在此處填入你未受限地區（如台灣/日本/新加坡）的 Proxy 代理，例如：
+# PROXIES = {
+#     'http': 'http://your_proxy_ip:port',
+#     'https': 'http://your_proxy_ip:port'
+# }
+PROXIES = None 
 
 SYMBOLS = {
     'ETH':   {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'trade': True},
@@ -23,16 +32,14 @@ def fetch_historical_data(symbol, interval, days):
     while current_start < end_time:
         try:
             url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={current_start}&limit=1500"
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, proxies=PROXIES, timeout=10)
             
-            # 檢查是否遭到地區阻擋 (常見如 451, 403 或者是字串錯誤)
             if res.status_code != 200:
-                print(f"❌ [API 錯誤] 伺服器回應狀態碼 {res.status_code}，可能遭地區阻擋 (請確認伺服器 IP 是否在美國/歐盟等受限區)。內容: {res.text[:200]}")
+                print(f"❌ [API 錯誤] 伺服器回應狀態碼 {res.status_code}，可能遭地區阻擋。內容: {res.text[:200]}")
                 break
                 
             data = res.json()
             if not data or not isinstance(data, list): 
-                print(f"⚠️ [警告] {symbol} 取得的資料格式異常: {data}")
                 break
                 
             all_klines.extend(data)
