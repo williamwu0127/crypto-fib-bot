@@ -3,9 +3,9 @@ Multi-Asset Combined Portfolio Backtest Engine (30 Days & 365 Days)
 ================================================================================
 【合併倉位多資產策略回測程序 (30天與365天期 - 仿照附圖格式)】
 1. 策略配置:
-   - BTC / ETH / SOL (crypto_ict_fvg): ICT 流動性獵取與 FVG 回踩 / 20x 槓桿 / 1% 風控[cite: 6]
-   - XAU (gold_macro_donchian): 4H 唐奇安通道突破 / 20x 槓桿 / 1% 風控 / 5.0R 止盈[cite: 6]
-   - MSFT / MU (stock_pullback): 1H 均線回撤 / 10x 槓桿 / 1% 風控[cite: 6]
+   - BTC / ETH / SOL (crypto_ict_fvg): ICT 流動性獵取與 FVG 回踩 / 20x 槓桿 / 1% 風控
+   - XAU (gold_macro_donchian): 4H 唐奇安通道突破 / 20x 槓桿 / 1% 風控 / 5.0R 止盈
+   - MSFT / MU (stock_pullback): 1H 均線回撤 / 10x 槓桿 / 1% 風控
 2. 顯示格式:
    - 精準對齊的雙模式（獨立配置模式 vs 共享資金池模式），並完整列出 30d 與 365d 表現。
 ================================================================================
@@ -179,7 +179,6 @@ def run_simulation(days):
             dfs[sym] = df
             if len(df) > max_len: max_len = len(df)
 
-    # 1. 獨立配置模式 (Isolated)
     isolated_results = {}
     total_iso_start = len(BACKTEST_SYMBOLS) * INITIAL_CAPITAL_PER_ASSET
     total_iso_final = 0.0
@@ -202,7 +201,6 @@ def run_simulation(days):
     iso_roi = ((total_iso_final - total_iso_start) / total_iso_start) * 100
     iso_global_wr = (iso_wins_count / iso_trades_count * 100) if iso_trades_count > 0 else 0.0
 
-    # 2. 共用資金池模式 (Combined)
     shared_wallet = float(INITIAL_SHARED_CAPITAL)
     active_positions = {}
     combined_trades = []
@@ -375,4 +373,3 @@ def master_ui_backtest():
 
 if __name__ == '__main__':
     master_ui_backtest()
-```[cite: 7]
