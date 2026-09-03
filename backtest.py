@@ -17,31 +17,47 @@ INITIAL_SHARED_CAPITAL = 1000.0
 FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
 
-def fetch_binance_futures_klines(symbol, interval, days=365):
-    all_klines = []
+def fetch_robust_klines(symbol, interval, days=365):
+    """具備雙源備援與自動分頁的強固資料抓取邏輯"""
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
-    curr_start = start_ms
-
-    while curr_start < end_ms:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
-        try:
-            res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0:
+    
+    # 針對不同標的優先選擇正確的 API 來源
+    urls = [
+        f"https://api.binance.com/api/v3/klines",
+        f"https://fapi.binance.com/fapi/v1/klines"
+    ]
+    
+    for base_url in urls:
+        all_klines = []
+        curr_start = start_ms
+        success = True
+        
+        while curr_start < end_ms:
+            target_url = f"{base_url}?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
+            try:
+                res = requests.get(target_url, timeout=8)
+                if res.status_code != 200:
+                    success = False
+                    break
+                data = res.json()
+                if not isinstance(data, list) or len(data) == 0:
+                    break
+                all_klines.extend(data)
+                curr_start = data[-1][0] + 1
+                time.sleep(0.02)
+            except Exception:
+                success = False
                 break
-            all_klines.extend(res)
-            curr_start = res[-1][0] + 1
-            time.sleep(0.03)
-        except Exception:
-            break
-
-    if len(all_klines) > 0:
-        cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
-        df = pd.DataFrame(all_klines, columns=cols).drop_duplicates(subset=['t'])
-        for col in ['o', 'h', 'l', 'c', 'v']:
-            df[col] = df[col].astype(float)
-        df['time'] = pd.to_datetime(df['t'], unit='ms')
-        return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
+        
+        if success and len(all_klines) > 0:
+            cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
+            df = pd.DataFrame(all_klines, columns=cols).drop_duplicates(subset=['t'])
+            for col in ['o', 'h', 'l', 'c', 'v']:
+                df[col] = df[col].astype(float)
+            df['time'] = pd.to_datetime(df['t'], unit='ms')
+            return df[['time', 'o', 'h', 'l', 'c', 'v']].sort_values('time').reset_index(drop=True)
+            
     return None
 
 def run_v3_combined_simulation(days):
@@ -50,7 +66,7 @@ def run_v3_combined_simulation(days):
     max_len = 0
     
     for sym, cfg in BACKTEST_SYMBOLS.items():
-        df = fetch_binance_futures_klines(cfg['s'], cfg['interval'], days=days + 15)
+        df = fetch_robust_klines(cfg['s'], cfg['interval'], days=days + 15)
         if df is not None and not df.empty:
             dfs[sym] = df
             data_status[sym] = '🟢'
