@@ -16,10 +16,9 @@ SYMBOLS = {
 
 def fetch_binance_vision_data(symbol, interval, days):
     print(f"📥 正在從 Binance Data Vision 下載 {symbol} ({interval}) 過去 {days} 天歷史資料...")
-    end_date = datetime.date.today()
+    end_date = datetime.date.today() - datetime.timedelta(days=1) # 避免抓取當天或未完成的當月
     start_date = end_date - datetime.timedelta(days=days)
     
-    # 產生需要抓取的年月清單（透過月度壓縮檔下載，速度最快且完全不受 API IP 地理限制）
     current = start_date.replace(day=1)
     months_to_fetch = []
     while current <= end_date:
@@ -38,6 +37,7 @@ def fetch_binance_vision_data(symbol, interval, days):
                 with zipfile.ZipFile(io.BytesIO(res.content)) as z:
                     for filename in z.namelist():
                         with z.open(filename) as f:
+                            # 讀取 CSV，自動適應有沒有 header
                             df_month = pd.read_csv(f, header=None)
                             all_dfs.append(df_month)
             else:
@@ -50,14 +50,18 @@ def fetch_binance_vision_data(symbol, interval, days):
         return pd.DataFrame()
         
     df = pd.concat(all_dfs, ignore_index=True)
-    # 取前 6 欄：開盤時間、開、高、低、收、量
+    
+    # 清理掉可能存在的字串表頭行 (將非數字的行過濾掉)
     df = df.iloc[:, [0, 1, 2, 3, 4, 5]]
     df.columns = ['t', 'o', 'h', 'l', 'c', 'v']
-    for col in ['o', 'h', 'l', 'c', 'v']:
-        df[col] = df[col].astype(float)
+    
+    # 強制轉型，並把無法轉成數字的標題列（如 'open' 等字串）自動轉為 NaN 並濾除
+    for col in ['t', 'o', 'h', 'l', 'c', 'v']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna().reset_index(drop=True)
+    
     df['time'] = pd.to_datetime(df['t'], unit='ms')
     
-    # 精確裁切回測的時間範圍
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date) + pd.Timedelta(days=1)
     df = df[(df['time'] >= start_ts) & (df['time'] < end_ts)]
@@ -101,7 +105,6 @@ def generate_trades(symbol, cfg, df_main):
                 exit_price = sl_price if is_loss else tp_price
                 raw_pnl_pct = ((exit_price - entry_price) / entry_price) if position_side == 'LONG' else ((entry_price - exit_price) / entry_price)
                 
-                # 扣除雙邊手續費與滑價
                 net_pnl_pct = raw_pnl_pct - (FRICTION_RATE * 2) 
                 
                 trades.append({
