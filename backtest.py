@@ -1,16 +1,3 @@
-"""
-Multi-Asset Combined Portfolio Backtest Engine (30 Days & 365 Days)
-================================================================================
-【合併倉位多資產策略回測程序 (30天與365天期 - 仿照附圖格式)】
-1. 策略配置:
-   - BTC / ETH / SOL (crypto_ict_fvg): ICT 流動性獵取與 FVG 回踩 / 20x 槓桿 / 1% 風控
-   - XAU (gold_macro_donchian): 4H 唐奇安通道突破 / 20x 槓桿 / 1% 風控 / 5.0R 止盈
-   - MSFT / MU (stock_pullback): 1H 均線回撤 / 10x 槓桿 / 1% 風控
-2. 顯示格式:
-   - 精準對齊的雙模式（獨立配置模式 vs 共享資金池模式），並完整列出 30d 與 365d 表現。
-================================================================================
-"""
-
 import os
 import time
 import requests
@@ -51,7 +38,7 @@ def fetch_binance_klines(symbol, interval, days=365):
     if interval == '1d': step_ms = 24 * 60 * 60 * 1000
 
     while curr_start < now_ms:
-        url = f"[https://data-api.binance.vision/api/v3/klines?symbol=](https://data-api.binance.vision/api/v3/klines?symbol=){symbol}&interval={interval}&startTime={curr_start}&limit=1000"
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
         try:
             res = requests.get(url, timeout=10).json()
             if not isinstance(res, list) or len(res) == 0: break
