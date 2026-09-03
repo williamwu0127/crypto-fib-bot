@@ -17,14 +17,14 @@ INITIAL_SHARED_CAPITAL = 1000.0
 FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
 
-def fetch_binance_klines(symbol, interval, days=365):
+def fetch_binance_futures_klines(symbol, interval, days=365):
     all_klines = []
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
     curr_start = start_ms
 
     while curr_start < end_ms:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
         try:
             res = requests.get(url, timeout=10).json()
             if not isinstance(res, list) or len(res) == 0:
@@ -50,7 +50,7 @@ def run_v3_combined_simulation(days):
     max_len = 0
     
     for sym, cfg in BACKTEST_SYMBOLS.items():
-        df = fetch_binance_klines(cfg['s'], cfg['interval'], days=days + 15)
+        df = fetch_binance_futures_klines(cfg['s'], cfg['interval'], days=days + 15)
         if df is not None and not df.empty:
             dfs[sym] = df
             data_status[sym] = '🟢'
@@ -68,6 +68,7 @@ def run_v3_combined_simulation(days):
         if shared_wallet <= 10.0: 
             break
 
+        # 1. 管理現有持倉
         for sym in list(active_positions.keys()):
             pos = active_positions[sym]
             df = dfs.get(sym)
@@ -144,6 +145,7 @@ def run_v3_combined_simulation(days):
                     closed = True
             if closed: del active_positions[sym]
 
+        # 2. v3 策略進場掃描
         for sym, cfg in BACKTEST_SYMBOLS.items():
             if sym in active_positions: continue
             df = dfs.get(sym)
