@@ -69,7 +69,6 @@ def fetch_binance_klines(symbol, interval, days=365):
 def run_combined_portfolio_simulation(days):
     print(f"\n---------------- 開始執行 {days} 天期合併倉位回測 ----------------")
     
-    # 載入所有標的的歷史數據
     dfs = {}
     max_len = 0
     for sym, cfg in BACKTEST_SYMBOLS.items():
@@ -79,14 +78,12 @@ def run_combined_portfolio_simulation(days):
             if len(df) > max_len: max_len = len(df)
 
     shared_wallet = float(INITIAL_SHARED_CAPITAL)
-    active_positions = {} # 記錄各標的的當前持倉
+    active_positions = {} 
     trade_history = []
 
-    # 模擬主迴圈（以時間軸對齊各資產）
     for i in range(25, max_len):
-        if shared_wallet <= 10.0: break # 資金歸零保護
+        if shared_wallet <= 10.0: break
 
-        # 1. 檢查並管理現有持倉
         for sym in list(active_positions.keys()):
             pos = active_positions[sym]
             df = dfs[sym]
@@ -97,9 +94,8 @@ def run_combined_portfolio_simulation(days):
                 pos['side'], pos['entry'], pos['sl'], pos['tp1'], pos['tp2'], pos['qty'], pos['liq_price'], pos['tp1_hit']
             )
 
-            # 強平檢查
             if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
-                shared_wallet -= (qty * entry) / pos['lev'] # 扣除保證金
+                shared_wallet -= (qty * entry) / pos['lev']
                 shared_wallet = max(0.0, shared_wallet)
                 trade_history.append({'sym': sym, 'pnl': -((qty * entry) / pos['lev']), 'is_liq': True})
                 del active_positions[sym]
@@ -117,7 +113,7 @@ def run_combined_portfolio_simulation(days):
                     pos['tp1_hit'] = True
                     pnl_tp1 = (qty * 0.5) * (tp1 - entry) - (qty * 0.5) * (entry + tp1) * FEE_RATE
                     shared_wallet += pnl_tp1
-                    pos['sl'] = entry # 移動保本
+                    pos['sl'] = entry 
                     trade_history.append({'sym': sym, 'pnl': pnl_tp1})
                 elif pos['tp1_hit'] and bar['h'] >= tp2:
                     pnl_tp2 = (qty * 0.5) * (tp2 - entry) - (qty * 0.5) * (entry + tp2) * FEE_RATE
@@ -147,9 +143,8 @@ def run_combined_portfolio_simulation(days):
             if closed:
                 del active_positions[sym]
 
-        # 2. 掃描新進場訊號
         for sym, cfg in BACKTEST_SYMBOLS.items():
-            if sym in active_positions: continue # 已持倉則跳過
+            if sym in active_positions: continue 
             df = dfs.get(sym)
             if df is None or i >= len(df): continue
             
@@ -224,7 +219,6 @@ def master_combined_backtest():
         status_txt = "爆倉" if is_liq else f"${final_w:.1f} ({roi:+.1f}%)"
         print(f"[{days}d] 合併倉位結算 -> 總資金: {status_txt} | 總交易筆數: {trades} | 勝率: {wr:.1f}%")
 
-    # 組合 Markdown 報告
     report_lines = [
         "```text",
         "【合併倉位多資產策略回測報告 (共用 1000U 資金池)】",
@@ -235,15 +229,15 @@ def master_combined_backtest():
 
     for days in TEST_PERIODS:
         res = results[days]
-        if res['liq']: val_str = "爆倉清算 ($0)"
-        else: val_str = f"${res['final']:.1f}"
+        val_str = "爆倉清算 ($0)" if res['liq'] else f"${res['final']:.1f}"
         roi_str = f"{res['roi']:+.1f}%"
-        report_lines.append(
-            f"{f'{days}天期'.ljust(10)} | {val_str.ljust(15)} | {roi_str.ljust(16)} | {str(res['trades']).ljust(12)} | {f'{res["wr"]:.1f}%'.ljust(8)}"
-        )
+        wr_str = f"{res['wr']:.1f}%"
+        
+        line_str = f"{str(days) + '天期':<10} | {val_str:<15} | {roi_str:<16} | {str(res['trades']):<12} | {wr_str:<8}"
+        report_lines.append(line_str)
 
     report_lines.append("==========================================================================")
-    report_lines.append("配置說明: 合併資金池共用現金與保證金 | ETH/SOL/XAU (20x) | MSFT/MU (10x)")
+    report_lines.append("配置說明: 合併資金池共用現金與保證金 | ETH/SOL/XAU (20x) | MSFT/MU (10x)[cite: 6]")
     report_lines.append("```")
 
     final_report = "\n".join(report_lines)
