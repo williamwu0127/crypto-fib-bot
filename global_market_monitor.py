@@ -1,11 +1,11 @@
 import os
-import urllib.parse
 import requests
 import pandas as pd
 import yfinance as yf
 import concurrent.futures
 import time
 from datetime import datetime, timezone, timedelta
+from deep_translator import GoogleTranslator
 
 # 直接寫死指定之 Discord Webhook
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
@@ -33,40 +33,15 @@ def send_msg(payload):
         print(f"Discord 發送失敗: {e}")
 
 def translate_to_zh(text):
+    """使用 deep-translator 進行翻譯，大幅降低雲端 IP 被阻擋的機率"""
     if not text:
         return ""
-    
-    encoded_text = urllib.parse.quote(text)
-    
-    # 第一層：嘗試 Google 翻譯
     try:
-        url_google = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={encoded_text}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        }
-        r = requests.get(url_google, headers=headers, timeout=5)
-        if r.status_code == 200:
-            res = r.json()
-            return "".join([part[0] for part in res[0] if part[0]])
-        else:
-            print(f"[Google 翻譯被擋] 狀態碼 {r.status_code}，準備啟動備用 API...")
+        translated = GoogleTranslator(source='en', target='zh-TW').translate(text)
+        return translated if translated else text
     except Exception as e:
-        print(f"[Google 翻譯錯誤] {e}，準備啟動備用 API...")
-
-    # 第二層：Google 失敗時，無縫切換 MyMemory 免費 API
-    try:
-        url_mymemory = f"https://api.mymemory.translated.net/get?q={encoded_text}&langpair=en|zh-TW"
-        r = requests.get(url_mymemory, timeout=5)
-        if r.status_code == 200:
-            res = r.json()
-            translated_text = res.get("responseData", {}).get("translatedText")
-            if translated_text:
-                return translated_text
-    except Exception as e:
-        print(f"[MyMemory 備用翻譯錯誤] {e}")
-
-    # 若兩個 API 都失敗，則退回原文
-    return text
+        print(f"[翻譯錯誤] {e}，原文: {text}")
+        return text
 
 def get_market_analysis(args):
     symbol, name, role = args
@@ -84,7 +59,7 @@ def get_market_analysis(args):
         pct = (pts / prev_p) * 100
         ma20 = float(close_s.rolling(20).mean().iloc[-1])
 
-        # 依據圖片設計加入顏色 Emoji 邏輯
+        # 結構解析顏色燈號邏輯
         if symbol == "^VIX":
             if latest_p >= 20.0:
                 struct_text = "🔴 市場避險情緒升溫 (警戒)"
@@ -135,7 +110,7 @@ def fetch_macro_news():
                     link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
 
                 if title_en:
-                    time.sleep(2)  # 降低 API 請求頻率
+                    # 使用 deep-translator 翻譯
                     title_zh = translate_to_zh(title_en)
                     
                     if link:
