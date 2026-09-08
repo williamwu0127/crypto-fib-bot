@@ -9,8 +9,8 @@ from datetime import datetime, timezone, timedelta
 # 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 直接寫死指定之 Discord Webhook
-WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+# 🚨 安全性升級：請將你的新 Webhook 設定在系統環境變數 "DISCORD_WEBHOOK" 中，切勿寫死在程式碼內
+WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 
 FRICTION_COST_PCT = 0.40
 
@@ -39,6 +39,9 @@ ALLOWED_MONSTER_INDUSTRIES = [
 ]
 
 def send_msg(payload):
+    if not WEBHOOK_URL:
+        print("錯誤：找不到 Webhook URL 環境變數！")
+        return
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Discord 狀態碼: {r.status_code}")
@@ -115,7 +118,6 @@ def get_dynamic_all_stocks():
     return stock_dict
 
 def get_market_and_futures():
-    """三重備援機制：官方 MIS -> 鉅亨網 API -> Yahoo Finance"""
     res = {}
     stock_futures = {}
     tx_quote = None
@@ -123,8 +125,7 @@ def get_market_and_futures():
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    # ==================== 1. 大盤抓取 ====================
-    # [備援一] 嘗試證交所官方
+    # 1. 抓取大盤
     try:
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=3)
         timestamp = int(datetime.now().timestamp() * 1000)
@@ -144,7 +145,6 @@ def get_market_and_futures():
     except Exception:
         pass
 
-    # [備援二] 若官方失敗(海外IP被封)，改打鉅亨網 API
     if 'spot_close' not in res:
         try:
             r_anue = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWS:TSE01:INDEX", timeout=5)
@@ -156,26 +156,17 @@ def get_market_and_futures():
         except Exception:
             pass
 
-    # [備援三] 取得 20 日均線，並做最後 Yahoo 兜底
     ma20 = None
-    yf_close = None
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
         if not df_t.empty and len(df_t) >= 15:
             ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
-            yf_close = float(df_t['Close'].iloc[-1])
-            yf_prev = float(df_t['Close'].iloc[-2])
-            yf_pts = yf_close - yf_prev
-            yf_pct = (yf_pts / yf_prev) * 100
     except Exception:
         pass
 
     if 'spot_close' not in res:
-        if yf_close:
-            res['spot_close'], res['pts'], res['pct'] = yf_close, yf_pts, yf_pct
-        else:
-            res['spot_close'], res['pts'], res['pct'] = 22500.0, 0.0, 0.0
+        res['spot_close'], res['pts'], res['pct'] = 22500.0, 0.0, 0.0
 
     if ma20 is None or pd.isna(ma20):
         ma20 = res['spot_close'] * 0.98
@@ -184,8 +175,7 @@ def get_market_and_futures():
     res['trend'] = "多頭控盤" if res['spot_close'] >= ma20 else "弱勢整理"
     res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
-    # ==================== 2. 期貨抓取 ====================
-    # [備援一] 嘗試期交所官方
+    # 2. 抓取期貨 (TAIFEX -> Anue API)
     try:
         session.get("https://mis.taifex.com.tw/futures/", timeout=3)
         fut_headers = session.headers.copy()
@@ -219,19 +209,20 @@ def get_market_and_futures():
     except Exception:
         pass
 
-    # [備援二] 若官方期貨失敗，改打鉅亨網 API 抓取台指期
+    # 若官方期貨失敗，啟用強化版鉅亨網 API 抓取
     if not tx_quote:
         try:
             r_anue_tx = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWTX", timeout=5)
             if r_anue_tx.status_code == 200:
-                data = r_anue_tx.json().get('data', [])[0]
-                tx_price = float(data.get('200009', 0))
-                tx_diff = float(data.get('200011', 0))
-                tx_rate = float(data.get('200012', 0))
-                if tx_price > 0:
-                    tx_quote = {"price": tx_price, "diff": tx_diff, "rate": tx_rate}
-        except Exception:
-            pass
+                data = r_anue_tx.json().get('data', [])
+                if data:
+                    tx_price = float(data[0].get('200009', 0))
+                    tx_diff = float(data[0].get('200011', 0))
+                    tx_rate = float(data[0].get('200012', 0))
+                    if tx_price > 0:
+                        tx_quote = {"price": tx_price, "diff": tx_diff, "rate": tx_rate}
+        except Exception as e:
+            print(f"[鉅亨網期貨備援失敗] {e}")
 
     if tx_quote and res['spot_close'] > 0:
         diff = tx_quote['price'] - res['spot_close']
@@ -244,8 +235,7 @@ def get_market_and_futures():
 
 def get_spot_orderbook(ticker_list):
     book_dict = {}
-    if not ticker_list: 
-        return book_dict
+    if not ticker_list: return book_dict
         
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -266,8 +256,7 @@ def get_spot_orderbook(ticker_list):
                     ask_str = m.get('a', '_').split('_')[0]
                     last_p = float(m.get('z', '0')) if m.get('z', '0') != '-' else 0.0
                     ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
-                    if sid: 
-                        book_dict[sid] = {"ask1": ask_p, "last": last_p}
+                    if sid: book_dict[sid] = {"ask1": ask_p, "last": last_p}
     except Exception:
         pass
         
@@ -296,9 +285,9 @@ def analyze_pattern_stages(df, c_price, atr_14):
     recent_low_5d = float(df['Low'].iloc[-5:].min())
 
     if c_price >= neck_high:
-        desc, status, score = "多頭破頸線 (階梯墊高)", " 突破頸線 (轉強發動)", 90
+        desc, status, score = "多頭破頸線 (階梯墊高)", "突破頸線 (轉強發動)", 90
     elif c_price >= neck_low:
-        desc, status, score = "強勢箱型蓄勢 (回測支撐)", " 突破後回測 (支撐確認)", 82
+        desc, status, score = "強勢箱型蓄勢 (回測支撐)", "突破後回測 (支撐確認)", 82
     else:
         return None
 
@@ -321,21 +310,13 @@ def analyze_pattern_stages(df, c_price, atr_14):
     }
 
 def main():
-    print("啟動選股雷達...")
     session_name, trigger_type, date_str, is_chips_session = get_session_info()
-    
-    print("抓取大盤與期貨資料...")
     market_info, stock_futures = get_market_and_futures()
-    
-    print("更新全市場股票池...")
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
-    if not all_tickers: 
-        print("未抓取到任何股票，程式結束。")
-        return
+    if not all_tickers: return
 
-    print("抓取現貨五檔報價...")
     target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in stock_futures]
     spot_book = get_spot_orderbook(target_spot_tickers)
 
@@ -343,7 +324,6 @@ def main():
     monster_candidates = []
     spread_candidates = []
 
-    print("批次運算策略指標...")
     chunk_size = 150
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
@@ -376,7 +356,6 @@ def main():
                 atr_14 = calculate_atr(df, 14)
                 atr_pct = (atr_14 / today_close) * 100
 
-                # 高動能妖股篩選
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and vol_ma5 > 0:
                     vol_ratio = round(today_vol / vol_ma5, 1)
                     if vol_ratio >= 2.5 and atr_pct >= 3.5:
@@ -391,7 +370,6 @@ def main():
                             "score": vol_ratio * atr_pct
                         })
 
-                # 正逆價差套利
                 if sid in stock_futures:
                     near_f = stock_futures[sid].get("near")
                     if near_f:
@@ -408,7 +386,6 @@ def main():
                                 "net_pct_abs": abs(net_pct)
                             })
 
-                # 波段結構篩選
                 p_res = analyze_pattern_stages(df, today_close, atr_14)
                 if p_res:
                     score = p_res["score"] + (15 if theme_str != original_ind else 0)
@@ -480,19 +457,17 @@ def main():
     else:
         fields.append({"name": " 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
 
-    # 依照你的要求，動態組合標題文字
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
-            "title": f"📈 台股{session_name}分析報告 ({trigger_type}) [{date_str}]",
+            "title": f"📈 台股{session_name}分析報告 ({trigger_type})\n[{date_str}]",
             "description": "TOP6精選股 ｜ 妖股預測 ｜ 正逆價差分析",
             "color": 3447003,
             "fields": fields
         }]
     }
-    print("發送至 Discord...")
+    
     send_msg(payload)
-    print("執行完成！")
 
 if __name__ == "__main__":
     main()
