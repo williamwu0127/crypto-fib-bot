@@ -1,11 +1,11 @@
 import os
+import urllib.parse
 import requests
 import pandas as pd
 import yfinance as yf
 import concurrent.futures
 import time
 from datetime import datetime, timezone, timedelta
-from deep_translator import GoogleTranslator
 
 # 直接寫死指定之 Discord Webhook
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
@@ -33,15 +33,39 @@ def send_msg(payload):
         print(f"Discord 發送失敗: {e}")
 
 def translate_to_zh(text):
-    """使用 deep-translator 進行翻譯，大幅降低雲端 IP 被阻擋的機率"""
     if not text:
         return ""
+    
+    encoded_text = urllib.parse.quote(text)
+    
+    # 第一層：Lingva API (開源的 Google 翻譯代理，由社群伺服器代發請求，完美繞過 GitHub IP 限制)
     try:
-        translated = GoogleTranslator(source='en', target='zh-TW').translate(text)
-        return translated if translated else text
+        url = f"https://lingva.ml/api/v1/en/zh_TW/{encoded_text}"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            res = r.json()
+            translation = res.get("translation")
+            if translation:
+                return translation
+        else:
+            print(f"[Lingva 翻譯被擋] 狀態碼 {r.status_code}，準備啟動備用 API...")
     except Exception as e:
-        print(f"[翻譯錯誤] {e}，原文: {text}")
-        return text
+        print(f"[Lingva 翻譯錯誤] {e}，準備啟動備用 API...")
+
+    # 第二層：MyMemory API (傳統免費 API 備援)
+    try:
+        url_mymemory = f"https://api.mymemory.translated.net/get?q={encoded_text}&langpair=en|zh-TW"
+        r = requests.get(url_mymemory, timeout=5)
+        if r.status_code == 200:
+            res = r.json()
+            translated_text = res.get("responseData", {}).get("translatedText")
+            if translated_text:
+                return translated_text
+    except Exception as e:
+        print(f"[MyMemory 備用翻譯錯誤] {e}")
+
+    # 若兩個 API 都失敗，則退回原文，確保流程不中斷
+    return text
 
 def get_market_analysis(args):
     symbol, name, role = args
@@ -110,7 +134,7 @@ def fetch_macro_news():
                     link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
 
                 if title_en:
-                    # 使用 deep-translator 翻譯
+                    time.sleep(2)  # 降低 API 請求頻率
                     title_zh = translate_to_zh(title_en)
                     
                     if link:
