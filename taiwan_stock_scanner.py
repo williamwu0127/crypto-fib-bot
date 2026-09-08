@@ -7,13 +7,16 @@ import logging
 import time
 from datetime import datetime, timezone, timedelta
 
-# 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 直接寫死指定之 Discord Webhook
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 FRICTION_COST_PCT = 0.40
+
+# 排除缺乏波動彈性、容易洗版的防禦型產業（徹底排除金融、營建、食品等牛皮股）
+EXCLUDED_SECTOR_INDUSTRIES = [
+    "金融保險業", "建材營造", "食品工業", "水泥工業", "造紙工業", "油電燃氣業"
+]
 
 TARGET_THEMES = {
     "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
@@ -29,7 +32,7 @@ TARGET_THEMES = {
     "被動元件": ["2327", "2492", "3026", "2478", "2456", "6173"],
     "玻璃相關": ["1802", "1809", "1810", "1817"],
     "CoWoS": ["3131", "3583", "6187", "2467", "6640", "2330", "3711", "2449", "3374"],
-    "權值股": ["2330", "2454", "2317", "2308", "2881", "2882", "2886", "2891", "2412", "1301", "1303", "2002"],
+    "權值股": ["2330", "2454", "2317", "2308", "2412", "1301", "1303", "2002"],
     "塑膠": ["1301", "1303", "1326", "1304", "1308", "1305", "1314", "1309"],
     "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
 }
@@ -177,18 +180,14 @@ def get_market_and_futures():
     res['trend'] = "多頭控盤" if res['spot_close'] >= ma20 else "弱勢整理"
     res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
-    # 3. 抓取期貨 (TAIFEX MIS) - 強化抗爬蟲標頭
+    # 3. 抓取期貨（雙軌制：優先嘗試期交所，被海外機房封鎖時自動切換 Yahoo Finance）
     try:
         session.get("https://mis.taifex.com.tw/futures/", timeout=5)
-        time.sleep(1) # 增加延遲避免被 WAF 阻擋
-        
+        time.sleep(1)
         fut_headers = session.headers.copy()
         fut_headers.update({
             "Origin": "https://mis.taifex.com.tw",
             "Referer": "https://mis.taifex.com.tw/futures/",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
             "Content-Type": "application/json;charset=UTF-8"
         })
         
@@ -196,35 +195,44 @@ def get_market_and_futures():
             "https://mis.taifex.com.tw/futures/api/getQuoteList", 
             json={"MarketType":"0","SymbolType":"F"}, 
             headers=fut_headers, 
-            timeout=10
+            timeout=8
         )
         
         if r_fut.status_code == 200:
             for item in r_fut.json().get('RtData', {}).get('QuoteList', []):
                 sym = item.get('SymbolID', '')
                 last_p_str = str(item.get('CLastPrice', '0')).replace(',', '')
-                
                 if not last_p_str.replace('.', '', 1).isdigit():
                     continue
                 last_p = float(last_p_str)
                 
-                # 台指期
                 if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
                     diff = float(str(item.get('CDiff', '0')).replace(',', ''))
                     rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
                     tx_quote = {"price": last_p, "diff": diff, "rate": rate}
                 
-                # 個股期貨
                 und_id = str(item.get('UnderlyingId', '')).strip()
                 if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
                     if und_id not in stock_futures:
                         stock_futures[und_id] = {"near": {"price": last_p}}
-        else:
-            print(f"[期貨 API 阻擋] 狀態碼: {r_fut.status_code} (可能是雲端 IP 被 TAIFEX 封鎖)")
-    except Exception as e:
-        print(f"[期貨連線錯誤] {e}")
+    except Exception:
+        pass
 
-    # 組裝期貨顯示字串
+    # 備用線路：若期交所因海外 IP 限流失敗，以 Yahoo Finance 台指期期貨 (TXF=F) 備援
+    if not tx_quote:
+        try:
+            tx_ticker = yf.Ticker("TXF=F")
+            df_tx = tx_ticker.history(period="5d", interval="1d")
+            if not df_tx.empty and len(df_tx) >= 2:
+                latest_tx = float(df_tx['Close'].iloc[-1])
+                prev_tx = float(df_tx['Close'].iloc[-2])
+                pts_tx = latest_tx - prev_tx
+                pct_tx = (pts_tx / prev_tx) * 100
+                tx_quote = {"price": latest_tx, "diff": pts_tx, "rate": pct_tx}
+                print("[期貨備援] 成功使用 Yahoo Finance (TXF=F) 補足台指期數據！")
+        except Exception as e:
+            print(f"[期貨備援失敗] {e}")
+
     if tx_quote and res['spot_close'] > 0:
         diff = tx_quote['price'] - res['spot_close']
         dtype = "正價差" if diff >= 0 else "逆價差"
@@ -361,9 +369,15 @@ def main():
                 if df.empty or len(df) < 25: continue
 
                 sid, name, theme_str, original_ind = stock_dict[ticker]
+                
+                # 【優化 1】：直接排除金融、營建、食品等低波動防禦性產業
+                if original_ind in EXCLUDED_SECTOR_INDUSTRIES:
+                    continue
+
                 today_close = float(df['Close'].iloc[-1])
                 today_vol = float(df['Volume'].iloc[-1])
                 
+                # 成交金額門檻：至少 1 億元，且股價大於 10 元
                 est_money_mil = (today_close * today_vol) / 100_000_000
                 if est_money_mil < 1.0 or today_close < 10.0:
                     continue
@@ -371,6 +385,10 @@ def main():
                 vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1]) if len(df) >= 5 else today_vol
                 atr_14 = calculate_atr(df, 14)
                 atr_pct = (atr_14 / today_close) * 100
+
+                # 【優化 2】：過濾無波動之牛皮股（ATR% < 2.0% 排除）
+                if atr_pct < 2.0:
+                    continue
 
                 # 高動能妖股篩選
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and vol_ma5 > 0:
@@ -404,10 +422,10 @@ def main():
                                 "net_pct_abs": abs(net_pct)
                             })
 
-                # 波段結構篩選
+                # 波段結構篩選（Top 6）：增加動能加權，讓有題材且帶波動的股票優先出線
                 p_res = analyze_pattern_stages(df, today_close, atr_14)
                 if p_res:
-                    score = p_res["score"] + (15 if theme_str != original_ind else 0)
+                    score = p_res["score"] + (15 if theme_str != original_ind else 0) + (atr_pct * 2)
                     scored_results.append({
                         "sid": sid, "name": name, "industry": original_ind,
                         "close": f"{today_close:.2f}", "score": score, **p_res
@@ -423,7 +441,7 @@ def main():
 
     fields = []
     
-    # 【大盤區塊 Emoji 還原】
+    # 大盤解析區塊
     fields.append({
         "name": f" 📊 加權指數大盤解析 ({market_info['trend']})",
         "value": (
@@ -435,7 +453,7 @@ def main():
         "inline": False
     })
     
-    # 【精選股區塊 Emoji 還原】
+    # 精選 Top 6 區塊
     fields.append({"name": f"───────── 🎯 {session_name}精選 Top 6 ─────────", "value": "\u200b", "inline": False})
     if top_picks:
         for i, item in enumerate(top_picks):
@@ -458,7 +476,7 @@ def main():
     else:
         fields.append({"name": " 💡 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
-    # 【妖股預警區塊 Emoji 還原】
+    # 妖股預警區塊
     fields.append({"name": f"───────── 🚀 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
@@ -470,7 +488,7 @@ def main():
     else:
         fields.append({"name": " 💡 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
 
-    # 【價差套利區塊 Emoji 還原】
+    # 期現貨價差區塊
     fields.append({"name": f"───────── ⚡ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
     if top_spreads:
         ts = top_spreads[0]
@@ -480,9 +498,9 @@ def main():
             "inline": False
         })
     else:
-        fields.append({"name": "⚡ 狀態提示", "value": "> 暫無顯著正逆價差套利標的 (或期貨資料擷取失敗)", "inline": False})
+        fields.append({"name": "⚡ 狀態提示", "value": "> 暫無顯著正逆價差套利標的 (雲端環境受期交所限制時將自動跳過)", "inline": False})
 
-    # 動態組裝 Discord Payload
+    # Discord Embed Payload
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
