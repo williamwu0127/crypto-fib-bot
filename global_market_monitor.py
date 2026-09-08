@@ -38,33 +38,30 @@ def translate_to_zh(text):
     
     encoded_text = urllib.parse.quote(text)
     
-    # 第一層：Lingva API (開源的 Google 翻譯代理，由社群伺服器代發請求，完美繞過 GitHub IP 限制)
+    # 方式一：還原最初版本的極簡 Header (有時過於複雜的偽裝反而會被 Google 擋下)
     try:
-        url = f"https://lingva.ml/api/v1/en/zh_TW/{encoded_text}"
-        r = requests.get(url, timeout=5)
+        url_api = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={encoded_text}"
+        r = requests.get(url_api, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         if r.status_code == 200:
-            res = r.json()
-            translation = res.get("translation")
-            if translation:
-                return translation
-        else:
-            print(f"[Lingva 翻譯被擋] 狀態碼 {r.status_code}，準備啟動備用 API...")
-    except Exception as e:
-        print(f"[Lingva 翻譯錯誤] {e}，準備啟動備用 API...")
+            return "".join([part[0] for part in r.json()[0] if part[0]])
+    except Exception:
+        pass
 
-    # 第二層：MyMemory API (傳統免費 API 備援)
+    # 方式二：終極備援 - Google Mobile Web 解析法 (對 CI/CD IP 最友善，不會回傳 429)
     try:
-        url_mymemory = f"https://api.mymemory.translated.net/get?q={encoded_text}&langpair=en|zh-TW"
-        r = requests.get(url_mymemory, timeout=5)
+        url_web = f"https://translate.google.com/m?sl=en&tl=zh-TW&q={encoded_text}"
+        r = requests.get(url_web, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         if r.status_code == 200:
-            res = r.json()
-            translated_text = res.get("responseData", {}).get("translatedText")
-            if translated_text:
-                return translated_text
+            # 傳統手機版網頁會固定將翻譯結果包在 <div class="result-container"> 裡面
+            if 'class="result-container">' in r.text:
+                result = r.text.split('class="result-container">')[1].split('</div>')[0]
+                # 替換常見的 HTML 實體字元
+                result = result.replace("&quot;", '"').replace("&#39;", "'").replace("&amp;", "&")
+                return result
     except Exception as e:
-        print(f"[MyMemory 備用翻譯錯誤] {e}")
+        print(f"[Mobile Web 翻譯錯誤] {e}")
 
-    # 若兩個 API 都失敗，則退回原文，確保流程不中斷
+    # 若雙重機制皆失敗，退回原文
     return text
 
 def get_market_analysis(args):
@@ -134,7 +131,8 @@ def fetch_macro_news():
                     link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
 
                 if title_en:
-                    time.sleep(2)  # 降低 API 請求頻率
+                    # 加入 3 秒延遲，確保爬蟲頻率在安全範圍內
+                    time.sleep(3)
                     title_zh = translate_to_zh(title_en)
                     
                     if link:
