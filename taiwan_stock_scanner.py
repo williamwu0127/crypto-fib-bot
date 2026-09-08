@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 # 關閉 yfinance 煩人的警告訊息
@@ -49,11 +50,9 @@ def get_session_info():
     tz_tw = timezone(timedelta(hours=8))
     now_tw = datetime.now(tz_tw)
     
-    # 判斷觸發來源 (依賴 GitHub Actions 環境變數)
     event_name = os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     trigger_type = "排程" if event_name == "schedule" else "手動"
 
-    # 判斷當前時段 (使用台灣時間)
     time_val = now_tw.hour * 100 + now_tw.minute
     if time_val < 900: 
         session_name = "盤前"
@@ -124,13 +123,13 @@ def get_market_and_futures():
     
     session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     }
     session.headers.update(headers)
 
-    # 1. 抓取大盤 (TWSE MIS)
+    # 1. 抓取大盤現貨 (TWSE MIS)
     try:
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
         timestamp = int(datetime.now().timestamp() * 1000)
@@ -178,14 +177,18 @@ def get_market_and_futures():
     res['trend'] = "多頭控盤" if res['spot_close'] >= ma20 else "弱勢整理"
     res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
-    # 3. 抓取期貨 (TAIFEX MIS)
+    # 3. 抓取期貨 (TAIFEX MIS) - 強化抗爬蟲標頭
     try:
         session.get("https://mis.taifex.com.tw/futures/", timeout=5)
+        time.sleep(1) # 增加延遲避免被 WAF 阻擋
         
         fut_headers = session.headers.copy()
         fut_headers.update({
             "Origin": "https://mis.taifex.com.tw",
             "Referer": "https://mis.taifex.com.tw/futures/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
             "Content-Type": "application/json;charset=UTF-8"
         })
         
@@ -205,20 +208,23 @@ def get_market_and_futures():
                     continue
                 last_p = float(last_p_str)
                 
+                # 台指期
                 if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
                     diff = float(str(item.get('CDiff', '0')).replace(',', ''))
                     rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
                     tx_quote = {"price": last_p, "diff": diff, "rate": rate}
                 
+                # 個股期貨
                 und_id = str(item.get('UnderlyingId', '')).strip()
                 if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
                     if und_id not in stock_futures:
                         stock_futures[und_id] = {"near": {"price": last_p}}
         else:
-            print(f"[期貨 API 阻擋] 狀態碼: {r_fut.status_code}")
+            print(f"[期貨 API 阻擋] 狀態碼: {r_fut.status_code} (可能是雲端 IP 被 TAIFEX 封鎖)")
     except Exception as e:
         print(f"[期貨連線錯誤] {e}")
 
+    # 組裝期貨顯示字串
     if tx_quote and res['spot_close'] > 0:
         diff = tx_quote['price'] - res['spot_close']
         dtype = "正價差" if diff >= 0 else "逆價差"
@@ -416,6 +422,8 @@ def main():
     top_spreads = sorted(spread_candidates, key=lambda x: x['net_pct_abs'], reverse=True)[:1]
 
     fields = []
+    
+    # 【大盤區塊 Emoji 還原】
     fields.append({
         "name": f" 📊 加權指數大盤解析 ({market_info['trend']})",
         "value": (
@@ -427,11 +435,12 @@ def main():
         "inline": False
     })
     
+    # 【精選股區塊 Emoji 還原】
     fields.append({"name": f"───────── 🎯 {session_name}精選 Top 6 ─────────", "value": "\u200b", "inline": False})
     if top_picks:
         for i, item in enumerate(top_picks):
             fields.append({
-                "name": f" {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
+                "name": f"📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
                 "value": (
                     f"> **產業**: `{item['industry']}`\n"
                     f"> **進場區間**: `{item['entry']}`\n"
@@ -447,29 +456,31 @@ def main():
             if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
                 fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
     else:
-        fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
+        fields.append({"name": " 💡 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
+    # 【妖股預警區塊 Emoji 還原】
     fields.append({"name": f"───────── 🚀 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
             fields.append({
-                "name": f" {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
+                "name": f"🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
                 "value": f"> **產業**: `{m['industry']}`\n> **爆量倍數**: `{m['vol_ratio']}x`\n> **進場區間**: `{m['entry']}`\n> **止盈 (TP)**: `{m['tp']}`\n> **止損 (SL)**: `{m['sl']}`",
                 "inline": True
             })
     else:
-        fields.append({"name": " 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
+        fields.append({"name": " 💡 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
 
-    fields.append({"name": f"───────── ⚖️ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
+    # 【價差套利區塊 Emoji 還原】
+    fields.append({"name": f"───────── ⚡ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
     if top_spreads:
         ts = top_spreads[0]
         fields.append({
-            "name": f" {ts['sid']} {ts['name']} ｜ {ts['signal']}",
+            "name": f"⚡ {ts['sid']} {ts['name']} ｜ {ts['signal']}",
             "value": f"> **現貨價格**: `{ts['spot_p']}`\n> **期貨價格**: `{ts['fut_p']}`\n> **價差與淨利**: `{ts['diff_str']}`",
             "inline": False
         })
     else:
-        fields.append({"name": " 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
+        fields.append({"name": "⚡ 狀態提示", "value": "> 暫無顯著正逆價差套利標的 (或期貨資料擷取失敗)", "inline": False})
 
     # 動態組裝 Discord Payload
     payload = {
