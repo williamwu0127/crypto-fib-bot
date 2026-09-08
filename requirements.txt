@@ -6,4 +6,4 @@ ccxt
 feedparser
 html5lib
 lxml
-deep-translator
+deep_translator
