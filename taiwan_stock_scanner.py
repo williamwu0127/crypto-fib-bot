@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 # 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 直接寫死指定之 Discord Webhook (建議未來可改為讀取環境變數 os.getenv)
+# 直接寫死指定之 Discord Webhook
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 FRICTION_COST_PCT = 0.40
@@ -48,16 +48,23 @@ def send_msg(payload):
 def get_session_info():
     tz_tw = timezone(timedelta(hours=8))
     now_tw = datetime.now(tz_tw)
+    
+    # 判斷觸發來源 (依賴 GitHub Actions 環境變數)
     event_name = os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     trigger_type = "排程" if event_name == "schedule" else "手動"
 
+    # 判斷當前時段 (使用台灣時間)
     time_val = now_tw.hour * 100 + now_tw.minute
-    if time_val < 900: session_name = "盤前"
-    elif 900 <= time_val <= 1330: session_name = "盤中"
-    elif 1330 < time_val < 1745: session_name = "盤後"
-    else: session_name = "籌碼"
+    if time_val < 900: 
+        session_name = "盤前"
+    elif 900 <= time_val <= 1330: 
+        session_name = "盤中"
+    elif 1330 < time_val < 1745: 
+        session_name = "盤後"
+    else: 
+        session_name = "籌碼"
 
-    return session_name, f"全方位{session_name}分析報告 ({trigger_type})", now_tw.strftime("%Y-%m-%d"), (session_name == "籌碼")
+    return session_name, trigger_type, now_tw.strftime("%Y-%m-%d"), (session_name == "籌碼")
 
 def identify_theme(sid, original_ind):
     for theme, sids in TARGET_THEMES.items():
@@ -115,7 +122,6 @@ def get_market_and_futures():
     stock_futures = {}
     tx_quote = None
     
-    # 建立 Session，讓連線具備 Cookie 記憶功能
     session = requests.Session()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
@@ -126,10 +132,7 @@ def get_market_and_futures():
 
     # 1. 抓取大盤 (TWSE MIS)
     try:
-        # 先拜訪證交所首頁取得 Session/Cookie，大幅降低斷線機率
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
-        
-        # 加上時間戳參數 (unix timestamp) 避免抓到伺服器快取
         timestamp = int(datetime.now().timestamp() * 1000)
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&_={timestamp}"
         
@@ -163,7 +166,6 @@ def get_market_and_futures():
     except Exception as e:
         print(f"[大盤均線錯誤] {e}")
 
-    # 防呆機制
     if 'spot_close' not in res:
         res['spot_close'] = 22500.0
         res['pts'] = 0.0
@@ -173,12 +175,11 @@ def get_market_and_futures():
         ma20 = res['spot_close'] * 0.98
 
     res['ma20'] = ma20
-    res['trend'] = " 多頭控盤" if res['spot_close'] >= ma20 else " 弱勢整理"
+    res['trend'] = "多頭控盤" if res['spot_close'] >= ma20 else "弱勢整理"
     res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
     # 3. 抓取期貨 (TAIFEX MIS)
     try:
-        # 期交所防護極嚴，需先拜訪首頁，並補齊 Origin 與 Referer 標頭
         session.get("https://mis.taifex.com.tw/futures/", timeout=5)
         
         fut_headers = session.headers.copy()
@@ -200,18 +201,15 @@ def get_market_and_futures():
                 sym = item.get('SymbolID', '')
                 last_p_str = str(item.get('CLastPrice', '0')).replace(',', '')
                 
-                # 避開 '--' 等無效報價
                 if not last_p_str.replace('.', '', 1).isdigit():
                     continue
                 last_p = float(last_p_str)
                 
-                # 台指期
                 if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
                     diff = float(str(item.get('CDiff', '0')).replace(',', ''))
                     rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
                     tx_quote = {"price": last_p, "diff": diff, "rate": rate}
                 
-                # 個股期貨 (過濾出 UnderlyingId 為 4 碼數字的標的)
                 und_id = str(item.get('UnderlyingId', '')).strip()
                 if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
                     if und_id not in stock_futures:
@@ -243,10 +241,7 @@ def get_spot_orderbook(ticker_list):
     session.headers.update(headers)
     
     try:
-        # 先取得 Cookie 授權
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
-        
-        # 分批發送請求，避免 URL 過長被伺服器截斷 (每批 50 檔)
         chunk_size = 50
         for i in range(0, len(ticker_list), chunk_size):
             chunk = ticker_list[i:i + chunk_size]
@@ -317,7 +312,7 @@ def analyze_pattern_stages(df, c_price, atr_14):
 
 def main():
     print("啟動選股雷達...")
-    session_name, title_suffix, date_str, is_chips_session = get_session_info()
+    session_name, trigger_type, date_str, is_chips_session = get_session_info()
     
     print("抓取大盤與期貨資料...")
     market_info, stock_futures = get_market_and_futures()
@@ -422,7 +417,7 @@ def main():
 
     fields = []
     fields.append({
-        "name": f" 加權指數大盤解析 ({market_info['trend']})",
+        "name": f" 📊 加權指數大盤解析 ({market_info['trend']})",
         "value": (
             f"> **收盤點位**: `{market_info['spot_close']:,.2f}`\n"
             f"> **單日漲跌**: `{market_info['pts']:+,.2f}` ({market_info['pct']:+.2f}%) {market_info['emoji']}\n"
@@ -432,7 +427,7 @@ def main():
         "inline": False
     })
     
-    fields.append({"name": f"─────────  盤後精選 Top 6 ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"───────── 🎯 {session_name}精選 Top 6 ─────────", "value": "\u200b", "inline": False})
     if top_picks:
         for i, item in enumerate(top_picks):
             fields.append({
@@ -454,7 +449,7 @@ def main():
     else:
         fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
-    fields.append({"name": f"─────────  高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"───────── 🚀 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
             fields.append({
@@ -465,7 +460,7 @@ def main():
     else:
         fields.append({"name": " 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
 
-    fields.append({"name": f"─────────  期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"───────── ⚖️ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
     if top_spreads:
         ts = top_spreads[0]
         fields.append({
@@ -476,11 +471,12 @@ def main():
     else:
         fields.append({"name": " 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
 
+    # 動態組裝 Discord Payload
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
-            "title": f" 台股盤後分析報告 (自動修復版) ({date_str})",
-            "description": "已修復期現貨報價抓取、並導入 Session 防斷線與錯誤捕捉日誌：",
+            "title": f"台股{session_name}分析報告 ({trigger_type}) [{date_str}]",
+            "description": "TOP6精選股 ｜ 妖股預測 ｜ 正逆價差分析",
             "color": 3447003,
             "fields": fields
         }]
