@@ -6,8 +6,10 @@ import yfinance as yf
 import logging
 from datetime import datetime, timezone, timedelta
 
+# 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+# 直接寫死指定之 Discord Webhook (建議未來可改為讀取環境變數 os.getenv)
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 FRICTION_COST_PCT = 0.40
@@ -95,7 +97,8 @@ def get_dynamic_all_stocks():
                                 break
                         theme_str = identify_theme(sid, original_ind)
                         stock_dict[f"{sid}.{market}"] = (sid, name, theme_str, original_ind)
-        except:
+        except Exception as e:
+            print(f"[選股池抓取錯誤] {e}")
             continue
             
     if not stock_dict:
@@ -109,12 +112,28 @@ def get_dynamic_all_stocks():
 
 def get_market_and_futures():
     res = {}
+    stock_futures = {}
+    tx_quote = None
     
-    # 1. 透過證交所官方 MIS 系統抓取大盤即時/盤後精準報價 (tse_t00.tw)
+    # 建立 Session，讓連線具備 Cookie 記憶功能
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    session.headers.update(headers)
+
+    # 1. 抓取大盤 (TWSE MIS)
     try:
-        url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
+        # 先拜訪證交所首頁取得 Session/Cookie，大幅降低斷線機率
+        session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
+        
+        # 加上時間戳參數 (unix timestamp) 避免抓到伺服器快取
+        timestamp = int(datetime.now().timestamp() * 1000)
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&_={timestamp}"
+        
+        r = session.get(url, timeout=10)
         if r.status_code == 200:
             msg_arr = r.json().get('msgArray', [])
             if msg_arr:
@@ -131,18 +150,18 @@ def get_market_and_futures():
                 res['spot_close'] = spot_close
                 res['pts'] = pts
                 res['pct'] = pct
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[大盤連線錯誤] {e}")
 
-    # 2. 用 yfinance 輔助取得 20 日均線 (若失敗則防呆)
+    # 2. 輔助取得 20 日均線
     ma20 = None
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
         if not df_t.empty and len(df_t) >= 15:
             ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[大盤均線錯誤] {e}")
 
     # 防呆機制
     if 'spot_close' not in res:
@@ -154,54 +173,99 @@ def get_market_and_futures():
         ma20 = res['spot_close'] * 0.98
 
     res['ma20'] = ma20
-    res['trend'] = "🟢 多頭控盤" if res['spot_close'] >= ma20 else "🔴 弱勢整理"
-    res['emoji'] = "📈" if res['pts'] >= 0 else "📉"
+    res['trend'] = " 多頭控盤" if res['spot_close'] >= ma20 else " 弱勢整理"
+    res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
-    # 3. 台指期貨抓取
-    tx_quote = None
-    stock_futures = {}
+    # 3. 抓取期貨 (TAIFEX MIS)
     try:
-        headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
-        r = requests.post("https://mis.taifex.com.tw/futures/api/getQuoteList", json={"MarketType":"0","SymbolType":"F"}, headers=headers, timeout=5)
-        if r.status_code == 200:
-            for item in r.json().get('RtData', {}).get('QuoteList', []):
+        # 期交所防護極嚴，需先拜訪首頁，並補齊 Origin 與 Referer 標頭
+        session.get("https://mis.taifex.com.tw/futures/", timeout=5)
+        
+        fut_headers = session.headers.copy()
+        fut_headers.update({
+            "Origin": "https://mis.taifex.com.tw",
+            "Referer": "https://mis.taifex.com.tw/futures/",
+            "Content-Type": "application/json;charset=UTF-8"
+        })
+        
+        r_fut = session.post(
+            "https://mis.taifex.com.tw/futures/api/getQuoteList", 
+            json={"MarketType":"0","SymbolType":"F"}, 
+            headers=fut_headers, 
+            timeout=10
+        )
+        
+        if r_fut.status_code == 200:
+            for item in r_fut.json().get('RtData', {}).get('QuoteList', []):
                 sym = item.get('SymbolID', '')
-                last_p = float(str(item.get('CLastPrice', '0')).replace(',', ''))
-                diff = float(str(item.get('CDiff', '0')).replace(',', ''))
-                rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
+                last_p_str = str(item.get('CLastPrice', '0')).replace(',', '')
+                
+                # 避開 '--' 等無效報價
+                if not last_p_str.replace('.', '', 1).isdigit():
+                    continue
+                last_p = float(last_p_str)
+                
+                # 台指期
                 if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
+                    diff = float(str(item.get('CDiff', '0')).replace(',', ''))
+                    rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
                     tx_quote = {"price": last_p, "diff": diff, "rate": rate}
+                
+                # 個股期貨 (過濾出 UnderlyingId 為 4 碼數字的標的)
                 und_id = str(item.get('UnderlyingId', '')).strip()
                 if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
                     if und_id not in stock_futures:
                         stock_futures[und_id] = {"near": {"price": last_p}}
-    except Exception:
-        pass
+        else:
+            print(f"[期貨 API 阻擋] 狀態碼: {r_fut.status_code}")
+    except Exception as e:
+        print(f"[期貨連線錯誤] {e}")
 
     if tx_quote and res['spot_close'] > 0:
         diff = tx_quote['price'] - res['spot_close']
         dtype = "正價差" if diff >= 0 else "逆價差"
         res['futures_str'] = f"`{tx_quote['price']:,.2f}` ({tx_quote['diff']:+,.2f} / {tx_quote['rate']:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
     else:
-        res['futures_str'] = "即時撮合中"
+        res['futures_str'] = "即時撮合中 / 資料擷取失敗"
 
     return res, stock_futures
 
 def get_spot_orderbook(ticker_list):
     book_dict = {}
-    if not ticker_list: return book_dict
+    if not ticker_list: 
+        return book_dict
+        
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp"
+    }
+    session.headers.update(headers)
+    
     try:
-        query_keys = [f"{'tse' if t.split('.')[1] == 'TW' else 'otc'}_{t.split('.')[0]}.tw" for t in ticker_list]
-        r = requests.get(f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        if r.status_code == 200:
-            for m in r.json().get('msgArray', []):
-                sid = m.get('c', '')
-                ask_str = m.get('a', '_').split('_')[0]
-                last_p = float(m.get('z', '0')) if m.get('z', '0') != '-' else 0.0
-                ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
-                if sid: book_dict[sid] = {"ask1": ask_p, "last": last_p}
-    except Exception:
-        pass
+        # 先取得 Cookie 授權
+        session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
+        
+        # 分批發送請求，避免 URL 過長被伺服器截斷 (每批 50 檔)
+        chunk_size = 50
+        for i in range(0, len(ticker_list), chunk_size):
+            chunk = ticker_list[i:i + chunk_size]
+            query_keys = [f"{'tse' if t.split('.')[1] == 'TW' else 'otc'}_{t.split('.')[0]}.tw" for t in chunk]
+            timestamp = int(datetime.now().timestamp() * 1000)
+            url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}&_={timestamp}"
+            
+            r = session.get(url, timeout=10)
+            if r.status_code == 200:
+                for m in r.json().get('msgArray', []):
+                    sid = m.get('c', '')
+                    ask_str = m.get('a', '_').split('_')[0]
+                    last_p = float(m.get('z', '0')) if m.get('z', '0') != '-' else 0.0
+                    ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
+                    if sid: 
+                        book_dict[sid] = {"ask1": ask_p, "last": last_p}
+    except Exception as e:
+        print(f"[五檔報價連線錯誤] {e}")
+        
     return book_dict
 
 def calculate_atr(df, period=14):
@@ -227,9 +291,9 @@ def analyze_pattern_stages(df, c_price, atr_14):
     recent_low_5d = float(df['Low'].iloc[-5:].min())
 
     if c_price >= neck_high:
-        desc, status, score = "多頭破頸線 (階梯墊高)", "🟢 突破頸線 (轉強發動)", 90
+        desc, status, score = "多頭破頸線 (階梯墊高)", " 突破頸線 (轉強發動)", 90
     elif c_price >= neck_low:
-        desc, status, score = "強勢箱型蓄勢 (回測支撐)", "🟡 突破後回測 (支撐確認)", 82
+        desc, status, score = "強勢箱型蓄勢 (回測支撐)", " 突破後回測 (支撐確認)", 82
     else:
         return None
 
@@ -252,13 +316,21 @@ def analyze_pattern_stages(df, c_price, atr_14):
     }
 
 def main():
+    print("啟動選股雷達...")
     session_name, title_suffix, date_str, is_chips_session = get_session_info()
+    
+    print("抓取大盤與期貨資料...")
     market_info, stock_futures = get_market_and_futures()
+    
+    print("更新全市場股票池...")
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
-    if not all_tickers: return
+    if not all_tickers: 
+        print("未抓取到任何股票，程式結束。")
+        return
 
+    print("抓取現貨五檔報價...")
     target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in stock_futures]
     spot_book = get_spot_orderbook(target_spot_tickers)
 
@@ -266,6 +338,7 @@ def main():
     monster_candidates = []
     spread_candidates = []
 
+    print("批次運算策略指標...")
     chunk_size = 150
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
@@ -326,7 +399,7 @@ def main():
                                 "sid": sid, "name": name, "industry": original_ind,
                                 "spot_p": f"{spot_p:,.2f}", "fut_p": f"{fut_p:,.2f}",
                                 "diff_str": f"{diff_val:+,.2f} ({net_pct:+.2f}%)",
-                                "signal": "🟢 正價差套利" if diff_val > 0 else "🔴 逆價差套利",
+                                "signal": "正價差套利" if diff_val > 0 else "逆價差套利",
                                 "net_pct_abs": abs(net_pct)
                             })
 
@@ -338,7 +411,8 @@ def main():
                         "sid": sid, "name": name, "industry": original_ind,
                         "close": f"{today_close:.2f}", "score": score, **p_res
                     })
-        except Exception:
+        except Exception as e:
+            print(f"[資料處理錯誤] 批次分析發生例外: {e}")
             continue
 
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
@@ -348,7 +422,7 @@ def main():
 
     fields = []
     fields.append({
-        "name": f"📊 加權指數大盤解析 ({market_info['trend']})",
+        "name": f" 加權指數大盤解析 ({market_info['trend']})",
         "value": (
             f"> **收盤點位**: `{market_info['spot_close']:,.2f}`\n"
             f"> **單日漲跌**: `{market_info['pts']:+,.2f}` ({market_info['pct']:+.2f}%) {market_info['emoji']}\n"
@@ -358,11 +432,11 @@ def main():
         "inline": False
     })
     
-    fields.append({"name": f"───────── 🎯 盤後精選 Top 6 ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"─────────  盤後精選 Top 6 ─────────", "value": "\u200b", "inline": False})
     if top_picks:
         for i, item in enumerate(top_picks):
             fields.append({
-                "name": f"📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
+                "name": f" {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
                 "value": (
                     f"> **產業**: `{item['industry']}`\n"
                     f"> **進場區間**: `{item['entry']}`\n"
@@ -378,40 +452,42 @@ def main():
             if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
                 fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
     else:
-        fields.append({"name": "⚡ 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
-    fields.append({"name": f"───────── 🚨 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"─────────  高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
             fields.append({
-                "name": f"🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
+                "name": f" {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
                 "value": f"> **產業**: `{m['industry']}`\n> **爆量倍數**: `{m['vol_ratio']}x`\n> **進場區間**: `{m['entry']}`\n> **止盈 (TP)**: `{m['tp']}`\n> **止損 (SL)**: `{m['sl']}`",
                 "inline": True
             })
     else:
-        fields.append({"name": "⚡ 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
 
-    fields.append({"name": f"───────── ⚡ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"─────────  期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
     if top_spreads:
         ts = top_spreads[0]
         fields.append({
-            "name": f"⚡ {ts['sid']} {ts['name']} ｜ {ts['signal']}",
+            "name": f" {ts['sid']} {ts['name']} ｜ {ts['signal']}",
             "value": f"> **現貨價格**: `{ts['spot_p']}`\n> **期貨價格**: `{ts['fut_p']}`\n> **價差與淨利**: `{ts['diff_str']}`",
             "inline": False
         })
     else:
-        fields.append({"name": "⚡ 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
 
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
-            "title": f"📈 台股盤後分析報告 (手動) ({date_str})",
-            "description": "已修復價格抓取、過濾無量標的，並完成 Top 6 與妖股精選：",
+            "title": f" 台股盤後分析報告 (自動修復版) ({date_str})",
+            "description": "已修復期現貨報價抓取、並導入 Session 防斷線與錯誤捕捉日誌：",
             "color": 3447003,
             "fields": fields
         }]
     }
+    print("發送至 Discord...")
     send_msg(payload)
+    print("執行完成！")
 
 if __name__ == "__main__":
     main()
