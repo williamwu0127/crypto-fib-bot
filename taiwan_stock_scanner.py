@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import logging
-import time
 from datetime import datetime, timezone, timedelta
 
 # 關閉 yfinance 煩人的警告訊息
@@ -14,11 +13,6 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
 
 FRICTION_COST_PCT = 0.40
-
-# 排除缺乏波動彈性、容易洗版的防禦型產業 (排除金融、營建、食品等牛皮股)
-EXCLUDED_SECTOR_INDUSTRIES = [
-    "金融保險業", "建材營造", "食品工業", "水泥工業", "造紙工業", "油電燃氣業"
-]
 
 TARGET_THEMES = {
     "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
@@ -34,7 +28,7 @@ TARGET_THEMES = {
     "被動元件": ["2327", "2492", "3026", "2478", "2456", "6173"],
     "玻璃相關": ["1802", "1809", "1810", "1817"],
     "CoWoS": ["3131", "3583", "6187", "2467", "6640", "2330", "3711", "2449", "3374"],
-    "權值股": ["2330", "2454", "2317", "2308", "2412", "1301", "1303", "2002"],
+    "權值股": ["2330", "2454", "2317", "2308", "2881", "2882", "2886", "2891", "2412", "1301", "1303", "2002"],
     "塑膠": ["1301", "1303", "1326", "1304", "1308", "1305", "1314", "1309"],
     "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
 }
@@ -108,8 +102,7 @@ def get_dynamic_all_stocks():
                                 break
                         theme_str = identify_theme(sid, original_ind)
                         stock_dict[f"{sid}.{market}"] = (sid, name, theme_str, original_ind)
-        except Exception as e:
-            print(f"[選股池抓取錯誤] {e}")
+        except Exception:
             continue
             
     if not stock_dict:
@@ -121,60 +114,69 @@ def get_dynamic_all_stocks():
             stock_dict[f"{sid}.{mkt}"] = (sid, name, theme, ind)
     return stock_dict
 
-def get_market_and_futures(stock_dict):
+def get_market_and_futures():
+    """三重備援機制：官方 MIS -> 鉅亨網 API -> Yahoo Finance"""
     res = {}
     stock_futures = {}
     tx_quote = None
     
     session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-    session.headers.update(headers)
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    # 1. 抓取大盤現貨 (TWSE MIS - 成功率極高)
+    # ==================== 1. 大盤抓取 ====================
+    # [備援一] 嘗試證交所官方
     try:
-        session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
+        session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=3)
         timestamp = int(datetime.now().timestamp() * 1000)
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&_={timestamp}"
-        
-        r = session.get(url, timeout=10)
+        r = session.get(url, timeout=5)
         if r.status_code == 200:
             msg_arr = r.json().get('msgArray', [])
             if msg_arr:
                 t00 = msg_arr[0]
                 z_str = t00.get('z', '')
                 y_str = t00.get('y', '')
-                
                 spot_close = float(z_str.replace(',', '')) if z_str != '-' else float(y_str.replace(',', ''))
                 prev_close = float(y_str.replace(',', ''))
-                
-                pts = spot_close - prev_close
-                pct = (pts / prev_close) * 100 if prev_close > 0 else 0.0
-                
                 res['spot_close'] = spot_close
-                res['pts'] = pts
-                res['pct'] = pct
-    except Exception as e:
-        print(f"[大盤連線錯誤] {e}")
+                res['pts'] = spot_close - prev_close
+                res['pct'] = (res['pts'] / prev_close) * 100 if prev_close > 0 else 0.0
+    except Exception:
+        pass
 
-    # 2. 輔助取得 20 日均線
+    # [備援二] 若官方失敗(海外IP被封)，改打鉅亨網 API
+    if 'spot_close' not in res:
+        try:
+            r_anue = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWS:TSE01:INDEX", timeout=5)
+            if r_anue.status_code == 200:
+                data = r_anue.json().get('data', [])[0]
+                res['spot_close'] = float(data.get('200009', 0))
+                res['pts'] = float(data.get('200011', 0))
+                res['pct'] = float(data.get('200012', 0))
+        except Exception:
+            pass
+
+    # [備援三] 取得 20 日均線，並做最後 Yahoo 兜底
     ma20 = None
+    yf_close = None
     try:
         twii = yf.Ticker("^TWII")
         df_t = twii.history(period="1mo", interval="1d", auto_adjust=False)
         if not df_t.empty and len(df_t) >= 15:
             ma20 = float(df_t['Close'].rolling(20).mean().iloc[-1])
-    except Exception as e:
-        print(f"[大盤均線錯誤] {e}")
+            yf_close = float(df_t['Close'].iloc[-1])
+            yf_prev = float(df_t['Close'].iloc[-2])
+            yf_pts = yf_close - yf_prev
+            yf_pct = (yf_pts / yf_prev) * 100
+    except Exception:
+        pass
 
     if 'spot_close' not in res:
-        res['spot_close'] = 22500.0
-        res['pts'] = 0.0
-        res['pct'] = 0.0
-        
+        if yf_close:
+            res['spot_close'], res['pts'], res['pct'] = yf_close, yf_pts, yf_pct
+        else:
+            res['spot_close'], res['pts'], res['pct'] = 22500.0, 0.0, 0.0
+
     if ma20 is None or pd.isna(ma20):
         ma20 = res['spot_close'] * 0.98
 
@@ -182,51 +184,55 @@ def get_market_and_futures(stock_dict):
     res['trend'] = "多頭控盤" if res['spot_close'] >= ma20 else "弱勢整理"
     res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
-    # =========================================================================
-    # 3. 降維打擊：改用 yfinance 抓取台指期 (完美繞過機房 IP 限制)
-    # =========================================================================
+    # ==================== 2. 期貨抓取 ====================
+    # [備援一] 嘗試期交所官方
     try:
-        tx_ticker = yf.Ticker("TXF=F")
-        df_tx = tx_ticker.history(period="5d", interval="1d")
-        if not df_tx.empty and len(df_tx) >= 2:
-            latest_tx = float(df_tx['Close'].iloc[-1])
-            prev_tx = float(df_tx['Close'].iloc[-2])
-            pts_tx = latest_tx - prev_tx
-            pct_tx = (pts_tx / prev_tx) * 100
-            tx_quote = {"price": latest_tx, "diff": pts_tx, "rate": pct_tx}
-            print(f"[台指期爬取成功] Yahoo Finance 備援成功！即時報價: {latest_tx}")
-    except Exception as e:
-        print(f"[台指期 yfinance 抓取失敗] {e}")
+        session.get("https://mis.taifex.com.tw/futures/", timeout=3)
+        fut_headers = session.headers.copy()
+        fut_headers.update({
+            "Origin": "https://mis.taifex.com.tw",
+            "Referer": "https://mis.taifex.com.tw/futures/",
+            "Content-Type": "application/json;charset=UTF-8"
+        })
+        r_fut = session.post(
+            "https://mis.taifex.com.tw/futures/api/getQuoteList", 
+            json={"MarketType":"0","SymbolType":"F"}, 
+            headers=fut_headers, 
+            timeout=5
+        )
+        if r_fut.status_code == 200:
+            for item in r_fut.json().get('RtData', {}).get('QuoteList', []):
+                sym = item.get('SymbolID', '')
+                last_p_str = str(item.get('CLastPrice', '0')).replace(',', '')
+                if not last_p_str.replace('.', '', 1).isdigit(): continue
+                last_p = float(last_p_str)
+                
+                if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
+                    diff = float(str(item.get('CDiff', '0')).replace(',', ''))
+                    rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
+                    tx_quote = {"price": last_p, "diff": diff, "rate": rate}
+                
+                und_id = str(item.get('UnderlyingId', '')).strip()
+                if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
+                    if und_id not in stock_futures:
+                        stock_futures[und_id] = {"near": {"price": last_p}}
+    except Exception:
+        pass
 
-    # =========================================================================
-    # 4. 降維打擊：用第三方網站 (HiStock) 解析 HTML 抓取「個股期貨」
-    # =========================================================================
-    try:
-        # 建立反向查詢字典 (從名稱找代號)，因為網頁通常只顯示中文名稱
-        name_to_sid = {v[1]: v[0] for k, v in stock_dict.items()}
-        
-        # 解析 HiStock 嗨投資的期貨靜態 HTML 表格
-        url_histock = "https://histock.tw/stock/future.aspx"
-        r_hs = session.get(url_histock, timeout=10)
-        if r_hs.status_code == 200:
-            dfs = pd.read_html(r_hs.text)
-            for df in dfs:
-                if '標的名稱' in df.columns and '最新成交' in df.columns:
-                    for _, row in df.iterrows():
-                        name = str(row.get('標的名稱', '')).strip()
-                        price_str = str(row.get('最新成交', '0')).replace(',', '').strip()
-                        
-                        # 檢查價格格式是否為數字，且名稱存在於我們的股票池中
-                        if price_str.replace('.', '', 1).isdigit() and name in name_to_sid:
-                            price = float(price_str)
-                            sid = name_to_sid[name]
-                            stock_futures[sid] = {"near": {"price": price}}
-                            
-            print(f"[第三方個股期貨爬取] 成功從網頁擷取 {len(stock_futures)} 檔標的！")
-    except Exception as e:
-        print(f"[第三方個股期貨抓取失敗] 網頁結構可能改變: {e}")
+    # [備援二] 若官方期貨失敗，改打鉅亨網 API 抓取台指期
+    if not tx_quote:
+        try:
+            r_anue_tx = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWTX", timeout=5)
+            if r_anue_tx.status_code == 200:
+                data = r_anue_tx.json().get('data', [])[0]
+                tx_price = float(data.get('200009', 0))
+                tx_diff = float(data.get('200011', 0))
+                tx_rate = float(data.get('200012', 0))
+                if tx_price > 0:
+                    tx_quote = {"price": tx_price, "diff": tx_diff, "rate": tx_rate}
+        except Exception:
+            pass
 
-    # 組裝期貨字串
     if tx_quote and res['spot_close'] > 0:
         diff = tx_quote['price'] - res['spot_close']
         dtype = "正價差" if diff >= 0 else "逆價差"
@@ -242,11 +248,7 @@ def get_spot_orderbook(ticker_list):
         return book_dict
         
     session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp"
-    }
-    session.headers.update(headers)
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
     
     try:
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
@@ -257,7 +259,7 @@ def get_spot_orderbook(ticker_list):
             timestamp = int(datetime.now().timestamp() * 1000)
             url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}&_={timestamp}"
             
-            r = session.get(url, timeout=10)
+            r = session.get(url, timeout=5)
             if r.status_code == 200:
                 for m in r.json().get('msgArray', []):
                     sid = m.get('c', '')
@@ -266,8 +268,8 @@ def get_spot_orderbook(ticker_list):
                     ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
                     if sid: 
                         book_dict[sid] = {"ask1": ask_p, "last": last_p}
-    except Exception as e:
-        print(f"[五檔報價連線錯誤] {e}")
+    except Exception:
+        pass
         
     return book_dict
 
@@ -322,6 +324,9 @@ def main():
     print("啟動選股雷達...")
     session_name, trigger_type, date_str, is_chips_session = get_session_info()
     
+    print("抓取大盤與期貨資料...")
+    market_info, stock_futures = get_market_and_futures()
+    
     print("更新全市場股票池...")
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
@@ -329,10 +334,6 @@ def main():
     if not all_tickers: 
         print("未抓取到任何股票，程式結束。")
         return
-        
-    print("抓取大盤與期貨資料 (第三方備援機制)...")
-    # 這裡將 stock_dict 傳入，供個股名稱與代號比對使用
-    market_info, stock_futures = get_market_and_futures(stock_dict)
 
     print("抓取現貨五檔報價...")
     target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in stock_futures]
@@ -364,11 +365,6 @@ def main():
                 if df.empty or len(df) < 25: continue
 
                 sid, name, theme_str, original_ind = stock_dict[ticker]
-                
-                # 直接排除金融、營建、食品等低波動防禦性產業
-                if original_ind in EXCLUDED_SECTOR_INDUSTRIES:
-                    continue
-
                 today_close = float(df['Close'].iloc[-1])
                 today_vol = float(df['Volume'].iloc[-1])
                 
@@ -379,10 +375,6 @@ def main():
                 vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1]) if len(df) >= 5 else today_vol
                 atr_14 = calculate_atr(df, 14)
                 atr_pct = (atr_14 / today_close) * 100
-
-                # 過濾無波動之牛皮股
-                if atr_pct < 2.0:
-                    continue
 
                 # 高動能妖股篩選
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and vol_ma5 > 0:
@@ -419,13 +411,12 @@ def main():
                 # 波段結構篩選
                 p_res = analyze_pattern_stages(df, today_close, atr_14)
                 if p_res:
-                    score = p_res["score"] + (15 if theme_str != original_ind else 0) + (atr_pct * 2)
+                    score = p_res["score"] + (15 if theme_str != original_ind else 0)
                     scored_results.append({
                         "sid": sid, "name": name, "industry": original_ind,
                         "close": f"{today_close:.2f}", "score": score, **p_res
                     })
-        except Exception as e:
-            print(f"[資料處理錯誤] 批次分析發生例外: {e}")
+        except Exception:
             continue
 
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
@@ -434,7 +425,6 @@ def main():
     top_spreads = sorted(spread_candidates, key=lambda x: x['net_pct_abs'], reverse=True)[:1]
 
     fields = []
-    
     fields.append({
         "name": f" 📊 加權指數大盤解析 ({market_info['trend']})",
         "value": (
@@ -450,7 +440,7 @@ def main():
     if top_picks:
         for i, item in enumerate(top_picks):
             fields.append({
-                "name": f"📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
+                "name": f" 📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
                 "value": (
                     f"> **產業**: `{item['industry']}`\n"
                     f"> **進場區間**: `{item['entry']}`\n"
@@ -466,34 +456,35 @@ def main():
             if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
                 fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
     else:
-        fields.append({"name": " 💡 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
     fields.append({"name": f"───────── 🚀 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
             fields.append({
-                "name": f"🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
+                "name": f" 🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
                 "value": f"> **產業**: `{m['industry']}`\n> **爆量倍數**: `{m['vol_ratio']}x`\n> **進場區間**: `{m['entry']}`\n> **止盈 (TP)**: `{m['tp']}`\n> **止損 (SL)**: `{m['sl']}`",
                 "inline": True
             })
     else:
-        fields.append({"name": " 💡 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
 
-    fields.append({"name": f"───────── ⚡ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"───────── ⚖️ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
     if top_spreads:
         ts = top_spreads[0]
         fields.append({
-            "name": f"⚡ {ts['sid']} {ts['name']} ｜ {ts['signal']}",
+            "name": f" 🔄 {ts['sid']} {ts['name']} ｜ {ts['signal']}",
             "value": f"> **現貨價格**: `{ts['spot_p']}`\n> **期貨價格**: `{ts['fut_p']}`\n> **價差與淨利**: `{ts['diff_str']}`",
             "inline": False
         })
     else:
-        fields.append({"name": "⚡ 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
 
+    # 依照你的要求，動態組合標題文字
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
-            "title": f"台股{session_name}分析報告 ({trigger_type}) [{date_str}]",
+            "title": f"📈 台股{session_name}分析報告 ({trigger_type}) [{date_str}]",
             "description": "TOP6精選股 ｜ 妖股預測 ｜ 正逆價差分析",
             "color": 3447003,
             "fields": fields
