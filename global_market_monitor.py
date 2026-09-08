@@ -35,24 +35,37 @@ def send_msg(payload):
 def translate_to_zh(text):
     if not text:
         return ""
+    
+    encoded_text = urllib.parse.quote(text)
+    
+    # 第一層：嘗試 Google 翻譯
     try:
-        encoded_text = urllib.parse.quote(text)
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={encoded_text}"
-        
+        url_google = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={encoded_text}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
         }
-        
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url_google, headers=headers, timeout=5)
         if r.status_code == 200:
             res = r.json()
             return "".join([part[0] for part in res[0] if part[0]])
         else:
-            print(f"[翻譯警告] 狀態碼 {r.status_code}，原文: {text}")
-            
+            print(f"[Google 翻譯被擋] 狀態碼 {r.status_code}，準備啟動備用 API...")
     except Exception as e:
-        print(f"[翻譯錯誤] {e}，原文: {text}")
-        
+        print(f"[Google 翻譯錯誤] {e}，準備啟動備用 API...")
+
+    # 第二層：Google 失敗時，無縫切換 MyMemory 免費 API
+    try:
+        url_mymemory = f"https://api.mymemory.translated.net/get?q={encoded_text}&langpair=en|zh-TW"
+        r = requests.get(url_mymemory, timeout=5)
+        if r.status_code == 200:
+            res = r.json()
+            translated_text = res.get("responseData", {}).get("translatedText")
+            if translated_text:
+                return translated_text
+    except Exception as e:
+        print(f"[MyMemory 備用翻譯錯誤] {e}")
+
+    # 若兩個 API 都失敗，則退回原文
     return text
 
 def get_market_analysis(args):
@@ -71,25 +84,26 @@ def get_market_analysis(args):
         pct = (pts / prev_p) * 100
         ma20 = float(close_s.rolling(20).mean().iloc[-1])
 
+        # 依據圖片設計加入顏色 Emoji 邏輯
         if symbol == "^VIX":
             if latest_p >= 20.0:
-                struct_text = " 市場避險情緒升溫 (警戒)"
+                struct_text = "🔴 市場避險情緒升溫 (警戒)"
             elif latest_p <= 14.0:
-                struct_text = " 市場處於極度樂觀擴張期"
+                struct_text = "🟢 市場處於極度樂觀擴張期"
             else:
-                struct_text = " 處於常態震盪波動區間"
+                struct_text = "🟡 處於常態震盪波動區間"
             price_str = f"`{latest_p:.2f}` ({pts:+.2f} / {pct:+.2f}%)"
             
         elif symbol == "^TNX":
-            struct_text = " 殖利率攀升 壓抑高估值科技股" if pts > 0 else " 殖利率回落 科技股估值壓力緩解"
+            struct_text = "🔴 殖利率攀升 壓抑高估值科技股" if pts > 0 else "🟢 殖利率回落 科技股估值壓力緩解"
             price_str = f"`{latest_p:.3f}%` ({pts:+.3f}%)"
             
         elif symbol == "DX-Y.NYB":
-            struct_text = " 美元強勢 留意新興市場資金外流" if latest_p > ma20 else " 美元走弱 有利外資回流台股"
+            struct_text = "🔴 美元強勢 留意新興市場資金外流" if latest_p > ma20 else "🟢 美元走弱 有利外資回流台股"
             price_str = f"`{latest_p:.2f}` ({pts:+.2f} / {pct:+.2f}%)"
             
         else:
-            trend_icon = " 多頭強勢 (站穩月線)" if latest_p > ma20 else " 偏弱整理 (失守月線)"
+            trend_icon = "🟢 多頭強勢 (站穩月線)" if latest_p > ma20 else "🔴 偏弱整理 (失守月線)"
             struct_text = f"{trend_icon} ｜ 20MA `{ma20:,.2f}`"
             price_str = f"`{latest_p:,.2f}` ({pts:+,.2f} / {pct:+.2f}%)"
 
@@ -121,8 +135,7 @@ def fetch_macro_news():
                     link = canonical_url.get('url', '') if isinstance(canonical_url, dict) else ''
 
                 if title_en:
-                    # 加入 2 秒延遲，降低 GitHub Actions IP 被 Google 429 限流的機率
-                    time.sleep(2)
+                    time.sleep(2)  # 降低 API 請求頻率
                     title_zh = translate_to_zh(title_en)
                     
                     if link:
@@ -158,7 +171,7 @@ def main():
 
     fields = []
     fields.append({
-        "name": "─────────  隔夜全球市場 ＆ 宏觀指標掃描 ─────────",
+        "name": "───────── 🌐 隔夜全球市場 ＆ 宏觀指標掃描 ─────────",
         "value": "\u200b",
         "inline": False
     })
@@ -183,7 +196,7 @@ def main():
             })
 
     fields.append({
-        "name": "─────────  隔夜全球重磅財經快訊 (點擊看原文) ─────────",
+        "name": "───────── 📰 隔夜全球重磅財經快訊 (點擊看原文) ─────────",
         "value": "\n".join([f"> {n}" for n in news_list]),
         "inline": False
     })
@@ -191,7 +204,7 @@ def main():
     payload = {
         "username": "全球市場宏觀雷達",
         "embeds": [{
-            "title": f" 全球市場早盤監控報告 ({date_str} 08:00)",
+            "title": f"🌍 全球市場早盤監控報告 ({date_str} 08:00)",
             "description": "已完成美股隔夜收盤、VIX、公債殖利率、美元指數及重磅新聞解析：",
             "color": 1752220,
             "fields": fields
