@@ -1,9 +1,9 @@
 name: XAU Gold Quant Backtest
 
 on:
-  schedule:
+  # schedule:
     # 每天 UTC 00:00 (台北時間 08:00) 自動執行回測
-    - cron: '0 0 * * *'
+   # - cron: '0 0 * * *'
   workflow_dispatch: # 支援手動一鍵觸發
 
 jobs:
