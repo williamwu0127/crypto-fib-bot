@@ -10,9 +10,16 @@ import math
 from datetime import datetime, timezone, timedelta
 
 # Binance & Discord Setup
-BINANCE_API_KEY = "JfNAskj9UacTumBXxlQ6eB4JZpYgLaHQXhWnSSmoRWmM3cw5h15mH7H5tnhPb91Z"
-BINANCE_API_SECRET = "dHQPbgX70J1wffzL5TkSf1xquppT9FCUGyKJL9FgI0F7EzjdYy8W9eePQeL6mVTJ"
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
+
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+
+# 使用另一個專屬的變數名稱，用來區分不同的 Discord 頻道
+DISCORD_WEBHOOK_URL = os.getenv("CRYPTO_WEBHOOK_URL")
+
+# 防呆檢查，如果沒抓到變數就提早報錯
+if not all([BINANCE_API_KEY, BINANCE_API_SECRET, DISCORD_WEBHOOK_URL]):
+    print("警告：有環境變數未設定，請檢查 GitHub Secrets！")
 
 BASE_URL = "https://fapi.binance.com"
 TZ_TW = timezone(timedelta(hours=8))
