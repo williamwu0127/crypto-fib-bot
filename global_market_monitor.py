@@ -7,8 +7,8 @@ import concurrent.futures
 import time
 from datetime import datetime, timezone, timedelta
 
-# 直接寫死指定之 Discord Webhook
-WEBHOOK_URL = "https://discord.com/api/webhooks/1543491812101062697/qM1ZaG4UGxu5zoyWxWZJVeL3SLDNCcKTGobB4OhBYRAazuSHRz-WHn2mLSvJ9RwKgxgf"
+# 🚨 安全性升級：改用環境變數讀取 Webhook，與台股、匯率腳本統一使用 DISCORD_WEBHOOK_URL
+WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 GLOBAL_SYMBOLS = {
     "^GSPC": ("S&P 500", "美股大盤基準"),
@@ -24,6 +24,9 @@ GLOBAL_SYMBOLS = {
 }
 
 def send_msg(payload):
+    if not WEBHOOK_URL:
+        print("錯誤：找不到 DISCORD_WEBHOOK_URL 環境變數，請確保已在 GitHub Secrets 中設定！")
+        return
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         print(f"Discord 狀態碼: {r.status_code}")
@@ -174,6 +177,7 @@ def main():
     })
 
     for i, item in enumerate(analyzed_items):
+        # 視覺修復：補回漲跌符號
         emoji = "📈" if item["pct"] >= 0 else "📉"
         
         fields.append({
