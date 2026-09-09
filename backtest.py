@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 # ==================== 1. API 與 Discord 設定 ====================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_WEBHOOK_URL = os.getenv("CRYPTO_WEBHOOK_URL", "")
 
 BASE_URL = "https://fapi.binance.com"
 TZ_TW = timezone(timedelta(hours=8))
