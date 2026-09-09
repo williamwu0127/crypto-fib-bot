@@ -20,5 +20,5 @@ jobs:
 
       - name: 執行加密貨幣15m/1y 美股15m/60d量化回測
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.CRYPTO_WEBHOOK_URL }}
         run: python backtest.py
