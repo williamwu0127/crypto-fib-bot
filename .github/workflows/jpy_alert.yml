@@ -25,5 +25,7 @@ jobs:
           pip install requests pandas yfinance
 
       - name: Run JPY Monitor
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python jpy_monitor.py
