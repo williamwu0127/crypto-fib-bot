@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # 🚨 安全性升級：請將你的新 Webhook 設定在系統環境變數 "DISCORD_WEBHOOK" 中，切勿寫死在程式碼內
-WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
+WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 FRICTION_COST_PCT = 0.40
 
