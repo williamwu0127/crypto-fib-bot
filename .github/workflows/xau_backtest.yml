@@ -26,6 +26,6 @@ jobs:
 
       - name: Run Gold Backtest Engine
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.CRYPTO_WEBHOOK_URL }}
         run: |
           python xau_engine.py
