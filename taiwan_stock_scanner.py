@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -9,8 +10,10 @@ from datetime import datetime, timezone, timedelta
 # 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 🚨 Webhook 網址設定
+# 🚨 環境變數設定 (包含 Discord 與 Notion)
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 TARGET_THEMES = {
     "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
@@ -38,13 +41,57 @@ ALLOWED_MONSTER_INDUSTRIES = [
 
 def send_msg(payload):
     if not WEBHOOK_URL:
-        print("錯誤：找不到 Webhook URL 環境變數！")
+        print("警告：找不到 Discord Webhook URL！")
         return
     try:
-        r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
-        print(f"Discord 狀態碼: {r.status_code}")
+        requests.post(WEBHOOK_URL, json=payload, timeout=10)
     except Exception as e:
-        print(f"發送失敗: {e}")
+        print(f"Discord 發送失敗: {e}")
+
+# ==================== Notion API 寫入功能 ====================
+def send_to_notion(data_list, date_str, list_type):
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+        print("提示：未設定 Notion 變數，跳過寫入資料庫。")
+        return
+
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+
+    for item in data_list:
+        payload = {
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": {
+                "名稱": {
+                    "title": [{"text": {"content": f"{item['sid']} {item['name']}"}}]
+                },
+                "日期": {
+                    "date": {"start": date_str}
+                },
+                "清單類型": {
+                    "select": {"name": list_type}
+                },
+                "產業": {
+                    "select": {"name": item['industry']}
+                },
+                "進場區間": {
+                    "rich_text": [{"text": {"content": item.get('entry', '-')}}]
+                },
+                "爆量比例": {
+                    "rich_text": [{"text": {"content": item.get('vol_ratio', '-')}}]
+                }
+            }
+        }
+
+        try:
+            r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=10)
+            if r.status_code != 200:
+                print(f"Notion 寫入失敗 ({item['sid']}): {r.text}")
+            time.sleep(0.4) 
+        except Exception as e:
+            print(f"Notion 請求發生錯誤: {e}")
 
 def get_session_info():
     tz_tw = timezone(timedelta(hours=8))
@@ -121,7 +168,7 @@ def get_market_info():
     res = {}
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
-
+    
     try:
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=3)
         timestamp = int(datetime.now().timestamp() * 1000)
@@ -170,43 +217,88 @@ def calculate_atr(df, period=14):
     atr_val = tr.rolling(period).mean().iloc[-1]
     return float(atr_val) if not pd.isna(atr_val) else float(df['High'].iloc[-1] - df['Low'].iloc[-1])
 
-def analyze_pattern_stages(df, c_price, atr_14):
-    ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-    if c_price < ma20: return None
-
-    low_40d = df['Low'].iloc[-40:]
-    head_idx = low_40d.idxmin()
-    head_pos = low_40d.index.get_loc(head_idx)
-    head_price = float(low_40d.min())
+# ==================== 全新 SMC + Fibo 分析邏輯 ====================
+def analyze_smc_fibo(df, c_price, atr_14):
+    if len(df) < 40: return None
     
-    right_foot = float(low_40d.iloc[head_pos+1:].min()) if head_pos < len(low_40d)-1 else head_price
-    neck_high = float(df['High'].loc[low_40d.index[head_pos]:].max())
-    neck_low = round(neck_high * 0.985, 2)
-    recent_low_5d = float(df['Low'].iloc[-5:].min())
-
-    if c_price >= neck_high:
-        desc, status, score = "多頭破頸線 (階梯墊高)", "突破頸線 (轉強發動)", 90
-    elif c_price >= neck_low:
-        desc, status, score = "強勢箱型蓄勢 (回測支撐)", "突破後回測 (支撐確認)", 82
-    else:
+    recent_40d = df.iloc[-40:]
+    
+    # 1. 尋找波段低點與高點
+    swing_low_idx = recent_40d['Low'].idxmin()
+    swing_low = float(recent_40d['Low'].min())
+    
+    post_low_data = df.loc[swing_low_idx:]
+    if len(post_low_data) < 5: 
+        return None 
+        
+    swing_high = float(post_low_data['High'].max())
+    
+    # 破壞結構(CHoCH): 波段推動浪漲幅需 > 8%
+    if (swing_high - swing_low) / swing_low < 0.08:
         return None
-
-    sl_price = round(max(recent_low_5d * 0.99, c_price - atr_14 * 1.5, c_price * 0.94), 2)
+        
+    # 2. 計算 Fibo 回撤
+    move_range = swing_high - swing_low
+    fibo_382 = swing_high - move_range * 0.382
+    fibo_500 = swing_high - move_range * 0.500
+    fibo_618 = swing_high - move_range * 0.618
+    fibo_786 = swing_high - move_range * 0.786
+    
+    # 3. 尋找看多 FVG
+    bullish_fvgs = []
+    for i in range(2, len(post_low_data)):
+        k1_high = float(post_low_data['High'].iloc[i-2])
+        k3_low = float(post_low_data['Low'].iloc[i])
+        if k3_low > k1_high:
+            gap_size = k3_low - k1_high
+            if gap_size / c_price > 0.005: 
+                bullish_fvgs.append((round(k1_high, 2), round(k3_low, 2)))
+    
+    # 4. 評分與落點判斷
+    score = 0
+    status = ""
+    desc = ""
+    
+    if c_price > fibo_382:
+        return None # 溢價區拒絕追高
+        
+    elif fibo_786 <= c_price <= fibo_382:
+        status = "黃金折價區 (Discount)"
+        if fibo_618 <= c_price <= fibo_500:
+            desc = "落入 0.5~0.618 打擊區"
+            score = 90
+        elif c_price < fibo_618:
+            desc = "落入 0.618~0.786 防守區"
+            score = 85
+        else:
+            desc = "落入 0.382~0.5 淺回撤區"
+            score = 80
+    else:
+        return None # 跌破 0.786，波段可能失效
+        
+    # 5. FVG 驗證
+    fvg_match = "無明顯未補缺口"
+    for fvg in bullish_fvgs:
+        if fvg[0] * 0.985 <= c_price <= fvg[1] * 1.015:
+            score += 15 
+            fvg_match = f"{fvg[0]} ~ {fvg[1]}"
+            desc += " ＋ 踩入 FVG"
+            break
+            
+    sl_price = round(max(swing_low * 0.98, c_price - atr_14 * 1.5), 2)
     sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
-
-    box_height = neck_high - head_price
-    tp_price = round(c_price + max(box_height, atr_14 * 2.5), 2)
+    
+    tp_price = round(swing_high * 1.02, 2)
     tp_pct = round(((tp_price - c_price) / c_price) * 100, 2)
-
+    
     return {
         "status_text": f"{status} ｜ `{desc}`",
-        "neck_zone": f"{neck_low:.2f} ~ {neck_high:.2f}",
-        "left_strat": f"`{right_foot:.2f}` 已過",
-        "right_strat": f"突破 `{neck_high:.2f}` 站穩加碼 ｜ 回測 `{neck_low:.2f}` 承接",
+        "fibo_level": f"{fibo_618:.2f} ~ {fibo_500:.2f}",
+        "fvg_zone": fvg_match,
         "tp": f"{tp_price} (+{tp_pct}%)",
         "sl": f"{sl_price} ({sl_pct}%)",
-        "entry": f"{round(c_price * 0.992, 2):.2f} ~ {round(c_price * 1.006, 2):.2f}",
-        "score": score
+        "entry": f"{round(c_price * 0.99, 2):.2f} ~ {round(c_price * 1.01, 2):.2f}",
+        "score": min(score, 99)
     }
 
 def main():
@@ -224,7 +316,6 @@ def main():
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            # 批次下載日線與15分線
             df_batch_1d = yf.download(chunk, period="3mo", interval="1d", auto_adjust=True, progress=False)
             df_batch_15m = yf.download(chunk, period="5d", interval="15m", progress=False)
             
@@ -232,7 +323,6 @@ def main():
                 df_1d = pd.DataFrame()
                 df_15m = pd.DataFrame()
                 
-                # 處理 1d 資料萃取
                 if isinstance(df_batch_1d.columns, pd.MultiIndex):
                     if ticker in df_batch_1d.columns.get_level_values(1):
                         df_1d['Close'] = df_batch_1d['Close'][ticker]
@@ -242,7 +332,6 @@ def main():
                 else:
                     if len(chunk) == 1: df_1d = df_batch_1d.copy()
                 
-                # 處理 15m 資料萃取
                 if isinstance(df_batch_15m.columns, pd.MultiIndex):
                     if ticker in df_batch_15m.columns.get_level_values(1):
                         df_15m['Volume'] = df_batch_15m['Volume'][ticker]
@@ -254,7 +343,6 @@ def main():
 
                 sid, name, theme_str, original_ind = stock_dict[ticker]
                 
-                # 計算目前股價與昨日收盤價，用於判斷漲跌幅
                 today_close = float(df_1d['Close'].iloc[-1])
                 today_vol = float(df_1d['Volume'].iloc[-1])
                 prev_close = float(df_1d['Close'].iloc[-2]) if len(df_1d) >= 2 else today_close
@@ -266,7 +354,7 @@ def main():
                 
                 atr_14 = calculate_atr(df_1d, 14)
 
-                # --- 1. 妖股分析：固定抓取今天前兩根 15分K (09:00~09:30) 的量 ---
+                # --- 1. 妖股分析 ---
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and not df_15m.empty:
                     df_1d_dates = df_1d.index.date
                     df_15m_dates = df_15m.index.date
@@ -277,7 +365,6 @@ def main():
                     
                     if not df_1d_past.empty and not df_15m_today.empty:
                         past_5d_vol = df_1d_past['Volume'].iloc[-5:].mean()
-                        # 無論幾點執行，這裡都固定切片前2根 (確保找出早上同一批標的)
                         today_30m_vol = df_15m_today['Volume'].iloc[:2].sum()
                         
                         threshold = past_5d_vol * 0.3
@@ -288,7 +375,7 @@ def main():
                             monster_candidates.append({
                                 "sid": sid, "name": name, "industry": original_ind,
                                 "close": f"{today_close:.2f}", 
-                                "today_pct": today_pct, # 記錄當前漲跌幅
+                                "today_pct": today_pct, 
                                 "today_30m_vol": int(today_30m_vol),
                                 "past_5d_vol": int(past_5d_vol),
                                 "vol_ratio": f"{vol_ratio*100:.1f}%",
@@ -298,9 +385,9 @@ def main():
                                 "score": vol_ratio
                             })
 
-                # --- 2. TOP 8 篩選：排除金融股 ---
+                # --- 2. TOP 8 篩選 (替換為 SMC/Fibo 邏輯) ---
                 if original_ind != "金融保險業":
-                    p_res = analyze_pattern_stages(df_1d, today_close, atr_14)
+                    p_res = analyze_smc_fibo(df_1d, today_close, atr_14)
                     if p_res:
                         score = p_res["score"] + (15 if theme_str != original_ind else 0)
                         scored_results.append({
@@ -311,13 +398,23 @@ def main():
         except Exception as e:
             continue
 
-    # 排序與切片 (精選取8、妖股取6)
+    # 排序與切片
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
     top_picks = sorted_all[:8]
     top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:6]
 
+    # ========== 觸發 Notion 寫入機制 ==========
+    if session_name == "早盤動能" and top_monsters:
+        print("觸發寫入 Notion：早盤妖股")
+        send_to_notion(top_monsters, date_str, "早盤妖股")
+        
+    elif session_name == "盤後" and top_picks:
+        print("觸發寫入 Notion：盤後精選股")
+        send_to_notion(top_picks, date_str, "精選股")
+    # ====================================================
+
+    # --- 發送到 Discord 的排版邏輯 ---
     fields = []
-    # --- 全時段共用大盤資訊 ---
     fields.append({
         "name": f" 📊 加權指數大盤解析 ({market_info['trend']})",
         "value": (
@@ -328,10 +425,8 @@ def main():
         "inline": False
     })
     
-    # --- 時段判斷排版邏輯 ---
     if session_name == "早盤動能":
         description_text = "📣 早盤高動能妖股專屬通報"
-        
         fields.append({"name": f"───────── 📣 09:50 爆量妖股通報 (Top 6) ─────────", "value": "\u200b", "inline": False})
         if top_monsters:
             for m in top_monsters:
@@ -351,11 +446,10 @@ def main():
 
     else:
         description_text = "TOP8精選股(非金融) ｜ 早盤妖股驗證追蹤"
-        
-        # 1. 顯示精選 Top 8
         fields.append({"name": f"───────── 🎯 {session_name}精選 Top 8 (已排除金融) ─────────", "value": "\u200b", "inline": False})
         if top_picks:
             for i, item in enumerate(top_picks):
+                # 這裡的排版結構與原版完全一致，僅替換對應的標籤名稱以符合新策略
                 fields.append({
                     "name": f" 📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
                     "value": (
@@ -363,19 +457,17 @@ def main():
                         f"> **進場區間**: `{item['entry']}`\n"
                         f"> **止盈 (TP)**: `{item['tp']}`\n"
                         f"> **止損 (SL)**: `{item['sl']}`\n"
-                        f"> **頸線區間**: `{item['neck_zone']}`\n"
-                        f"> **右側策略**: {item['right_strat']}\n"
+                        f"> **Fibo 區間**: `{item['fibo_level']}`\n"
+                        f"> **FVG 缺口**: `{item['fvg_zone']}`\n"
                         f"> **結構狀態**: {item['status_text']}"
                     ),
                     "inline": True
                 })
-                # 排版補位用
                 if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
                     fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
         else:
             fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
-        # 2. 妖股版面處理 (盤前顯示無資料，盤中盤後顯示驗證結果)
         if session_name == "盤前":
             fields.append({"name": f"───────── 🚀 開盤半小時爆量妖股預警 ─────────", "value": "\u200b", "inline": False})
             fields.append({"name": " 狀態提示", "value": "> 股市尚未開盤，目前無今日動能數據", "inline": False})
@@ -383,7 +475,6 @@ def main():
             fields.append({"name": f"───────── 🚀 早盤妖股盤中表現驗證 (Top 6) ─────────", "value": "\u200b", "inline": False})
             if top_monsters:
                 for m in top_monsters:
-                    # 判斷是否漲停 (台股漲跌幅限制 10%，大於 9.5% 通常即為觸及或鎖死漲停)
                     if m['today_pct'] >= 9.5:
                         perf_str = f"🎯 **漲停鎖死** (`+{m['today_pct']:.2f}%`)"
                     elif m['today_pct'] > 0:
