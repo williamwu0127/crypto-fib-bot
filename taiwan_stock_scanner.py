@@ -217,13 +217,29 @@ def calculate_atr(df, period=14):
     atr_val = tr.rolling(period).mean().iloc[-1]
     return float(atr_val) if not pd.isna(atr_val) else float(df['High'].iloc[-1] - df['Low'].iloc[-1])
 
-# ==================== 全新 SMC + Fibo 分析邏輯 ====================
+# ==================== 全新 SMC + Fibo 雙濾網分析邏輯 ====================
 def analyze_smc_fibo(df, c_price, atr_14):
-    if len(df) < 40: return None
+    # 計算 60MA 需要足夠資料
+    if len(df) < 60: return None
     
+    # === 濾網 1：均線多頭排列 ===
+    ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+    ma60 = float(df['Close'].rolling(60).mean().iloc[-1])
+    
+    # 月線必須大於季線，且股價不跌破季線
+    if ma20 < ma60 or c_price < ma60:
+        return None
+        
+    # === 濾網 2：回撤量縮判定 ===
+    # 近 3 日平均量需小於 20 日均量的 75%
+    vol_ma3 = float(df['Volume'].iloc[-3:].mean())
+    vol_ma20 = float(df['Volume'].rolling(20).mean().iloc[-1])
+    
+    if vol_ma3 > vol_ma20 * 0.75:
+        return None 
+        
+    # --- 1. 尋找波段低點與高點 ---
     recent_40d = df.iloc[-40:]
-    
-    # 1. 尋找波段低點與高點
     swing_low_idx = recent_40d['Low'].idxmin()
     swing_low = float(recent_40d['Low'].min())
     
@@ -237,14 +253,14 @@ def analyze_smc_fibo(df, c_price, atr_14):
     if (swing_high - swing_low) / swing_low < 0.08:
         return None
         
-    # 2. 計算 Fibo 回撤
+    # --- 2. 計算 Fibo 回撤 ---
     move_range = swing_high - swing_low
     fibo_382 = swing_high - move_range * 0.382
     fibo_500 = swing_high - move_range * 0.500
     fibo_618 = swing_high - move_range * 0.618
     fibo_786 = swing_high - move_range * 0.786
     
-    # 3. 尋找看多 FVG
+    # --- 3. 尋找看多 FVG ---
     bullish_fvgs = []
     for i in range(2, len(post_low_data)):
         k1_high = float(post_low_data['High'].iloc[i-2])
@@ -254,7 +270,7 @@ def analyze_smc_fibo(df, c_price, atr_14):
             if gap_size / c_price > 0.005: 
                 bullish_fvgs.append((round(k1_high, 2), round(k3_low, 2)))
     
-    # 4. 評分與落點判斷
+    # --- 4. 評分與落點判斷 ---
     score = 0
     status = ""
     desc = ""
@@ -276,7 +292,7 @@ def analyze_smc_fibo(df, c_price, atr_14):
     else:
         return None # 跌破 0.786，波段可能失效
         
-    # 5. FVG 驗證
+    # --- 5. FVG 驗證 ---
     fvg_match = "無明顯未補缺口"
     for fvg in bullish_fvgs:
         if fvg[0] * 0.985 <= c_price <= fvg[1] * 1.015:
@@ -285,6 +301,7 @@ def analyze_smc_fibo(df, c_price, atr_14):
             desc += " ＋ 踩入 FVG"
             break
             
+    # --- 6. 停損停利設定 ---
     sl_price = round(max(swing_low * 0.98, c_price - atr_14 * 1.5), 2)
     sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
     
@@ -316,7 +333,8 @@ def main():
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            df_batch_1d = yf.download(chunk, period="3mo", interval="1d", auto_adjust=True, progress=False)
+            # 修改抓取長度為 6mo 以計算季線
+            df_batch_1d = yf.download(chunk, period="6mo", interval="1d", auto_adjust=True, progress=False)
             df_batch_15m = yf.download(chunk, period="5d", interval="15m", progress=False)
             
             for ticker in chunk:
@@ -385,7 +403,7 @@ def main():
                                 "score": vol_ratio
                             })
 
-                # --- 2. TOP 8 篩選 (替換為 SMC/Fibo 邏輯) ---
+                # --- 2. TOP 8 篩選 (SMC/Fibo 雙濾網邏輯) ---
                 if original_ind != "金融保險業":
                     p_res = analyze_smc_fibo(df_1d, today_close, atr_14)
                     if p_res:
@@ -449,7 +467,6 @@ def main():
         fields.append({"name": f"───────── 🎯 {session_name}精選 Top 8  ─────────", "value": "\u200b", "inline": False})
         if top_picks:
             for i, item in enumerate(top_picks):
-                # 這裡的排版結構與原版完全一致，僅替換對應的標籤名稱以符合新策略
                 fields.append({
                     "name": f" 📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
                     "value": (
