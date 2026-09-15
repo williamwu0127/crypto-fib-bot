@@ -9,10 +9,8 @@ from datetime import datetime, timezone, timedelta
 # 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 🚨 安全性升級：請將你的新 Webhook 設定在系統環境變數 "DISCORD_WEBHOOK" 中，切勿寫死在程式碼內
+# 🚨 安全性升級：請將你的新 Webhook 設定在系統環境變數 "DISCORD_WEBHOOK_URL" 中
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
-FRICTION_COST_PCT = 0.40
 
 TARGET_THEMES = {
     "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
@@ -65,7 +63,7 @@ def get_session_info():
     else: 
         session_name = "籌碼"
 
-    return session_name, trigger_type, now_tw.strftime("%Y-%m-%d"), (session_name == "籌碼")
+    return session_name, trigger_type, now_tw.strftime("%Y-%m-%d")
 
 def identify_theme(sid, original_ind):
     for theme, sids in TARGET_THEMES.items():
@@ -117,15 +115,11 @@ def get_dynamic_all_stocks():
             stock_dict[f"{sid}.{mkt}"] = (sid, name, theme, ind)
     return stock_dict
 
-def get_market_and_futures():
+def get_market_info():
     res = {}
-    stock_futures = {}
-    tx_quote = None
-    
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    # 1. 抓取大盤
     try:
         session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=3)
         timestamp = int(datetime.now().timestamp() * 1000)
@@ -175,92 +169,7 @@ def get_market_and_futures():
     res['trend'] = "多頭控盤" if res['spot_close'] >= ma20 else "弱勢整理"
     res['emoji'] = "🟢" if res['pts'] >= 0 else "🔴"
 
-    # 2. 抓取期貨 (TAIFEX -> Anue API)
-    try:
-        session.get("https://mis.taifex.com.tw/futures/", timeout=3)
-        fut_headers = session.headers.copy()
-        fut_headers.update({
-            "Origin": "https://mis.taifex.com.tw",
-            "Referer": "https://mis.taifex.com.tw/futures/",
-            "Content-Type": "application/json;charset=UTF-8"
-        })
-        r_fut = session.post(
-            "https://mis.taifex.com.tw/futures/api/getQuoteList", 
-            json={"MarketType":"0","SymbolType":"F"}, 
-            headers=fut_headers, 
-            timeout=5
-        )
-        if r_fut.status_code == 200:
-            for item in r_fut.json().get('RtData', {}).get('QuoteList', []):
-                sym = item.get('SymbolID', '')
-                last_p_str = str(item.get('CLastPrice', '0')).replace(',', '')
-                if not last_p_str.replace('.', '', 1).isdigit(): continue
-                last_p = float(last_p_str)
-                
-                if sym.startswith('TX') and '-' not in sym and last_p > 5000 and not tx_quote:
-                    diff = float(str(item.get('CDiff', '0')).replace(',', ''))
-                    rate = float(str(item.get('CDiffRate', '0')).replace(',', ''))
-                    tx_quote = {"price": last_p, "diff": diff, "rate": rate}
-                
-                und_id = str(item.get('UnderlyingId', '')).strip()
-                if und_id.isdigit() and len(und_id) == 4 and last_p > 0 and '-' not in sym:
-                    if und_id not in stock_futures:
-                        stock_futures[und_id] = {"near": {"price": last_p}}
-    except Exception:
-        pass
-
-    # 若官方期貨失敗，啟用強化版鉅亨網 API 抓取
-    if not tx_quote:
-        try:
-            r_anue_tx = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWTX", timeout=5)
-            if r_anue_tx.status_code == 200:
-                data = r_anue_tx.json().get('data', [])
-                if data:
-                    tx_price = float(data[0].get('200009', 0))
-                    tx_diff = float(data[0].get('200011', 0))
-                    tx_rate = float(data[0].get('200012', 0))
-                    if tx_price > 0:
-                        tx_quote = {"price": tx_price, "diff": tx_diff, "rate": tx_rate}
-        except Exception as e:
-            print(f"[鉅亨網期貨備援失敗] {e}")
-
-    if tx_quote and res['spot_close'] > 0:
-        diff = tx_quote['price'] - res['spot_close']
-        dtype = "正價差" if diff >= 0 else "逆價差"
-        res['futures_str'] = f"`{tx_quote['price']:,.2f}` ({tx_quote['diff']:+,.2f} / {tx_quote['rate']:+.2f}%) ｜ {dtype} `{abs(diff):,.2f}` 點"
-    else:
-        res['futures_str'] = "即時撮合中 / 資料擷取失敗"
-
-    return res, stock_futures
-
-def get_spot_orderbook(ticker_list):
-    book_dict = {}
-    if not ticker_list: return book_dict
-        
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
-    
-    try:
-        session.get("https://mis.twse.com.tw/stock/index.jsp", timeout=5)
-        chunk_size = 50
-        for i in range(0, len(ticker_list), chunk_size):
-            chunk = ticker_list[i:i + chunk_size]
-            query_keys = [f"{'tse' if t.split('.')[1] == 'TW' else 'otc'}_{t.split('.')[0]}.tw" for t in chunk]
-            timestamp = int(datetime.now().timestamp() * 1000)
-            url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(query_keys)}&_={timestamp}"
-            
-            r = session.get(url, timeout=5)
-            if r.status_code == 200:
-                for m in r.json().get('msgArray', []):
-                    sid = m.get('c', '')
-                    ask_str = m.get('a', '_').split('_')[0]
-                    last_p = float(m.get('z', '0')) if m.get('z', '0') != '-' else 0.0
-                    ask_p = float(ask_str) if ask_str.replace('.', '', 1).isdigit() else last_p
-                    if sid: book_dict[sid] = {"ask1": ask_p, "last": last_p}
-    except Exception:
-        pass
-        
-    return book_dict
+    return res
 
 def calculate_atr(df, period=14):
     tr1 = df['High'] - df['Low']
@@ -310,96 +219,109 @@ def analyze_pattern_stages(df, c_price, atr_14):
     }
 
 def main():
-    session_name, trigger_type, date_str, is_chips_session = get_session_info()
-    market_info, stock_futures = get_market_and_futures()
+    session_name, trigger_type, date_str = get_session_info()
+    market_info = get_market_info()
     stock_dict = get_dynamic_all_stocks()
     all_tickers = list(stock_dict.keys())
     
     if not all_tickers: return
 
-    target_spot_tickers = [t for t in all_tickers if t.split('.')[0] in stock_futures]
-    spot_book = get_spot_orderbook(target_spot_tickers)
-
     scored_results = []
     monster_candidates = []
-    spread_candidates = []
 
     chunk_size = 150
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            df_batch = yf.download(chunk, period="3mo", interval="1d", auto_adjust=True, progress=False)
+            # 批次下載日線與15分線
+            df_batch_1d = yf.download(chunk, period="3mo", interval="1d", auto_adjust=True, progress=False)
+            df_batch_15m = yf.download(chunk, period="5d", interval="15m", progress=False)
             
             for ticker in chunk:
-                df = pd.DataFrame()
-                if isinstance(df_batch.columns, pd.MultiIndex):
-                    if ticker in df_batch.columns.get_level_values(1):
-                        df['Close'] = df_batch['Close'][ticker]
-                        df['High'] = df_batch['High'][ticker]
-                        df['Low'] = df_batch['Low'][ticker]
-                        df['Volume'] = df_batch['Volume'][ticker]
-                else:
-                    if len(chunk) == 1: df = df_batch.copy()
+                df_1d = pd.DataFrame()
+                df_15m = pd.DataFrame()
                 
-                df = df.dropna()
-                if df.empty or len(df) < 25: continue
+                # 處理 1d 資料萃取
+                if isinstance(df_batch_1d.columns, pd.MultiIndex):
+                    if ticker in df_batch_1d.columns.get_level_values(1):
+                        df_1d['Close'] = df_batch_1d['Close'][ticker]
+                        df_1d['High'] = df_batch_1d['High'][ticker]
+                        df_1d['Low'] = df_batch_1d['Low'][ticker]
+                        df_1d['Volume'] = df_batch_1d['Volume'][ticker]
+                else:
+                    if len(chunk) == 1: df_1d = df_batch_1d.copy()
+                
+                # 處理 15m 資料萃取
+                if isinstance(df_batch_15m.columns, pd.MultiIndex):
+                    if ticker in df_batch_15m.columns.get_level_values(1):
+                        df_15m['Volume'] = df_batch_15m['Volume'][ticker]
+                else:
+                    if len(chunk) == 1: df_15m = df_batch_15m.copy()
+                
+                df_1d = df_1d.dropna()
+                if df_1d.empty or len(df_1d) < 25: continue
 
                 sid, name, theme_str, original_ind = stock_dict[ticker]
-                today_close = float(df['Close'].iloc[-1])
-                today_vol = float(df['Volume'].iloc[-1])
+                today_close = float(df_1d['Close'].iloc[-1])
+                today_vol = float(df_1d['Volume'].iloc[-1])
                 
                 est_money_mil = (today_close * today_vol) / 100_000_000
                 if est_money_mil < 1.0 or today_close < 10.0:
                     continue
+                
+                atr_14 = calculate_atr(df_1d, 14)
 
-                vol_ma5 = float(df['Volume'].rolling(5).mean().iloc[-1]) if len(df) >= 5 else today_vol
-                atr_14 = calculate_atr(df, 14)
-                atr_pct = (atr_14 / today_close) * 100
-
-                if original_ind in ALLOWED_MONSTER_INDUSTRIES and vol_ma5 > 0:
-                    vol_ratio = round(today_vol / vol_ma5, 1)
-                    if vol_ratio >= 2.5 and atr_pct >= 3.5:
-                        m_sl = round(max(float(df['Low'].iloc[-5:].min()) * 0.99, today_close - atr_14 * 1.5), 2)
-                        m_tp = round(today_close + atr_14 * 3.5, 2)
-                        monster_candidates.append({
-                            "sid": sid, "name": name, "industry": original_ind,
-                            "close": f"{today_close:.2f}", "vol_ratio": vol_ratio,
-                            "entry": f"{round(today_close*0.992,2)} ~ {round(today_close*1.006,2)}",
-                            "tp": f"{m_tp} (+{round(((m_tp-today_close)/today_close)*100,2)}%)",
-                            "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100,2)}%)",
-                            "score": vol_ratio * atr_pct
-                        })
-
-                if sid in stock_futures:
-                    near_f = stock_futures[sid].get("near")
-                    if near_f:
-                        spot_p = spot_book.get(sid, {}).get('last', today_close)
-                        fut_p = near_f['price']
-                        diff_val = fut_p - spot_p
-                        net_pct = (diff_val / spot_p) * 100 - FRICTION_COST_PCT
-                        if diff_val != 0 and abs((diff_val / spot_p) * 100) >= 0.5:
-                            spread_candidates.append({
+                # --- 1. 妖股分析：開盤半小時放量邏輯 ---
+                if original_ind in ALLOWED_MONSTER_INDUSTRIES and not df_15m.empty:
+                    df_1d_dates = df_1d.index.date
+                    df_15m_dates = df_15m.index.date
+                    today_date = df_1d_dates[-1]
+                    
+                    df_1d_past = df_1d[df_1d_dates < today_date]
+                    df_15m_today = df_15m[df_15m_dates == today_date]
+                    
+                    if not df_1d_past.empty and not df_15m_today.empty:
+                        # 過去 5 天均量
+                        past_5d_vol = df_1d_past['Volume'].iloc[-5:].mean()
+                        # 今天前兩根 15分K (09:00~09:30) 的量
+                        today_30m_vol = df_15m_today['Volume'].iloc[:2].sum()
+                        
+                        threshold = past_5d_vol * 0.3
+                        if past_5d_vol > 0 and today_30m_vol > threshold:
+                            vol_ratio = today_30m_vol / past_5d_vol
+                            m_sl = round(max(float(df_1d['Low'].iloc[-5:].min()) * 0.99, today_close - atr_14 * 1.5), 2)
+                            m_tp = round(today_close + atr_14 * 3.5, 2)
+                            monster_candidates.append({
                                 "sid": sid, "name": name, "industry": original_ind,
-                                "spot_p": f"{spot_p:,.2f}", "fut_p": f"{fut_p:,.2f}",
-                                "diff_str": f"{diff_val:+,.2f} ({net_pct:+.2f}%)",
-                                "signal": "正價差套利" if diff_val > 0 else "逆價差套利",
-                                "net_pct_abs": abs(net_pct)
+                                "close": f"{today_close:.2f}", 
+                                "today_30m_vol": int(today_30m_vol),
+                                "past_5d_vol": int(past_5d_vol),
+                                "vol_ratio": f"{vol_ratio*100:.1f}%",
+                                "entry": f"{round(today_close*0.992,2)} ~ {round(today_close*1.006,2)}",
+                                "tp": f"{m_tp} (+{round(((m_tp-today_close)/today_close)*100,2)}%)",
+                                "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100,2)}%)",
+                                "score": vol_ratio
                             })
 
-                p_res = analyze_pattern_stages(df, today_close, atr_14)
-                if p_res:
-                    score = p_res["score"] + (15 if theme_str != original_ind else 0)
-                    scored_results.append({
-                        "sid": sid, "name": name, "industry": original_ind,
-                        "close": f"{today_close:.2f}", "score": score, **p_res
-                    })
-        except Exception:
+                # --- 2. TOP 6 篩選：排除金融股 ---
+                if original_ind != "金融保險業":
+                    p_res = analyze_pattern_stages(df_1d, today_close, atr_14)
+                    if p_res:
+                        score = p_res["score"] + (15 if theme_str != original_ind else 0)
+                        scored_results.append({
+                            "sid": sid, "name": name, "industry": original_ind,
+                            "close": f"{today_close:.2f}", "score": score, **p_res
+                        })
+                        
+        except Exception as e:
+            print(f"處理區塊發生錯誤: {e}")
             continue
 
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
     top_picks = sorted_all[:6]
-    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:2]
-    top_spreads = sorted(spread_candidates, key=lambda x: x['net_pct_abs'], reverse=True)[:1]
+    
+    # 妖股上限改為 4 組
+    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:4]
 
     fields = []
     fields.append({
@@ -407,13 +329,12 @@ def main():
         "value": (
             f"> **收盤點位**: `{market_info['spot_close']:,.2f}`\n"
             f"> **單日漲跌**: `{market_info['pts']:+,.2f}` ({market_info['pct']:+.2f}%) {market_info['emoji']}\n"
-            f"> **防守月線**: `{market_info['ma20']:,.2f}`\n"
-            f"> **台指期貨**: {market_info.get('futures_str', '即時撮合中')}"
+            f"> **防守月線**: `{market_info['ma20']:,.2f}`"
         ),
         "inline": False
     })
     
-    fields.append({"name": f"───────── 🎯 {session_name}精選 Top 6 ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"───────── 🎯 {session_name}精選 Top 6 (已排除金融) ─────────", "value": "\u200b", "inline": False})
     if top_picks:
         for i, item in enumerate(top_picks):
             fields.append({
@@ -435,33 +356,28 @@ def main():
     else:
         fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
 
-    fields.append({"name": f"───────── 🚀 高動能妖股預警 (Top 2) ─────────", "value": "\u200b", "inline": False})
+    fields.append({"name": f"───────── 🚀 開盤半小時爆量妖股預警 (Top 4) ─────────", "value": "\u200b", "inline": False})
     if top_monsters:
         for m in top_monsters:
             fields.append({
                 "name": f" 🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
-                "value": f"> **產業**: `{m['industry']}`\n> **爆量倍數**: `{m['vol_ratio']}x`\n> **進場區間**: `{m['entry']}`\n> **止盈 (TP)**: `{m['tp']}`\n> **止損 (SL)**: `{m['sl']}`",
+                "value": (
+                    f"> **產業**: `{m['industry']}`\n"
+                    f"> **半小時量**: `{m['today_30m_vol']}` / 均量: `{m['past_5d_vol']}`\n"
+                    f"> **爆量比例**: `{m['vol_ratio']}`\n"
+                    f"> **進場區間**: `{m['entry']}`\n"
+                    f"> **止盈**: `{m['tp']}` ｜ **止損**: `{m['sl']}`"
+                ),
                 "inline": True
             })
     else:
-        fields.append({"name": " 狀態提示", "value": "> 今日無符合高動能妖股特徵之標的", "inline": False})
-
-    fields.append({"name": f"───────── ⚖️ 期現貨價差套利焦點 ─────────", "value": "\u200b", "inline": False})
-    if top_spreads:
-        ts = top_spreads[0]
-        fields.append({
-            "name": f" 🔄 {ts['sid']} {ts['name']} ｜ {ts['signal']}",
-            "value": f"> **現貨價格**: `{ts['spot_p']}`\n> **期貨價格**: `{ts['fut_p']}`\n> **價差與淨利**: `{ts['diff_str']}`",
-            "inline": False
-        })
-    else:
-        fields.append({"name": " 狀態提示", "value": "> 暫無顯著正逆價差套利標的", "inline": False})
+        fields.append({"name": " 狀態提示", "value": "> 今日無符合開盤半小時高動能爆量之標的", "inline": False})
 
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股{session_name}分析報告 ({trigger_type})\n[{date_str}]",
-            "description": "TOP6精選股 ｜ 妖股預測 ｜ 正逆價差分析",
+            "description": "TOP6精選股(非金融) ｜ 半小時爆量分析",
             "color": 3447003,
             "fields": fields
         }]
