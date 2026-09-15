@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 # 關閉 yfinance 煩人的警告訊息
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-# 🚨 安全性升級：請將你的新 Webhook 設定在系統環境變數 "DISCORD_WEBHOOK_URL" 中
+# 🚨 Webhook 網址設定
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 TARGET_THEMES = {
@@ -56,7 +56,9 @@ def get_session_info():
     time_val = now_tw.hour * 100 + now_tw.minute
     if time_val < 900: 
         session_name = "盤前"
-    elif 900 <= time_val <= 1330: 
+    elif 900 <= time_val <= 1030: 
+        session_name = "早盤動能"
+    elif 1030 < time_val <= 1330: 
         session_name = "盤中"
     elif 1330 < time_val < 1745: 
         session_name = "盤後"
@@ -138,17 +140,6 @@ def get_market_info():
                 res['pct'] = (res['pts'] / prev_close) * 100 if prev_close > 0 else 0.0
     except Exception:
         pass
-
-    if 'spot_close' not in res:
-        try:
-            r_anue = requests.get("https://ws.api.cnyes.com/ws/api/v1/quote/quotes/TWS:TSE01:INDEX", timeout=5)
-            if r_anue.status_code == 200:
-                data = r_anue.json().get('data', [])[0]
-                res['spot_close'] = float(data.get('200009', 0))
-                res['pts'] = float(data.get('200011', 0))
-                res['pct'] = float(data.get('200012', 0))
-        except Exception:
-            pass
 
     ma20 = None
     try:
@@ -262,8 +253,12 @@ def main():
                 if df_1d.empty or len(df_1d) < 25: continue
 
                 sid, name, theme_str, original_ind = stock_dict[ticker]
+                
+                # 計算目前股價與昨日收盤價，用於判斷漲跌幅
                 today_close = float(df_1d['Close'].iloc[-1])
                 today_vol = float(df_1d['Volume'].iloc[-1])
+                prev_close = float(df_1d['Close'].iloc[-2]) if len(df_1d) >= 2 else today_close
+                today_pct = ((today_close - prev_close) / prev_close) * 100
                 
                 est_money_mil = (today_close * today_vol) / 100_000_000
                 if est_money_mil < 1.0 or today_close < 10.0:
@@ -271,7 +266,7 @@ def main():
                 
                 atr_14 = calculate_atr(df_1d, 14)
 
-                # --- 1. 妖股分析：開盤半小時放量邏輯 ---
+                # --- 1. 妖股分析：固定抓取今天前兩根 15分K (09:00~09:30) 的量 ---
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and not df_15m.empty:
                     df_1d_dates = df_1d.index.date
                     df_15m_dates = df_15m.index.date
@@ -281,9 +276,8 @@ def main():
                     df_15m_today = df_15m[df_15m_dates == today_date]
                     
                     if not df_1d_past.empty and not df_15m_today.empty:
-                        # 過去 5 天均量
                         past_5d_vol = df_1d_past['Volume'].iloc[-5:].mean()
-                        # 今天前兩根 15分K (09:00~09:30) 的量
+                        # 無論幾點執行，這裡都固定切片前2根 (確保找出早上同一批標的)
                         today_30m_vol = df_15m_today['Volume'].iloc[:2].sum()
                         
                         threshold = past_5d_vol * 0.3
@@ -294,6 +288,7 @@ def main():
                             monster_candidates.append({
                                 "sid": sid, "name": name, "industry": original_ind,
                                 "close": f"{today_close:.2f}", 
+                                "today_pct": today_pct, # 記錄當前漲跌幅
                                 "today_30m_vol": int(today_30m_vol),
                                 "past_5d_vol": int(past_5d_vol),
                                 "vol_ratio": f"{vol_ratio*100:.1f}%",
@@ -303,7 +298,7 @@ def main():
                                 "score": vol_ratio
                             })
 
-                # --- 2. TOP 6 篩選：排除金融股 ---
+                # --- 2. TOP 8 篩選：排除金融股 ---
                 if original_ind != "金融保險業":
                     p_res = analyze_pattern_stages(df_1d, today_close, atr_14)
                     if p_res:
@@ -314,16 +309,15 @@ def main():
                         })
                         
         except Exception as e:
-            print(f"處理區塊發生錯誤: {e}")
             continue
 
+    # 排序與切片 (精選取8、妖股取6)
     sorted_all = sorted(scored_results, key=lambda x: x["score"], reverse=True)
-    top_picks = sorted_all[:6]
-    
-    # 妖股上限改為 4 組
-    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:4]
+    top_picks = sorted_all[:8]
+    top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:6]
 
     fields = []
+    # --- 全時段共用大盤資訊 ---
     fields.append({
         "name": f" 📊 加權指數大盤解析 ({market_info['trend']})",
         "value": (
@@ -334,50 +328,90 @@ def main():
         "inline": False
     })
     
-    fields.append({"name": f"───────── 🎯 {session_name}精選 Top 6 (已排除金融) ─────────", "value": "\u200b", "inline": False})
-    if top_picks:
-        for i, item in enumerate(top_picks):
-            fields.append({
-                "name": f" 📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
-                "value": (
-                    f"> **產業**: `{item['industry']}`\n"
-                    f"> **進場區間**: `{item['entry']}`\n"
-                    f"> **止盈 (TP)**: `{item['tp']}`\n"
-                    f"> **止損 (SL)**: `{item['sl']}`\n"
-                    f"> **頸線區間**: `{item['neck_zone']}`\n"
-                    f"> **左側策略**: {item['left_strat']}\n"
-                    f"> **右側策略**: {item['right_strat']}\n"
-                    f"> **結構狀態**: {item['status_text']}"
-                ),
-                "inline": True
-            })
-            if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
-                fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
-    else:
-        fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
+    # --- 時段判斷排版邏輯 ---
+    if session_name == "早盤動能":
+        description_text = "📣 早盤高動能妖股專屬通報"
+        
+        fields.append({"name": f"───────── 📣 09:50 爆量妖股通報 (Top 6) ─────────", "value": "\u200b", "inline": False})
+        if top_monsters:
+            for m in top_monsters:
+                fields.append({
+                    "name": f" 🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
+                    "value": (
+                        f"> **產業**: `{m['industry']}`\n"
+                        f"> **半小時量**: `{m['today_30m_vol']}` / 均量: `{m['past_5d_vol']}`\n"
+                        f"> **爆量比例**: `{m['vol_ratio']}`\n"
+                        f"> **進場區間**: `{m['entry']}`\n"
+                        f"> **止盈**: `{m['tp']}` ｜ **止損**: `{m['sl']}`"
+                    ),
+                    "inline": True
+                })
+        else:
+            fields.append({"name": " 狀態提示", "value": "> 今日早盤無符合開盤半小時高動能爆量之標的", "inline": False})
 
-    fields.append({"name": f"───────── 🚀 開盤半小時爆量妖股預警 (Top 4) ─────────", "value": "\u200b", "inline": False})
-    if top_monsters:
-        for m in top_monsters:
-            fields.append({
-                "name": f" 🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
-                "value": (
-                    f"> **產業**: `{m['industry']}`\n"
-                    f"> **半小時量**: `{m['today_30m_vol']}` / 均量: `{m['past_5d_vol']}`\n"
-                    f"> **爆量比例**: `{m['vol_ratio']}`\n"
-                    f"> **進場區間**: `{m['entry']}`\n"
-                    f"> **止盈**: `{m['tp']}` ｜ **止損**: `{m['sl']}`"
-                ),
-                "inline": True
-            })
     else:
-        fields.append({"name": " 狀態提示", "value": "> 今日無符合開盤半小時高動能爆量之標的", "inline": False})
+        description_text = "TOP8精選股(非金融) ｜ 早盤妖股驗證追蹤"
+        
+        # 1. 顯示精選 Top 8
+        fields.append({"name": f"───────── 🎯 {session_name}精選 Top 8 (已排除金融) ─────────", "value": "\u200b", "inline": False})
+        if top_picks:
+            for i, item in enumerate(top_picks):
+                fields.append({
+                    "name": f" 📌 {item['sid']} {item['name']} ｜ 現價 : {item['close']}",
+                    "value": (
+                        f"> **產業**: `{item['industry']}`\n"
+                        f"> **進場區間**: `{item['entry']}`\n"
+                        f"> **止盈 (TP)**: `{item['tp']}`\n"
+                        f"> **止損 (SL)**: `{item['sl']}`\n"
+                        f"> **頸線區間**: `{item['neck_zone']}`\n"
+                        f"> **右側策略**: {item['right_strat']}\n"
+                        f"> **結構狀態**: {item['status_text']}"
+                    ),
+                    "inline": True
+                })
+                # 排版補位用
+                if (i + 1) % 2 == 0 and (i + 1) < len(top_picks):
+                    fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
+        else:
+            fields.append({"name": " 狀態提示", "value": "> 掃描區間內暫無符合條件標的", "inline": False})
+
+        # 2. 妖股版面處理 (盤前顯示無資料，盤中盤後顯示驗證結果)
+        if session_name == "盤前":
+            fields.append({"name": f"───────── 🚀 開盤半小時爆量妖股預警 ─────────", "value": "\u200b", "inline": False})
+            fields.append({"name": " 狀態提示", "value": "> 股市尚未開盤，目前無今日動能數據", "inline": False})
+        else:
+            fields.append({"name": f"───────── 🚀 早盤妖股盤中表現驗證 (Top 6) ─────────", "value": "\u200b", "inline": False})
+            if top_monsters:
+                for m in top_monsters:
+                    # 判斷是否漲停 (台股漲跌幅限制 10%，大於 9.5% 通常即為觸及或鎖死漲停)
+                    if m['today_pct'] >= 9.5:
+                        perf_str = f"🎯 **漲停鎖死** (`+{m['today_pct']:.2f}%`)"
+                    elif m['today_pct'] > 0:
+                        perf_str = f"📈 上漲 (`+{m['today_pct']:.2f}%`)"
+                    elif m['today_pct'] < 0:
+                        perf_str = f"📉 下跌 (`{m['today_pct']:.2f}%`)"
+                    else:
+                        perf_str = "平盤 (`0.00%`)"
+                        
+                    fields.append({
+                        "name": f" 🔥 {m['sid']} {m['name']} ｜ 現價 : {m['close']}",
+                        "value": (
+                            f"> **產業**: `{m['industry']}`\n"
+                            f"> **爆量比例**: `{m['vol_ratio']}`\n"
+                            f"> **目前表現**: {perf_str}\n"
+                            f"> **進場區間**: `{m['entry']}`\n"
+                            f"> **止盈**: `{m['tp']}` ｜ **止損**: `{m['sl']}`"
+                        ),
+                        "inline": True
+                    })
+            else:
+                fields.append({"name": " 狀態提示", "value": "> 今日無符合高動能爆量之標的", "inline": False})
 
     payload = {
         "username": "台股全市場量化選股",
         "embeds": [{
             "title": f"📈 台股{session_name}分析報告 ({trigger_type})\n[{date_str}]",
-            "description": "TOP6精選股(非金融) ｜ 半小時爆量分析",
+            "description": description_text,
             "color": 3447003,
             "fields": fields
         }]
