@@ -445,8 +445,8 @@ def main():
             fields.append({"name": " 狀態提示", "value": "> 今日早盤無符合開盤半小時高動能爆量之標的", "inline": False})
 
     else:
-        description_text = "TOP8精選股(非金融) ｜ 早盤妖股驗證追蹤"
-        fields.append({"name": f"───────── 🎯 {session_name}精選 Top 8 (已排除金融) ─────────", "value": "\u200b", "inline": False})
+        description_text = "TOP8精選股 ｜ 早盤妖股驗證追蹤"
+        fields.append({"name": f"───────── 🎯 {session_name}精選 Top 8  ─────────", "value": "\u200b", "inline": False})
         if top_picks:
             for i, item in enumerate(top_picks):
                 # 這裡的排版結構與原版完全一致，僅替換對應的標籤名稱以符合新策略
