@@ -48,8 +48,8 @@ def send_msg(payload):
     except Exception as e:
         print(f"Discord 發送失敗: {e}")
 
-# ==================== Notion API 寫入功能 ====================
-def send_to_notion(data_list, date_str, list_type):
+# ==================== 全新 Notion OMS 訂單管理引擎 ====================
+def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_dict):
     if not NOTION_TOKEN or not NOTION_DATABASE_ID:
         print("提示：未設定 Notion 變數，跳過寫入資料庫。")
         return
@@ -60,38 +60,109 @@ def send_to_notion(data_list, date_str, list_type):
         "Notion-Version": "2022-06-28"
     }
 
-    for item in data_list:
-        payload = {
+    # 建立股票代號對應的 yfinance Ticker (例如 2330 -> 2330.TW)
+    ticker_map = {info[0]: tkr for tkr, info in stock_dict.items()}
+
+    # === 步驟 1：查詢目前「🟢 持倉中」的庫存 ===
+    print("正在與 Notion 同步當前庫存...")
+    query_url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+    payload = {"filter": {"property": "交易狀態", "select": {"equals": "🟢 持倉中"}}}
+    
+    open_positions = {}
+    try:
+        res = requests.post(query_url, headers=headers, json=payload, timeout=15)
+        if res.status_code == 200:
+            for page in res.json().get('results', []):
+                page_id = page['id']
+                props = page['properties']
+                # 解析出股票代號
+                name_str = props.get('名稱', {}).get('title', [])
+                if not name_str: continue
+                sid = name_str[0]['text']['content'].split(" ")[0]
+                
+                tp = props.get('停利價', {}).get('number')
+                sl = props.get('停損價', {}).get('number')
+                open_positions[sid] = {"id": page_id, "tp": tp, "sl": sl}
+    except Exception as e:
+        print(f"查詢 Notion 庫存失敗: {e}")
+        return
+
+    # === 步驟 2：盤後全面更新庫存報價與判定平倉 ===
+    if session_name == "盤後" and open_positions:
+        print("正在執行盤後庫存盤點與更新...")
+        tkrs_to_fetch = [ticker_map[sid] for sid in open_positions.keys() if sid in ticker_map]
+        
+        if tkrs_to_fetch:
+            try:
+                df_open = yf.download(tkrs_to_fetch, period="1d", progress=False)
+                for sid, pos_info in open_positions.items():
+                    tkr = ticker_map.get(sid)
+                    if not tkr: continue
+                    
+                    try:
+                        if len(tkrs_to_fetch) == 1:
+                            c_price = float(df_open['Close'].iloc[-1])
+                        else:
+                            c_price = float(df_open['Close'][tkr].iloc[-1])
+                            
+                        if pd.isna(c_price): continue
+                        
+                        patch_url = f"https://api.notion.com/v1/pages/{pos_info['id']}"
+                        patch_props = {"最新市價": {"number": c_price}}
+                        
+                        # 檢查是否觸發停損或停利
+                        tp, sl = pos_info['tp'], pos_info['sl']
+                        if (tp and c_price >= tp) or (sl and c_price <= sl):
+                            patch_props["交易狀態"] = {"select": {"name": "⚫ 已平倉"}}
+                            patch_props["出場價格"] = {"number": c_price}
+                            patch_props["出場日期"] = {"date": {"start": date_str}}
+                            print(f"[{sid}] 觸發出場條件，已自動平倉！")
+                            
+                        requests.patch(patch_url, headers=headers, json={"properties": patch_props})
+                        time.sleep(0.4) # 防撞 API 限制
+                    except Exception as e:
+                        print(f"更新 {sid} 失敗: {e}")
+            except Exception as e:
+                print(f"抓取庫存最新報價失敗: {e}")
+
+    # === 步驟 3：寫入新進場訊號 (防重複建單) ===
+    def create_new_order(item, reason):
+        if item['sid'] in open_positions:
+            print(f"[{item['sid']}] 庫存中已有持倉，略過重複建單。")
+            return
+            
+        print(f"寫入新單：[{item['sid']}] {item['name']}")
+        post_url = "https://api.notion.com/v1/pages"
+        new_page_payload = {
             "parent": {"database_id": NOTION_DATABASE_ID},
             "properties": {
-                "名稱": {
-                    "title": [{"text": {"content": f"{item['sid']} {item['name']}"}}]
-                },
-                "日期": {
-                    "date": {"start": date_str}
-                },
-                "清單類型": {
-                    "select": {"name": list_type}
-                },
-                "產業": {
-                    "select": {"name": item['industry']}
-                },
-                "進場區間": {
-                    "rich_text": [{"text": {"content": item.get('entry', '-')}}]
-                },
-                "爆量比例": {
-                    "rich_text": [{"text": {"content": item.get('vol_ratio', '-')}}]
-                }
+                "名稱": {"title": [{"text": {"content": f"{item['sid']} {item['name']}"}}]},
+                "交易狀態": {"select": {"name": "🟢 持倉中"}},
+                "進場日期": {"date": {"start": date_str}},
+                "進場價格": {"number": float(item['close'])},
+                "最新市價": {"number": float(item['close'])},
+                "停利價": {"number": item['tp_num']},
+                "停損價": {"number": item['sl_num']},
+                "進場依據": {"rich_text": [{"text": {"content": reason}}]}
             }
         }
-
         try:
-            r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=10)
-            if r.status_code != 200:
-                print(f"Notion 寫入失敗 ({item['sid']}): {r.text}")
-            time.sleep(0.4) 
+            requests.post(post_url, headers=headers, json=new_page_payload)
+            time.sleep(0.4)
         except Exception as e:
-            print(f"Notion 請求發生錯誤: {e}")
+            print(f"建立新單失敗: {e}")
+
+    if session_name == "早盤動能" and top_monsters:
+        for m in top_monsters:
+            create_new_order(m, f"早盤爆量 {m['vol_ratio']}")
+            
+    elif session_name == "盤後" and top_picks:
+        for p in top_picks:
+            # 清理 Markdown 反引號，讓 Notion 顯示更乾淨
+            clean_reason = p['status_text'].replace('`', '')
+            create_new_order(p, clean_reason)
+
+# ====================================================================
 
 def get_session_info():
     tz_tw = timezone(timedelta(hours=8))
@@ -217,28 +288,21 @@ def calculate_atr(df, period=14):
     atr_val = tr.rolling(period).mean().iloc[-1]
     return float(atr_val) if not pd.isna(atr_val) else float(df['High'].iloc[-1] - df['Low'].iloc[-1])
 
-# ==================== 全新 SMC + Fibo 雙濾網分析邏輯 ====================
 def analyze_smc_fibo(df, c_price, atr_14):
-    # 計算 60MA 需要足夠資料
     if len(df) < 60: return None
     
-    # === 濾網 1：均線多頭排列 ===
     ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
     ma60 = float(df['Close'].rolling(60).mean().iloc[-1])
     
-    # 月線必須大於季線，且股價不跌破季線
     if ma20 < ma60 or c_price < ma60:
         return None
         
-    # === 濾網 2：回撤量縮判定 ===
-    # 近 3 日平均量需小於 20 日均量的 75%
     vol_ma3 = float(df['Volume'].iloc[-3:].mean())
     vol_ma20 = float(df['Volume'].rolling(20).mean().iloc[-1])
     
     if vol_ma3 > vol_ma20 * 0.75:
         return None 
         
-    # --- 1. 尋找波段低點與高點 ---
     recent_40d = df.iloc[-40:]
     swing_low_idx = recent_40d['Low'].idxmin()
     swing_low = float(recent_40d['Low'].min())
@@ -249,18 +313,15 @@ def analyze_smc_fibo(df, c_price, atr_14):
         
     swing_high = float(post_low_data['High'].max())
     
-    # 破壞結構(CHoCH): 波段推動浪漲幅需 > 8%
     if (swing_high - swing_low) / swing_low < 0.08:
         return None
         
-    # --- 2. 計算 Fibo 回撤 ---
     move_range = swing_high - swing_low
     fibo_382 = swing_high - move_range * 0.382
     fibo_500 = swing_high - move_range * 0.500
     fibo_618 = swing_high - move_range * 0.618
     fibo_786 = swing_high - move_range * 0.786
     
-    # --- 3. 尋找看多 FVG ---
     bullish_fvgs = []
     for i in range(2, len(post_low_data)):
         k1_high = float(post_low_data['High'].iloc[i-2])
@@ -270,13 +331,12 @@ def analyze_smc_fibo(df, c_price, atr_14):
             if gap_size / c_price > 0.005: 
                 bullish_fvgs.append((round(k1_high, 2), round(k3_low, 2)))
     
-    # --- 4. 評分與落點判斷 ---
     score = 0
     status = ""
     desc = ""
     
     if c_price > fibo_382:
-        return None # 溢價區拒絕追高
+        return None 
         
     elif fibo_786 <= c_price <= fibo_382:
         status = "黃金折價區 (Discount)"
@@ -290,9 +350,8 @@ def analyze_smc_fibo(df, c_price, atr_14):
             desc = "落入 0.382~0.5 淺回撤區"
             score = 80
     else:
-        return None # 跌破 0.786，波段可能失效
+        return None 
         
-    # --- 5. FVG 驗證 ---
     fvg_match = "無明顯未補缺口"
     for fvg in bullish_fvgs:
         if fvg[0] * 0.985 <= c_price <= fvg[1] * 1.015:
@@ -301,7 +360,6 @@ def analyze_smc_fibo(df, c_price, atr_14):
             desc += " ＋ 踩入 FVG"
             break
             
-    # --- 6. 停損停利設定 ---
     sl_price = round(max(swing_low * 0.98, c_price - atr_14 * 1.5), 2)
     sl_pct = round(((sl_price - c_price) / c_price) * 100, 2)
     
@@ -314,6 +372,8 @@ def analyze_smc_fibo(df, c_price, atr_14):
         "fvg_zone": fvg_match,
         "tp": f"{tp_price} (+{tp_pct}%)",
         "sl": f"{sl_price} ({sl_pct}%)",
+        "tp_num": tp_price,
+        "sl_num": sl_price,
         "entry": f"{round(c_price * 0.99, 2):.2f} ~ {round(c_price * 1.01, 2):.2f}",
         "score": min(score, 99)
     }
@@ -333,7 +393,6 @@ def main():
     for i in range(0, len(all_tickers), chunk_size):
         chunk = all_tickers[i:i + chunk_size]
         try:
-            # 修改抓取長度為 6mo 以計算季線
             df_batch_1d = yf.download(chunk, period="6mo", interval="1d", auto_adjust=True, progress=False)
             df_batch_15m = yf.download(chunk, period="5d", interval="15m", progress=False)
             
@@ -400,6 +459,7 @@ def main():
                                 "entry": f"{round(today_close*0.992,2)} ~ {round(today_close*1.006,2)}",
                                 "tp": f"{m_tp} (+{round(((m_tp-today_close)/today_close)*100,2)}%)",
                                 "sl": f"{m_sl} ({round(((m_sl-today_close)/today_close)*100,2)}%)",
+                                "tp_num": m_tp, "sl_num": m_sl,
                                 "score": vol_ratio
                             })
 
@@ -421,15 +481,10 @@ def main():
     top_picks = sorted_all[:8]
     top_monsters = sorted(monster_candidates, key=lambda x: x["score"], reverse=True)[:6]
 
-    # ========== 觸發 Notion 寫入機制 ==========
-    if session_name == "早盤動能" and top_monsters:
-        print("觸發寫入 Notion：早盤妖股")
-        send_to_notion(top_monsters, date_str, "早盤妖股")
-        
-    elif session_name == "盤後" and top_picks:
-        print("觸發寫入 Notion：盤後精選股")
-        send_to_notion(top_picks, date_str, "精選股")
-    # ====================================================
+    # ========== 觸發 Notion 交易引擎 ==========
+    if session_name in ["早盤動能", "盤後"]:
+        manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_dict)
+    # ==========================================
 
     # --- 發送到 Discord 的排版邏輯 ---
     fields = []
