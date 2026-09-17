@@ -15,6 +15,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
+# 這裡是你鎖定的「精選股」專屬題材池
 TARGET_THEMES = {
     "矽晶圓": ["6488", "5483", "3532", "6182", "3016"],
     "AI伺服器": ["2382", "3231", "6669", "2356", "2376", "2317", "2301", "3017", "2421"],
@@ -34,6 +35,7 @@ TARGET_THEMES = {
     "AOI檢測": ["3455", "5450", "3030", "6223", "2467", "6640"]
 }
 
+# 這是「妖股」的全市場寬鬆掃描池
 ALLOWED_MONSTER_INDUSTRIES = [
     "半導體業", "電腦及週邊設備", "光電業", "通信網路業", "電子零組件", 
     "電子通路業", "資訊服務業", "其他電子業", "生技醫療業", "電機機械"
@@ -60,7 +62,6 @@ def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_
         "Notion-Version": "2022-06-28"
     }
 
-    # 建立股票代號對應的 yfinance Ticker (例如 2330 -> 2330.TW)
     ticker_map = {info[0]: tkr for tkr, info in stock_dict.items()}
 
     # === 步驟 1：查詢目前「🟢 持倉中」的庫存 ===
@@ -75,7 +76,6 @@ def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_
             for page in res.json().get('results', []):
                 page_id = page['id']
                 props = page['properties']
-                # 解析出股票代號
                 name_str = props.get('名稱', {}).get('title', [])
                 if not name_str: continue
                 sid = name_str[0]['text']['content'].split(" ")[0]
@@ -110,7 +110,6 @@ def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_
                         patch_url = f"https://api.notion.com/v1/pages/{pos_info['id']}"
                         patch_props = {"最新市價": {"number": c_price}}
                         
-                        # 檢查是否觸發停損或停利
                         tp, sl = pos_info['tp'], pos_info['sl']
                         if (tp and c_price >= tp) or (sl and c_price <= sl):
                             patch_props["交易狀態"] = {"select": {"name": "⚫ 已平倉"}}
@@ -119,7 +118,7 @@ def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_
                             print(f"[{sid}] 觸發出場條件，已自動平倉！")
                             
                         requests.patch(patch_url, headers=headers, json={"properties": patch_props})
-                        time.sleep(0.4) # 防撞 API 限制
+                        time.sleep(0.4) 
                     except Exception as e:
                         print(f"更新 {sid} 失敗: {e}")
             except Exception as e:
@@ -137,6 +136,7 @@ def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_
             "parent": {"database_id": NOTION_DATABASE_ID},
             "properties": {
                 "名稱": {"title": [{"text": {"content": f"{item['sid']} {item['name']}"}}]},
+                "產業": {"select": {"name": item['industry']}},  # 自動寫入產業欄位
                 "交易狀態": {"select": {"name": "🟢 持倉中"}},
                 "進場日期": {"date": {"start": date_str}},
                 "進場價格": {"number": float(item['close'])},
@@ -158,7 +158,6 @@ def manage_notion_orders(date_str, session_name, top_monsters, top_picks, stock_
             
     elif session_name == "盤後" and top_picks:
         for p in top_picks:
-            # 清理 Markdown 反引號，讓 Notion 顯示更乾淨
             clean_reason = p['status_text'].replace('`', '')
             create_new_order(p, clean_reason)
 
@@ -431,7 +430,7 @@ def main():
                 
                 atr_14 = calculate_atr(df_1d, 14)
 
-                # --- 1. 妖股分析 ---
+                # --- 1. 妖股分析 (維持全市場掃描) ---
                 if original_ind in ALLOWED_MONSTER_INDUSTRIES and not df_15m.empty:
                     df_1d_dates = df_1d.index.date
                     df_15m_dates = df_15m.index.date
@@ -463,11 +462,12 @@ def main():
                                 "score": vol_ratio
                             })
 
-                # --- 2. TOP 8 篩選 (SMC/Fibo 雙濾網邏輯) ---
-                if original_ind != "金融保險業":
+                # --- 2. TOP 8 精選股 (嚴格限制在 TARGET_THEMES 題材池內) ---
+                if theme_str in TARGET_THEMES:
                     p_res = analyze_smc_fibo(df_1d, today_close, atr_14)
                     if p_res:
-                        score = p_res["score"] + (15 if theme_str != original_ind else 0)
+                        # 只要進得來，就代表是熱門題材，固定給予 +15 分
+                        score = p_res["score"] + 15 
                         scored_results.append({
                             "sid": sid, "name": name, "industry": original_ind,
                             "close": f"{today_close:.2f}", "score": score, **p_res
@@ -518,7 +518,7 @@ def main():
             fields.append({"name": " 狀態提示", "value": "> 今日早盤無符合開盤半小時高動能爆量之標的", "inline": False})
 
     else:
-        description_text = "TOP8精選股 ｜ 早盤妖股驗證追蹤"
+        description_text = "TOP8精選股(嚴選主流題材) ｜ 早盤妖股驗證追蹤"
         fields.append({"name": f"───────── 🎯 {session_name}精選 Top 8  ─────────", "value": "\u200b", "inline": False})
         if top_picks:
             for i, item in enumerate(top_picks):
