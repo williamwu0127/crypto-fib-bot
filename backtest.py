@@ -10,7 +10,6 @@ from datetime import datetime
 # ==============================================================================
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-# 將所有標的設定為 'trade': True 進行全面回測
 BACKTEST_SYMBOLS = {
     'BTC':   {'s': 'BTCUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'trade': True},
     'ETH':   {'s': 'ETHUSDT',  'interval': '15m', 'mode': 'crypto_ict_fvg',     'lev': 100.0, 'trade': True},
@@ -31,7 +30,7 @@ FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
 
 # ==============================================================================
-# 2. 基礎工具與隱形資料獲取
+# 2. 抗雲端阻擋之幣安 API 抓取模組
 # ==============================================================================
 def send_discord(text):
     if DISCORD_WEBHOOK_URL:
@@ -40,19 +39,22 @@ def send_discord(text):
         except Exception:
             pass
 
-def fetch_stealth_klines(symbol, interval, days):
+def fetch_binance_stealth_klines(symbol, interval, days):
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
     
+    # 偽裝成常規瀏覽器以繞過 Cloudflare
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json',
         'Referer': 'https://www.binance.com/'
     }
     
+    # 優先使用 fapi (合約 API)，備用 GCP 與 Vision 節點
     endpoints = [
-        f"https://fapi.binance.com/fapi/v1/klines",
-        f"https://api.binance.com/api/v3/klines"
+        "https://fapi.binance.com/fapi/v1/klines",
+        "https://api-gcp.binance.com/api/v3/klines",
+        "https://data-api.binance.vision/api/v3/klines"
     ]
     
     for base_url in endpoints:
@@ -90,8 +92,7 @@ def prepare_indicators(df, mode):
     if mode == 'gold_macro_donchian':
         df['dc_high'] = df['h'].shift(1).rolling(20).max()
         df['dc_low'] = df['l'].shift(1).rolling(20).min()
-        # 由於使用 4H K線，近似 1D MA60 需要約 360 根 (60天 * 6根)
-        df['ma_trend'] = df['c'].rolling(360).mean()
+        df['ma_trend'] = df['c'].rolling(360).mean() # 近似 1D MA60
         tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
         df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.015)
     elif mode in ['crypto_ict_fvg', 'stock_pullback']:
@@ -116,7 +117,6 @@ def extract_symbol_trades(sym, df, cfg):
             tp1, tp2 = pos.get('tp1'), pos.get('tp2')
             tp = pos.get('tp')
             
-            # 檢查爆倉
             liq_p = entry * (1 - 1/cfg['lev'] + MAINTENANCE_MARGIN_RATE) if side == 'LONG' else entry * (1 + 1/cfg['lev'] - MAINTENANCE_MARGIN_RATE)
             if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
                 trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': liq_p, 'exit2': liq_p, 'split': False})
@@ -125,7 +125,6 @@ def extract_symbol_trades(sym, df, cfg):
                 
             closed = False
             
-            # v4 黃金長線邏輯 (單一止盈, 2.0R 保本, 5.0R 平倉)
             if pos['type'] == 'single':
                 if side == 'LONG':
                     if not pos['be_moved'] and bar['h'] >= be_tgt:
@@ -147,8 +146,7 @@ def extract_symbol_trades(sym, df, cfg):
                     elif bar['l'] <= tp:
                         trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': tp, 'exit2': tp, 'split': False})
                         closed = True
-            
-            # v4 ICT / Pullback 邏輯 (分批止盈, TP1 保本並平半倉, TP2 全平)
+                        
             elif pos['type'] == 'split':
                 if side == 'LONG':
                     if bar['l'] <= pos['sl']:
@@ -214,7 +212,7 @@ def calc_trade_pnl(wallet, trade, cfg):
     entry, side, split = trade['entry'], trade['side'], trade['split']
     exit1, exit2 = trade['exit1'], trade['exit2']
     
-    # v4 核心 1% 風險名目價值算法
+    # v4 核心 1% 風險名目價值算法 (支援最低門檻 25U 防呆)
     notional = wallet * RISK_PCT * cfg['lev']
     if notional < 25.0: notional = 25.0
     if notional > wallet * cfg['lev']: notional = wallet * cfg['lev']
@@ -227,24 +225,21 @@ def calc_trade_pnl(wallet, trade, cfg):
         ret2 = (entry - exit2) / entry
         
     avg_ret = (0.5 * ret1 + 0.5 * ret2) if split else ret1
-    
-    # 扣除雙邊手續費
     pnl = (notional * avg_ret) - (notional * FEE_RATE * 2)
     return pnl
 
 def run_v4_github_actions_backtest():
     print("=" * 70)
-    print(f" >>> 啟動 v4 版【365天期全資產】量化回測引擎 (GitHub Actions 相容)...")
+    print(f" >>> 啟動 v4 版【365天期全資產】量化回測引擎 (純幣安直連版)...")
     print("=" * 70)
 
     data_status = {}
     master_trades = []
 
-    # 1. 抓取資料並生成交易事件
     for sym, cfg in BACKTEST_SYMBOLS.items():
         if not cfg['trade']: continue
         print(f"📥 正在抓取並運算 {sym} ({cfg['interval']})...")
-        df = fetch_stealth_klines(cfg['s'], cfg['interval'], TEST_DAYS + 30)
+        df = fetch_binance_stealth_klines(cfg['s'], cfg['interval'], TEST_DAYS + 30)
         
         if df is not None and not df.empty:
             data_status[sym] = '🟢'
@@ -254,7 +249,6 @@ def run_v4_github_actions_backtest():
         else:
             data_status[sym] = '🔴'
 
-    # 2. 獨立配資模式 (Isolated) 結算
     iso_results = {}
     iso_total_final = 0.0
     
@@ -275,8 +269,7 @@ def run_v4_github_actions_backtest():
         iso_results[sym] = {'final': w_iso, 'net': w_iso - INITIAL_CAPITAL, 'trades': trades_count, 'wr': wr}
         iso_total_final += w_iso
 
-    # 3. 共享資金池模式 (Combined) 事件驅動結算
-    master_trades.sort(key=lambda x: x['entry_time']) # 依照真實時間序回放
+    master_trades.sort(key=lambda x: x['entry_time'])
     com_wallet = INITIAL_CAPITAL
     com_wins = 0
     com_trades_count = 0
@@ -296,7 +289,6 @@ def run_v4_github_actions_backtest():
     iso_start_total = len(iso_results) * INITIAL_CAPITAL
     iso_roi = ((iso_total_final - iso_start_total) / iso_start_total * 100) if iso_start_total > 0 else 0.0
 
-    # 4. 生成並推播報表
     status_str = " | ".join([f"{sym}: {data_status.get(sym, '🔴')}" for sym in BACKTEST_SYMBOLS.keys()])
     
     lines = [
