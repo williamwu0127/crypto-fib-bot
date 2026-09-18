@@ -10,8 +10,7 @@ import math
 from datetime import datetime, timezone, timedelta
 
 # ==================== 1. API 與 Discord 設定 ====================
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "JfNAskj9UacTumBXxlQ6eB4JZpYgLaHQXhWnSSmoRWmM3cw5h15mH7H5tnhPb91Z")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "dHQPbgX70J1wffzL5TkSf1xquppT9FCUGyKJL9FgI0F7EzjdYy8W9eePQeL6mVTJ")
+
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
 
 BASE_URL = "https://fapi.binance.com"
