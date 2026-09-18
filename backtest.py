@@ -30,27 +30,23 @@ FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
 
 # ==============================================================================
-# 2. 抗雲端阻擋之幣安 API 抓取模組
+# 2. 抗阻擋資料抓取 & MTF K線合成
 # ==============================================================================
 def send_discord(text):
     if DISCORD_WEBHOOK_URL:
         try:
             requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=10)
-        except Exception:
-            pass
+        except: pass
 
 def fetch_binance_stealth_klines(symbol, interval, days):
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (days * 24 * 60 * 60 * 1000)
     
-    # 偽裝成常規瀏覽器以繞過 Cloudflare
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Referer': 'https://www.binance.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json'
     }
     
-    # 優先使用 fapi (合約 API)，備用 GCP 與 Vision 節點
     endpoints = [
         "https://fapi.binance.com/fapi/v1/klines",
         "https://api-gcp.binance.com/api/v3/klines",
@@ -65,7 +61,7 @@ def fetch_binance_stealth_klines(symbol, interval, days):
         while curr_start < end_ms:
             url = f"{base_url}?symbol={symbol}&interval={interval}&startTime={curr_start}&limit=1000"
             try:
-                res = requests.get(url, headers=headers, timeout=10)
+                res = requests.get(url, headers=headers, timeout=8)
                 if res.status_code != 200:
                     success = False
                     break
@@ -75,7 +71,7 @@ def fetch_binance_stealth_klines(symbol, interval, days):
                 all_klines.extend(data)
                 curr_start = data[-1][0] + 1
                 time.sleep(0.05)
-            except Exception:
+            except:
                 success = False
                 break
         
@@ -88,34 +84,80 @@ def fetch_binance_stealth_klines(symbol, interval, days):
             
     return None
 
-def prepare_indicators(df, mode):
-    if mode == 'gold_macro_donchian':
-        df['dc_high'] = df['h'].shift(1).rolling(20).max()
-        df['dc_low'] = df['l'].shift(1).rolling(20).min()
-        df['ma_trend'] = df['c'].rolling(360).mean() # 近似 1D MA60
-        tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
-        df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.015)
-    elif mode in ['crypto_ict_fvg', 'stock_pullback']:
-        df['recent_low'] = df['l'].rolling(20).min().shift(1)
-        df['recent_high'] = df['h'].rolling(20).max().shift(1)
-    return df
+def resample_klines(df, rule):
+    """降維合成大級別 K 線"""
+    df_res = df.set_index('time').resample(rule).agg({
+        'o': 'first', 'h': 'max', 'l': 'min', 'c': 'last'
+    }).dropna().reset_index()
+    return df_res
 
 # ==============================================================================
-# 3. 獨立交易訊號萃取引擎 (Event Extractor)
+# 3. 實盤演算法：大級別方向判定 (HTF Sweep & FVG)
 # ==============================================================================
-def extract_symbol_trades(sym, df, cfg):
+def get_ict_htf_signals(df_htf):
+    biases, fvgs, exts = [], [], []
+    for i in range(len(df_htf)):
+        if i < 25:
+            biases.append(None); fvgs.append(0); exts.append(0)
+            continue
+        
+        # 實盤精確還原：-21 到 -2 尋找近期高低點
+        recent_low = df_htf['l'].iloc[i-21:i-2].min()
+        recent_high = df_htf['h'].iloc[i-21:i-2].max()
+        
+        curr = df_htf.iloc[i]
+        prev = df_htf.iloc[i-1]
+        
+        b, f, e = None, 0, 0
+        
+        # 獵取流動性做多 (Sweep Long)
+        if (prev['l'] < recent_low and prev['c'] > recent_low) or (curr['l'] < recent_low and curr['c'] > recent_low):
+            for j in range(i-5, i-1):
+                if df_htf['l'].iloc[j] > df_htf['h'].iloc[j-2]:
+                    b = 'LONG'
+                    f = df_htf['h'].iloc[j-2] + (df_htf['l'].iloc[j] - df_htf['h'].iloc[j-2]) * 0.618
+                    e = recent_high
+                    break
+        # 獵取流動性做空 (Sweep Short)
+        elif (prev['h'] > recent_high and prev['c'] < recent_high) or (curr['h'] > recent_high and curr['c'] < recent_high):
+            for j in range(i-5, i-1):
+                if df_htf['h'].iloc[j] < df_htf['l'].iloc[j-2]:
+                    b = 'SHORT'
+                    f = df_htf['h'].iloc[j] + (df_htf['l'].iloc[j-2] - df_htf['h'].iloc[j]) * 0.618
+                    e = recent_low
+                    break
+                    
+        biases.append(b); fvgs.append(f); exts.append(e)
+        
+    return pd.DataFrame({'time': df_htf['time'], 'bias': biases, 'fvg': fvgs, 'ext': exts})
+
+# ==============================================================================
+# 4. 回測事件引擎 (Event Extractor)
+# ==============================================================================
+def extract_crypto_ict_trades(sym, df_15m, cfg):
+    df_4h = resample_klines(df_15m, '4h')
+    df_1h = resample_klines(df_15m, '1h')
+    
+    sig_4h = get_ict_htf_signals(df_4h)
+    sig_1h = get_ict_htf_signals(df_1h)
+    
+    # 時間平移：避免看未來數據
+    sig_4h['valid_time'] = sig_4h['time'] + pd.Timedelta(hours=4)
+    sig_1h['valid_time'] = sig_1h['time'] + pd.Timedelta(hours=1)
+    
+    df = pd.merge_asof(df_15m, sig_4h.rename(columns={'bias':'b4', 'fvg':'f4', 'ext':'e4'}), left_on='time', right_on='valid_time', direction='backward')
+    df = pd.merge_asof(df, sig_1h.rename(columns={'bias':'b1', 'fvg':'f1', 'ext':'e1'}), left_on='time', right_on='valid_time', direction='backward')
+    
     trades = []
     pos = None
     
-    for i in range(365, len(df)):
+    for i in range(25, len(df)):
         bar = df.iloc[i]
-        prev = df.iloc[i-1]
         
+        # 1. 倉位管理
         if pos is not None:
-            side, entry = pos['side'], pos['entry']
-            sl, be_tgt = pos['sl'], pos['be_target']
-            tp1, tp2 = pos.get('tp1'), pos.get('tp2')
-            tp = pos.get('tp')
+            side, entry, sl = pos['side'], pos['entry'], pos['sl']
+            tp1, tp2 = pos['tp1'], pos['tp2']
             
             liq_p = entry * (1 - 1/cfg['lev'] + MAINTENANCE_MARGIN_RATE) if side == 'LONG' else entry * (1 + 1/cfg['lev'] - MAINTENANCE_MARGIN_RATE)
             if (side == 'LONG' and bar['l'] <= liq_p) or (side == 'SHORT' and bar['h'] >= liq_p):
@@ -124,95 +166,136 @@ def extract_symbol_trades(sym, df, cfg):
                 continue
                 
             closed = False
+            if side == 'LONG':
+                if bar['l'] <= pos['sl']:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': pos['tp1_hit']})
+                    closed = True
+                elif not pos['tp1_hit'] and bar['h'] >= tp1:
+                    pos['tp1_hit'] = True
+                    pos['sl'] = entry # 保本平移
+                    pos['saved_exit1'] = tp1
+                elif pos['tp1_hit'] and bar['h'] >= tp2:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['saved_exit1'], 'exit2': tp2, 'split': True})
+                    closed = True
+            else:
+                if bar['h'] >= pos['sl']:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': pos['tp1_hit']})
+                    closed = True
+                elif not pos['tp1_hit'] and bar['l'] <= tp1:
+                    pos['tp1_hit'] = True
+                    pos['sl'] = entry
+                    pos['saved_exit1'] = tp1
+                elif pos['tp1_hit'] and bar['l'] <= tp2:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['saved_exit1'], 'exit2': tp2, 'split': True})
+                    closed = True
             
-            if pos['type'] == 'single':
-                if side == 'LONG':
-                    if not pos['be_moved'] and bar['h'] >= be_tgt:
-                        pos['sl'] = entry
-                        pos['be_moved'] = True
-                    if bar['l'] <= pos['sl']:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': False})
-                        closed = True
-                    elif bar['h'] >= tp:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': tp, 'exit2': tp, 'split': False})
-                        closed = True
-                else:
-                    if not pos['be_moved'] and bar['l'] <= be_tgt:
-                        pos['sl'] = entry
-                        pos['be_moved'] = True
-                    if bar['h'] >= pos['sl']:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': False})
-                        closed = True
-                    elif bar['l'] <= tp:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': tp, 'exit2': tp, 'split': False})
-                        closed = True
-                        
-            elif pos['type'] == 'split':
-                if side == 'LONG':
-                    if bar['l'] <= pos['sl']:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': pos['tp1_hit']})
-                        closed = True
-                    elif not pos['tp1_hit'] and bar['h'] >= tp1:
-                        pos['tp1_hit'] = True
-                        pos['sl'] = entry
-                        pos['saved_exit1'] = tp1
-                    elif pos['tp1_hit'] and bar['h'] >= tp2:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['saved_exit1'], 'exit2': tp2, 'split': True})
-                        closed = True
-                else:
-                    if bar['h'] >= pos['sl']:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': pos['tp1_hit']})
-                        closed = True
-                    elif not pos['tp1_hit'] and bar['l'] <= tp1:
-                        pos['tp1_hit'] = True
-                        pos['sl'] = entry
-                        pos['saved_exit1'] = tp1
-                    elif pos['tp1_hit'] and bar['l'] <= tp2:
-                        trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['saved_exit1'], 'exit2': tp2, 'split': True})
-                        closed = True
-                        
+            if closed: pos = None
+            
+        # 2. 進場掃描 (小級別找 OB)
+        if pos is None:
+            bias = bar['b4'] if pd.notna(bar['b4']) else bar['b1']
+            if pd.isna(bias): continue
+            
+            fvg = bar['f4'] if pd.notna(bar['b4']) else bar['f1']
+            ext = bar['e4'] if pd.notna(bar['b4']) else bar['e1']
+            
+            if bias == 'LONG':
+                idx_start = max(0, i-24)
+                window = df.iloc[idx_start:i]
+                min_idx = window['l'].idxmin()
+                
+                ob_window = df.iloc[max(0, min_idx-3) : min(len(df), min_idx+3)]
+                ob_reds = ob_window[ob_window['c'] < ob_window['o']]
+                
+                if not ob_reds.empty:
+                    ob = ob_reds.iloc[-1]
+                    if bar['l'] <= ob['h'] and bar['c'] >= ob['l']:
+                        pos = {'side': 'LONG', 'entry': bar['c'], 'sl': ob['l']*0.999, 'tp1': fvg, 'tp2': ext, 'tp1_hit': False, 'entry_time': bar['time']}
+            
+            elif bias == 'SHORT':
+                idx_start = max(0, i-24)
+                window = df.iloc[idx_start:i]
+                max_idx = window['h'].idxmax()
+                
+                ob_window = df.iloc[max(0, max_idx-3) : min(len(df), max_idx+3)]
+                ob_grns = ob_window[ob_window['c'] > ob_window['o']]
+                
+                if not ob_grns.empty:
+                    ob = ob_grns.iloc[-1]
+                    if bar['h'] >= ob['l'] and bar['c'] <= ob['h']:
+                        pos = {'side': 'SHORT', 'entry': bar['c'], 'sl': ob['h']*1.001, 'tp1': fvg, 'tp2': ext, 'tp1_hit': False, 'entry_time': bar['time']}
+
+    return trades
+
+def extract_gold_donchian_trades(sym, df_4h, cfg):
+    df_1d = resample_klines(df_4h, '1d')
+    df_1d['ma60'] = df_1d['c'].rolling(60).mean()
+    df_1d['valid_time'] = df_1d['time'] + pd.Timedelta(days=1)
+    
+    df = pd.merge_asof(df_4h, df_1d[['valid_time', 'ma60']], left_on='time', right_on='valid_time', direction='backward')
+    df['dc_high'] = df['h'].shift(1).rolling(20).max()
+    df['dc_low'] = df['l'].shift(1).rolling(20).min()
+    
+    tr = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
+    df['atr'] = tr.rolling(14).mean().fillna(df['c'] * 0.015)
+    
+    trades = []
+    pos = None
+    
+    for i in range(25, len(df)):
+        bar = df.iloc[i]
+        
+        if pos is not None:
+            side, entry, sl = pos['side'], pos['entry'], pos['sl']
+            be_tgt, tp = pos['be_target'], pos['tp']
+            
+            closed = False
+            if side == 'LONG':
+                if not pos['be_moved'] and bar['h'] >= be_tgt:
+                    pos['sl'] = entry
+                    pos['be_moved'] = True
+                if bar['l'] <= pos['sl']:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': False})
+                    closed = True
+                elif bar['h'] >= tp:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': tp, 'exit2': tp, 'split': False})
+                    closed = True
+            else:
+                if not pos['be_moved'] and bar['l'] <= be_tgt:
+                    pos['sl'] = entry
+                    pos['be_moved'] = True
+                if bar['h'] >= pos['sl']:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': pos['sl'], 'exit2': pos['sl'], 'split': False})
+                    closed = True
+                elif bar['l'] <= tp:
+                    trades.append({'sym': sym, 'entry_time': pos['entry_time'], 'side': side, 'entry': entry, 'exit1': tp, 'exit2': tp, 'split': False})
+                    closed = True
             if closed: pos = None
             
         if pos is None:
-            sig = None
-            if cfg['mode'] == 'gold_macro_donchian':
-                ma = bar['ma_trend']
-                dc_h, dc_l = bar['dc_high'], bar['dc_low']
-                atr = bar['atr']
-                if not pd.isna(ma) and not pd.isna(dc_h):
-                    if bar['c'] > ma and bar['c'] > dc_h:
-                        sig, entry = 'LONG', bar['c']
-                        sl = entry - (atr * 1.5)
-                        risk = entry - sl
-                        pos = {'type': 'single', 'side': sig, 'entry': entry, 'sl': sl, 'be_target': entry + (risk * 2.0), 'tp': entry + (risk * 5.0), 'entry_time': bar['time'], 'be_moved': False}
-                    elif bar['c'] < ma and bar['c'] < dc_l:
-                        sig, entry = 'SHORT', bar['c']
-                        sl = entry + (atr * 1.5)
-                        risk = sl - entry
-                        pos = {'type': 'single', 'side': sig, 'entry': entry, 'sl': sl, 'be_target': entry - (risk * 2.0), 'tp': entry - (risk * 5.0), 'entry_time': bar['time'], 'be_moved': False}
+            ma, dc_h, dc_l, atr = bar['ma60'], bar['dc_high'], bar['dc_low'], bar['atr']
+            if pd.isna(ma) or pd.isna(dc_h): continue
             
-            elif cfg['mode'] in ['crypto_ict_fvg', 'stock_pullback']:
-                rl, rh = bar['recent_low'], bar['recent_high']
-                if not pd.isna(rl) and not pd.isna(rh):
-                    if bar['l'] <= rl * 1.005 and bar['c'] > prev['c']:
-                        sig, entry = 'LONG', bar['c']
-                        sl = rl * 0.995
-                        pos = {'type': 'split', 'side': sig, 'entry': entry, 'sl': sl, 'be_target': entry + (entry - sl)*2.0, 'tp1': entry + (entry - sl)*2.0, 'tp2': rh, 'entry_time': bar['time'], 'tp1_hit': False}
-                    elif bar['h'] >= rh * 0.995 and bar['c'] < prev['c']:
-                        sig, entry = 'SHORT', bar['c']
-                        sl = rh * 1.005
-                        pos = {'type': 'split', 'side': sig, 'entry': entry, 'sl': sl, 'be_target': entry - (sl - entry)*2.0, 'tp1': entry - (sl - entry)*2.0, 'tp2': rl, 'entry_time': bar['time'], 'tp1_hit': False}
+            if bar['c'] > ma and bar['c'] > dc_h:
+                entry = bar['c']
+                sl = entry - (atr * 1.5)
+                risk = entry - sl
+                pos = {'side': 'LONG', 'entry': entry, 'sl': sl, 'be_target': entry + (risk * 2.0), 'tp': entry + (risk * 5.0), 'be_moved': False, 'entry_time': bar['time']}
+            elif bar['c'] < ma and bar['c'] < dc_l:
+                entry = bar['c']
+                sl = entry + (atr * 1.5)
+                risk = sl - entry
+                pos = {'side': 'SHORT', 'entry': entry, 'sl': sl, 'be_target': entry - (risk * 2.0), 'tp': entry - (risk * 5.0), 'be_moved': False, 'entry_time': bar['time']}
 
     return trades
 
 # ==============================================================================
-# 4. 資金結算與風控引擎
+# 5. 資金結算與報表
 # ==============================================================================
 def calc_trade_pnl(wallet, trade, cfg):
     entry, side, split = trade['entry'], trade['side'], trade['split']
     exit1, exit2 = trade['exit1'], trade['exit2']
     
-    # v4 核心 1% 風險名目價值算法 (支援最低門檻 25U 防呆)
     notional = wallet * RISK_PCT * cfg['lev']
     if notional < 25.0: notional = 25.0
     if notional > wallet * cfg['lev']: notional = wallet * cfg['lev']
@@ -230,7 +313,7 @@ def calc_trade_pnl(wallet, trade, cfg):
 
 def run_v4_github_actions_backtest():
     print("=" * 70)
-    print(f" >>> 啟動 v4 版【365天期全資產】量化回測引擎 (純幣安直連版)...")
+    print(" >>> 啟動 v4 版【365天期全資產】量化回測引擎 (修復高頻 Bug / 重構 MTF 架構)...")
     print("=" * 70)
 
     data_status = {}
@@ -239,12 +322,16 @@ def run_v4_github_actions_backtest():
     for sym, cfg in BACKTEST_SYMBOLS.items():
         if not cfg['trade']: continue
         print(f"📥 正在抓取並運算 {sym} ({cfg['interval']})...")
+        
+        # 美股若抓不到會安靜略過
         df = fetch_binance_stealth_klines(cfg['s'], cfg['interval'], TEST_DAYS + 30)
         
-        if df is not None and not df.empty:
+        if df is not None and not df.empty and len(df) > 100:
             data_status[sym] = '🟢'
-            df = prepare_indicators(df, cfg['mode'])
-            sym_trades = extract_symbol_trades(sym, df, cfg)
+            if cfg['mode'] == 'crypto_ict_fvg':
+                sym_trades = extract_crypto_ict_trades(sym, df, cfg)
+            else:
+                sym_trades = extract_gold_donchian_trades(sym, df, cfg)
             master_trades.extend(sym_trades)
         else:
             data_status[sym] = '🔴'
@@ -310,7 +397,7 @@ def run_v4_github_actions_backtest():
     lines.extend([
         "==========================================================================",
         f"【共享資金池 1000U (Combined) 模式 (365d)】",
-        f"回放機制: 事件驅動 (Event-Driven Chronological)",
+        f"回放機制: 嚴格 MTF 濾網 + 事件驅動 (Event-Driven)",
         f"單筆風控: 總資金 1% (低標 25U 防呆)",
         f"初始資金: ${INITIAL_CAPITAL:.2f} USDT",
         f"最終結餘: ${com_wallet:.2f} USDT ({com_roi:+.2f}%)",
