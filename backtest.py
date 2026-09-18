@@ -101,7 +101,6 @@ def get_ict_htf_signals(df_htf):
             biases.append(None); fvgs.append(0); exts.append(0)
             continue
         
-        # 實盤精確還原：-21 到 -2 尋找近期高低點
         recent_low = df_htf['l'].iloc[i-21:i-2].min()
         recent_high = df_htf['h'].iloc[i-21:i-2].max()
         
@@ -110,7 +109,6 @@ def get_ict_htf_signals(df_htf):
         
         b, f, e = None, 0, 0
         
-        # 獵取流動性做多 (Sweep Long)
         if (prev['l'] < recent_low and prev['c'] > recent_low) or (curr['l'] < recent_low and curr['c'] > recent_low):
             for j in range(i-5, i-1):
                 if df_htf['l'].iloc[j] > df_htf['h'].iloc[j-2]:
@@ -118,7 +116,6 @@ def get_ict_htf_signals(df_htf):
                     f = df_htf['h'].iloc[j-2] + (df_htf['l'].iloc[j] - df_htf['h'].iloc[j-2]) * 0.618
                     e = recent_high
                     break
-        # 獵取流動性做空 (Sweep Short)
         elif (prev['h'] > recent_high and prev['c'] < recent_high) or (curr['h'] > recent_high and curr['c'] < recent_high):
             for j in range(i-5, i-1):
                 if df_htf['h'].iloc[j] < df_htf['l'].iloc[j-2]:
@@ -145,8 +142,12 @@ def extract_crypto_ict_trades(sym, df_15m, cfg):
     sig_4h['valid_time'] = sig_4h['time'] + pd.Timedelta(hours=4)
     sig_1h['valid_time'] = sig_1h['time'] + pd.Timedelta(hours=1)
     
-    df = pd.merge_asof(df_15m, sig_4h.rename(columns={'bias':'b4', 'fvg':'f4', 'ext':'e4'}), left_on='time', right_on='valid_time', direction='backward')
-    df = pd.merge_asof(df, sig_1h.rename(columns={'bias':'b1', 'fvg':'f1', 'ext':'e1'}), left_on='time', right_on='valid_time', direction='backward')
+    # BUG FIX: 剔除右表的 time 欄位，避免 merge_asof 產生 time_x 與 time_y 導致後續崩潰
+    sig_4h_merge = sig_4h.drop(columns=['time']).rename(columns={'bias':'b4', 'fvg':'f4', 'ext':'e4'})
+    sig_1h_merge = sig_1h.drop(columns=['time']).rename(columns={'bias':'b1', 'fvg':'f1', 'ext':'e1'})
+    
+    df = pd.merge_asof(df_15m, sig_4h_merge, left_on='time', right_on='valid_time', direction='backward')
+    df = pd.merge_asof(df, sig_1h_merge, left_on='time', right_on='valid_time', direction='backward')
     
     trades = []
     pos = None
@@ -232,6 +233,7 @@ def extract_gold_donchian_trades(sym, df_4h, cfg):
     df_1d['ma60'] = df_1d['c'].rolling(60).mean()
     df_1d['valid_time'] = df_1d['time'] + pd.Timedelta(days=1)
     
+    # 這裡因為我們只取 ['valid_time', 'ma60']，所以沒有 time 欄位衝突的問題
     df = pd.merge_asof(df_4h, df_1d[['valid_time', 'ma60']], left_on='time', right_on='valid_time', direction='backward')
     df['dc_high'] = df['h'].shift(1).rolling(20).max()
     df['dc_low'] = df['l'].shift(1).rolling(20).min()
@@ -313,7 +315,7 @@ def calc_trade_pnl(wallet, trade, cfg):
 
 def run_v4_github_actions_backtest():
     print("=" * 70)
-    print(" >>> 啟動 v4 版【365天期全資產】量化回測引擎 (修復高頻 Bug / 重構 MTF 架構)...")
+    print(" >>> 啟動 v4 版【365天期全資產】量化回測引擎 (MTF Bug 已完美修復)...")
     print("=" * 70)
 
     data_status = {}
