@@ -97,16 +97,21 @@ def fetch_historical_data(sym_key, cfg, days=365):
 def send_discord_safe(content):
     if not DISCORD_WEBHOOK_URL: return
     try:
-        if len(content) <= 1900: requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
+        if len(content) <= 1900: 
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
         else:
             chunk = ""
             for line in content.split('\n'):
                 if len(chunk) + len(line) > 1900:
                     requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=8)
-                    chunk, time.sleep(0.5) = line + "\n", None
-                else: chunk += line + "\n"
-            if chunk.strip(): requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=8)
-    except: pass
+                    chunk = line + "\n"
+                    time.sleep(0.5)
+                else: 
+                    chunk += line + "\n"
+            if chunk.strip(): 
+                requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=8)
+    except: 
+        pass
 
 # ==================== 3. 指標與核心邏輯預處理 ====================
 def prepare_backtest_indicators(df, sym_key):
