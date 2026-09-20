@@ -14,7 +14,7 @@ SYMBOLS = {
     'SOL':   {'interval': '15m'},
     'BNB':   {'interval': '15m'},
     'DOGE':  {'interval': '15m'},
-    'XAU':   {'interval': '4h'},  
+    'XAU':   {'interval': '4h'},  # 確保黃金正常納入
     'MSFT':  {'interval': '1h'},
     'MU':    {'interval': '1h'},
     'TSM':   {'interval': '1h'},
@@ -35,9 +35,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 # ==================== 2. 歷史資料獲取模組 ====================
 def fetch_historical_data(sym_key, cfg, days=365):
     interval = cfg['interval']
-    crypto_list = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE']
+    crypto_list = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU'] # 將 XAU 歸類在幣安合約抓取
     
-    if sym_key in crypto_list or sym_key == 'XAU':
+    if sym_key in crypto_list:
         symbol = f"{sym_key}USDT"
         end_time = int(time.time() * 1000)
         start_time = end_time - (days * 24 * 60 * 60 * 1000)
@@ -128,7 +128,6 @@ def prepare_backtest_indicators(df, sym_key):
         
     df['poc'], df['acc_high'], df['acc_low'] = poc_list, acc_high_list, acc_low_list
     
-    # 效能升級：向量化交易時段過濾，取代迴圈計算
     ny_time = df.index.tz_localize('UTC').tz_convert('America/New_York')
     if sym_key in ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE']:
         df['is_tradable'] = True
@@ -140,7 +139,6 @@ def prepare_backtest_indicators(df, sym_key):
         time_val = ny_time.hour + ny_time.minute / 60.0
         df['is_tradable'] = (ny_time.weekday < 5) & (time_val >= 9.5) & (time_val < 16.0)
 
-    # 效能升級與防斷流：ICT 流動性指標 cummax().ffill()
     df['date'] = ny_time.date
     is_ldn = (ny_time.hour >= 2) & (ny_time.hour < 5)
     is_ny = (ny_time.hour >= 7) & (ny_time.hour < 10)
@@ -186,7 +184,6 @@ class V6Backtester:
                 pointers[sym] += 1
                 i, pos = idx, self.positions[sym]
                 
-                # --- A. 平倉與保本平移邏輯 (對齊 Server) ---
                 if pos:
                     step_pnl, is_closed, close_reason = 0, False, ""
                     
@@ -202,7 +199,7 @@ class V6Backtester:
                             pos['accumulated_pnl'] += realized_pnl
                             pos['qty'] *= 0.5
                             pos['tp1_hit'] = True
-                            pos['sl'] = pos['entry'] # 完美對齊：TP1 後止損移至 True Breakeven (0風險)
+                            pos['sl'] = pos['entry'] 
                     
                     elif pos['tp1_hit']:
                         if (pos['side'] == 'LONG' and arrs['h'][i] >= pos['tp2']) or (pos['side'] == 'SHORT' and arrs['l'][i] <= pos['tp2']):
@@ -216,7 +213,6 @@ class V6Backtester:
                         self.positions[sym] = None
                         continue
 
-                # --- B. 進場邏輯 (對齊休市過濾與限價成交) ---
                 if not self.positions[sym]:
                     current_balance = self.get_balance(sym)
                     if current_balance <= 50: continue 
@@ -231,7 +227,7 @@ class V6Backtester:
                             if watch['side'] == 'LONG' and arrs['l'][i] <= watch['poc']: sig_side, entry, sl, self.setup_watch[sym] = 'LONG', watch['poc'], watch['sl'], None
                             elif watch['side'] == 'SHORT' and arrs['h'][i] >= watch['poc']: sig_side, entry, sl, self.setup_watch[sym] = 'SHORT', watch['poc'], watch['sl'], None
 
-                    if not sig_side and arrs['is_tradable'][i]: # 高效向量化時段檢查
+                    if not sig_side and arrs['is_tradable'][i]:
                         if arrs['c'][i] > arrs['acc_high'][i] and arrs['c'][i] > arrs['ema200'][i]:
                             self.setup_watch[sym] = {'side': 'LONG', 'poc': arrs['poc'][i], 'sl': arrs['acc_low'][i] * 0.998, 'ttl': 20}
                         elif arrs['c'][i] < arrs['acc_low'][i] and arrs['c'][i] < arrs['ema200'][i]:
@@ -269,7 +265,7 @@ class V6Backtester:
         for sym in self.data.keys():
             sym_trades = df_trades[df_trades['symbol'] == sym] if 'symbol' in df_trades else pd.DataFrame()
             if sym_trades.empty:
-                report += f"{sym:<5} | 次數: 0\n"
+                report += f"{sym:<6} | 次數: 0\n"
                 continue
                 
             s_count = len(sym_trades)
@@ -279,9 +275,9 @@ class V6Backtester:
             
             if self.pool_mode == 'isolated':
                 s_ret = ((self.balances[sym] - self.initial_capital) / self.initial_capital) * 100
-                report += f"{sym:<5} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT ({s_ret:+.2f}%)\n"
+                report += f"{sym:<6} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT ({s_ret:+.2f}%)\n"
             else:
-                report += f"{sym:<5} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT\n"
+                report += f"{sym:<6} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT\n"
 
         report += f"--------------------------------------------------\n"
         return report
