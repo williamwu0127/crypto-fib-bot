@@ -7,7 +7,6 @@ import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
 # ==================== 1. 回測環境與標的設定 (統一 V6 邏輯) ====================
-# 不再需要區分 mode，全資產統一採用 V6 POC 突破回踩策略
 SYMBOLS = {
     'BTC':   {'interval': '15m'},
     'ETH':   {'interval': '15m'},
@@ -15,7 +14,7 @@ SYMBOLS = {
     'BNB':   {'interval': '15m'},
     'DOGE':  {'interval': '15m'},
     
-    'XAU':   {'interval': '4h'},  # 依你要求，維持幣安合約抓取
+    'XAU':   {'interval': '4h'},  
     
     'MSFT':  {'interval': '1h'},
     'MU':    {'interval': '1h'},
@@ -32,15 +31,13 @@ SYMBOLS = {
     'SNDK':  {'interval': '1h'}
 }
 
-# 隱藏 Webhook，自 GitHub Secrets 讀取
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-# ==================== 2. 歷史資料獲取模組 (雙資料源智慧路由) ====================
+# ==================== 2. 歷史資料獲取模組 ====================
 def fetch_historical_data(sym_key, cfg, days=365):
     interval = cfg['interval']
     crypto_list = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE']
     
-    # 幣安節點：加密貨幣走 Spot，黃金 XAU 走 Futures
     if sym_key in crypto_list or sym_key == 'XAU':
         symbol = f"{sym_key}USDT"
         end_time = int(time.time() * 1000)
@@ -84,7 +81,6 @@ def fetch_historical_data(sym_key, cfg, days=365):
         return df
 
     else:
-        # Yahoo Finance 節點：避開美國 IP 的美股合約阻擋 (HTTP 451)
         print(f"下載 {sym_key} (Yahoo {interval}) {days}天...", end="", flush=True)
         try:
             tk = yf.Ticker(sym_key)
@@ -124,11 +120,10 @@ def send_discord_safe(content):
     except Exception:
         pass
 
-# ==================== 3. 指標與核心邏輯預處理 (純正 V6 邏輯) ====================
+# ==================== 3. 指標與核心邏輯預處理 ====================
 def prepare_backtest_indicators(df):
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     
-    # 建立 50 根 K 線的盤整箱體 (Accumulation Box) 與 POC
     acc_window = 50
     c_vals = df['c'].values
     v_vals = df['v'].values
@@ -140,11 +135,9 @@ def prepare_backtest_indicators(df):
     acc_low_list = np.full(len(df), np.nan)
     
     for i in range(acc_window, len(df)):
-        # 過去 50 根的箱體高低點
         acc_high_list[i] = np.max(h_vals[i-acc_window : i])
         acc_low_list[i] = np.min(l_vals[i-acc_window : i])
         
-        # 過去 50 根的籌碼密集區 POC (NumPy 極速陣列計算)
         p_win = c_vals[i-acc_window : i]
         v_win = v_vals[i-acc_window : i]
         hist, bin_edges = np.histogram(p_win, bins=50, weights=v_win)
@@ -157,7 +150,7 @@ def prepare_backtest_indicators(df):
     
     return df.dropna()
 
-# ==================== 4. 核心回測引擎 (狀態機精準捕捉回踩) ====================
+# ==================== 4. 核心回測引擎 ====================
 class V6Backtester:
     def __init__(self, data_dict, initial_capital=1000, pool_mode='isolated'):
         self.data = data_dict
@@ -170,7 +163,6 @@ class V6Backtester:
             self.shared_balance = initial_capital
             
         self.positions = {sym: None for sym in data_dict.keys()}
-        # 用於追蹤「已突破，等待回踩 POC」的狀態機
         self.setup_watch = {sym: None for sym in data_dict.keys()}
         self.trade_history = []
         
@@ -207,7 +199,7 @@ class V6Backtester:
                 i = idx
                 pos = self.positions[sym]
                 
-                # --- A. 平倉邏輯 (動態 3R/6R + 保本平移) ---
+                # --- 平倉邏輯 ---
                 if pos:
                     pnl = 0
                     is_closed = False
@@ -244,60 +236,53 @@ class V6Backtester:
                         self.positions[sym] = None
                         continue
 
-                # --- B. 進場邏輯 (影片 V6 核心：突破後等待回踩) ---
+                # --- 進場邏輯 ---
                 if not self.positions[sym]:
                     current_balance = self.get_balance(sym)
                     if current_balance <= 50: continue 
                     
                     sig_side, entry, sl = None, 0, 0
                     
-                    # 1. 檢查是否有正在埋伏的突破單 (等待 Pullback)
                     if self.setup_watch[sym]:
                         watch = self.setup_watch[sym]
                         watch['ttl'] -= 1
                         
                         if watch['ttl'] <= 0:
-                            self.setup_watch[sym] = None # 超時未回踩，放棄該次突破
+                            self.setup_watch[sym] = None
                         else:
-                            # 觸發回踩 POC：當 K 線最低點戳到 POC (多單)，或是最高點摸到 POC (空單)
                             if watch['side'] == 'LONG' and arrs['l'][i] <= watch['poc']:
                                 sig_side = 'LONG'
-                                entry = watch['poc'] # 限價 POC 完美進場
+                                entry = watch['poc']
                                 sl = watch['sl']
                                 self.setup_watch[sym] = None
-                                
                             elif watch['side'] == 'SHORT' and arrs['h'][i] >= watch['poc']:
                                 sig_side = 'SHORT'
                                 entry = watch['poc']
                                 sl = watch['sl']
                                 self.setup_watch[sym] = None
 
-                    # 2. 若無訊號，則掃描是否產生「新突破 (Breakout)」
                     if not sig_side:
-                        # 多方突破：收盤價站上箱體頂部，且大趨勢看多
                         if arrs['c'][i] > arrs['acc_high'][i] and arrs['c'][i] > arrs['ema200'][i]:
                             self.setup_watch[sym] = {
                                 'side': 'LONG',
                                 'poc': arrs['poc'][i],
-                                'sl': arrs['acc_low'][i] * 0.998, # 止損掛在整個箱體下緣外側
-                                'ttl': 20 # 給予 20 根 K 線的耐心等待回踩
+                                'sl': arrs['acc_low'][i] * 0.998,
+                                'ttl': 20
                             }
-                        # 空方突破：收盤價跌破箱體底部，且大趨勢看空
                         elif arrs['c'][i] < arrs['acc_low'][i] and arrs['c'][i] < arrs['ema200'][i]:
                             self.setup_watch[sym] = {
                                 'side': 'SHORT',
                                 'poc': arrs['poc'][i],
-                                'sl': arrs['acc_high'][i] * 1.002, # 止損掛在整個箱體上緣外側
+                                'sl': arrs['acc_high'][i] * 1.002,
                                 'ttl': 20
                             }
 
-                    # 3. 執行 3% 風控開倉計算
                     if sig_side:
                         risk_dist = abs(entry - sl)
                         if risk_dist > 0:
                             be_tgt = entry + (risk_dist * 2.0) * (1 if sig_side=='LONG' else -1)
-                            tp1 = entry + (risk_dist * 3.0) * (1 if sig_side=='LONG' else -1) # 3R 止盈一半
-                            tp2 = entry + (risk_dist * 6.0) * (1 if sig_side=='LONG' else -1) # 6R 趨勢放飛
+                            tp1 = entry + (risk_dist * 3.0) * (1 if sig_side=='LONG' else -1)
+                            tp2 = entry + (risk_dist * 6.0) * (1 if sig_side=='LONG' else -1)
                             
                             risk_amount = current_balance * 0.03
                             qty = risk_amount / risk_dist
@@ -329,7 +314,28 @@ class V6Backtester:
             f"初始總資金: {init_cap} USDT -> 最終總資金: {final_cap:.2f} USDT\n"
             f"總報酬率: {((final_cap - init_cap) / init_cap) * 100:.2f}%\n"
             f"--------------------------------------------------\n"
+            f"【各項標的單獨表現】\n"
         )
+        
+        for sym in self.data.keys():
+            sym_trades = df_trades[df_trades['symbol'] == sym] if 'symbol' in df_trades else pd.DataFrame()
+            if sym_trades.empty:
+                report += f"{sym:<5} | 次數: 0\n"
+                continue
+                
+            s_count = len(sym_trades)
+            s_win = len(sym_trades[sym_trades['pnl'] > 0]) / s_count * 100
+            s_pnl = sym_trades['pnl'].sum()
+            pnl_sign = "+" if s_pnl > 0 else ""
+            
+            if self.pool_mode == 'isolated':
+                s_final = self.balances[sym]
+                s_ret = ((s_final - self.initial_capital) / self.initial_capital) * 100
+                report += f"{sym:<5} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT ({s_ret:+.2f}%)\n"
+            else:
+                report += f"{sym:<5} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT\n"
+
+        report += f"--------------------------------------------------\n"
         return report
 
 # ==================== 5. 主執行區塊 ====================
