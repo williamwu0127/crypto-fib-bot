@@ -30,7 +30,7 @@ SYMBOLS = {
 
 # ==================== 2. 歷史資料獲取模組 ====================
 def fetch_binance_data(symbol, interval, days=30):
-    """透過 Binance 公開 API 抓取歷史 K 線資料 (處理 1500 筆上限)"""
+    """透過 Binance 公開資料 API (data-api.binance.vision) 抓取歷史 K 線資料，避免 GitHub Actions 阻擋"""
     symbol = symbol if 'USDT' in symbol else f"{symbol}USDT"
     if symbol == 'XAUUSDT': symbol = 'PAXGUSDT'
     
@@ -40,19 +40,27 @@ def fetch_binance_data(symbol, interval, days=30):
     all_klines = []
     print(f"下載 {symbol} ({interval}) {days}天資料...", end="", flush=True)
     
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
     while True:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit=1500&startTime={start_time}"
+        # 使用 data-api.binance.vision 並且 limit 設定為 1000 (Spot API 上限)
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit=1000&startTime={start_time}"
         try:
-            res = requests.get(url, timeout=10).json()
-            if not isinstance(res, list) or len(res) == 0:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                print(f" HTTP {res.status_code}", end="")
+                break
+                
+            data = res.json()
+            if not isinstance(data, list) or len(data) == 0:
                 break
             
-            all_klines.extend(res)
-            start_time = res[-1][0] + 1 # 從最後一根 K 線的時間往後推
+            all_klines.extend(data)
+            start_time = data[-1][0] + 1 # 從最後一根 K 線的時間往後推
             
             if start_time >= end_time:
                 break
-            time.sleep(0.1) # 避免 API 頻率限制
+            time.sleep(0.2) # 稍微拉長一點時間避免觸發限流
         except Exception as e:
             print(f" Error: {e}", end="")
             break
@@ -259,7 +267,7 @@ class V6Backtester:
         )
         return report
 
-# ==================== 5. 主執行區塊 (GitHub Actions 的進入點) ====================
+# ==================== 5. 主執行區塊 ====================
 if __name__ == '__main__':
     print("🚀 開始準備歷史數據 (設定為 30 天測試)...")
     BACKTEST_DAYS = 30
