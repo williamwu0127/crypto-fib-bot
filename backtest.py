@@ -14,7 +14,7 @@ SYMBOLS = {
     'SOL':   {'interval': '15m'},
     'BNB':   {'interval': '15m'},
     'DOGE':  {'interval': '15m'},
-    'XAU':   {'interval': '4h'},  # 確保黃金正常納入
+    'XAU':   {'interval': '4h'},  
     'MSFT':  {'interval': '1h'},
     'MU':    {'interval': '1h'},
     'TSM':   {'interval': '1h'},
@@ -35,7 +35,7 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 # ==================== 2. 歷史資料獲取模組 ====================
 def fetch_historical_data(sym_key, cfg, days=365):
     interval = cfg['interval']
-    crypto_list = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU'] # 將 XAU 歸類在幣安合約抓取
+    crypto_list = ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XAU']
     
     if sym_key in crypto_list:
         symbol = f"{sym_key}USDT"
@@ -255,7 +255,7 @@ class V6Backtester:
             
         report = (
             f"========== 回測報表 ({self.pool_mode.upper()} 模式) ==========\n"
-            f"總交易次數: {total_trades} | 整體勝率: {win_rate:.1f}%\n"
+            f"總交易次数: {total_trades} | 整體勝率: {win_rate:.1f}%\n"
             f"初始總資金: {init_cap} USDT -> 最終總資金: {final_cap:.2f} USDT\n"
             f"總報酬率: {((final_cap - init_cap) / init_cap) * 100:.2f}%\n"
             f"--------------------------------------------------\n"
@@ -274,7 +274,8 @@ class V6Backtester:
             pnl_sign = "+" if s_pnl > 0 else ""
             
             if self.pool_mode == 'isolated':
-                s_ret = ((self.balances[sym] - self.initial_capital) / self.initial_capital) * 100
+                # 正確以該標的淨利除以該標的初始資金 (1000 USDT) 計算報酬率
+                s_ret = (s_pnl / self.initial_capital) * 100
                 report += f"{sym:<6} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT ({s_ret:+.2f}%)\n"
             else:
                 report += f"{sym:<6} | 次數: {s_count:<3} | 勝率: {s_win:>5.1f}% | 淨利: {pnl_sign}{s_pnl:.2f} USDT\n"
