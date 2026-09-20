@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import pandas as pd
@@ -5,14 +6,16 @@ import numpy as np
 from datetime import datetime, timezone, timedelta
 import math
 
-# ==================== 1. 回測環境與標的設定 (完整 19 檔) ====================
+# ==================== 1. 回測環境與標的設定 ====================
 SYMBOLS = {
     'BTC':   {'interval': '15m', 'mode': 'crypto_ict_fvg'},
     'ETH':   {'interval': '15m', 'mode': 'crypto_ict_fvg'},
     'SOL':   {'interval': '15m', 'mode': 'crypto_ict_fvg'},
     'BNB':   {'interval': '15m', 'mode': 'crypto_ict_fvg'},
     'DOGE':  {'interval': '15m', 'mode': 'crypto_ict_fvg'},
+    
     'XAU':   {'s': 'PAXGUSDT', 'interval': '4h',  'mode': 'gold_macro_donchian'},
+    
     'MSFT':  {'interval': '1h',  'mode': 'stock_pullback'},
     'MU':    {'interval': '1h',  'mode': 'stock_pullback'},
     'TSM':   {'interval': '1h',  'mode': 'stock_pullback'},
@@ -28,11 +31,17 @@ SYMBOLS = {
     'SNDK':  {'interval': '1h',  'mode': 'stock_pullback'}
 }
 
-# ==================== 2. 歷史資料獲取模組 ====================
-def fetch_binance_data(symbol, interval, days=30):
-    """透過 Binance 公開資料 API (data-api.binance.vision) 抓取歷史 K 線資料，避免 GitHub Actions 阻擋"""
-    symbol = symbol if 'USDT' in symbol else f"{symbol}USDT"
-    if symbol == 'XAUUSDT': symbol = 'PAXGUSDT'
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB")
+
+# ==================== 2. 歷史資料獲取模組 (智慧路由版) ====================
+def fetch_binance_data(symbol_key, cfg, days=365):
+    """根據商品屬性自動路由至現貨或合約 API"""
+    symbol = cfg.get('s', f"{symbol_key}USDT")
+    interval = cfg['interval']
+    mode = cfg['mode']
+    
+    # 判斷是否為美股合約標的
+    is_futures_only = (mode == 'stock_pullback') or (symbol_key in ['MSFT', 'MU', 'TSM', 'NVDA'])
     
     end_time = int(time.time() * 1000)
     start_time = end_time - (days * 24 * 60 * 60 * 1000)
@@ -43,12 +52,17 @@ def fetch_binance_data(symbol, interval, days=30):
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     while True:
-        # 使用 data-api.binance.vision 並且 limit 設定為 1000 (Spot API 上限)
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit=1000&startTime={start_time}"
+        if is_futures_only:
+            # 美股標的路由至 fapi (合約)
+            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit=1500&startTime={start_time}"
+        else:
+            # 加密貨幣路由至 data-api (現貨)
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit=1000&startTime={start_time}"
+            
         try:
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code != 200:
-                print(f" HTTP {res.status_code}", end="")
+                print(f" HTTP {res.status_code} 失敗", end="")
                 break
                 
             data = res.json()
@@ -56,17 +70,17 @@ def fetch_binance_data(symbol, interval, days=30):
                 break
             
             all_klines.extend(data)
-            start_time = data[-1][0] + 1 # 從最後一根 K 線的時間往後推
+            start_time = data[-1][0] + 1 
             
             if start_time >= end_time:
                 break
-            time.sleep(0.2) # 稍微拉長一點時間避免觸發限流
+            time.sleep(0.3) # 避免觸發限流
         except Exception as e:
             print(f" Error: {e}", end="")
             break
             
     if not all_klines:
-        print(" 失敗")
+        print("")
         return None
         
     cols = ['t', 'o', 'h', 'l', 'c', 'v', 'ct', 'q', 'n', 'tb', 'tq', 'i']
@@ -74,9 +88,29 @@ def fetch_binance_data(symbol, interval, days=30):
     for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
     df['time'] = pd.to_datetime(df['t'], unit='ms')
     df = df.set_index('time')[['o', 'h', 'l', 'c', 'v']]
-    df = df[~df.index.duplicated(keep='first')] # 移除重複時間
+    df = df[~df.index.duplicated(keep='first')]
     print(f" 完成 ({len(df)} 根K線)")
     return df
+
+def send_discord_safe(content):
+    if not DISCORD_WEBHOOK_URL: return
+    try:
+        if len(content) <= 1900:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=8)
+        else:
+            lines = content.split('\n')
+            chunk, in_code_block = "", False
+            for line in lines:
+                if "```" in line: in_code_block = not in_code_block
+                if len(chunk) + len(line) > 1900:
+                    if in_code_block: chunk += "```\n"
+                    requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=8)
+                    chunk = ("```text\n" if in_code_block else "") + line + "\n"
+                    time.sleep(0.5)
+                else: chunk += line + "\n"
+            if chunk.strip(): requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=8)
+    except Exception as e:
+        print(f"Discord 推播失敗: {e}")
 
 # ==================== 3. 指標與核心邏輯預處理 ====================
 def prepare_backtest_indicators(df, mode):
@@ -84,7 +118,6 @@ def prepare_backtest_indicators(df, mode):
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     
-    # 完美還原實盤 POC 演算法 (滾動 200 根 K 線，50 個區間)
     poc_list = [np.nan] * len(df)
     for i in range(200, len(df)):
         window = df.iloc[i-200:i]
@@ -96,7 +129,7 @@ def prepare_backtest_indicators(df, mode):
     if mode == 'gold_macro_donchian':
         df['dc_high'] = df['h'].shift(1).rolling(20).max()
         df['dc_low'] = df['l'].shift(1).rolling(20).min()
-        df['macro_trend_ma'] = df['c'].rolling(60).mean() # 模擬日線MA60趨勢
+        df['macro_trend_ma'] = df['c'].rolling(60).mean() 
         
     elif mode == 'crypto_ict_fvg':
         df['acc_high'] = df['h'].rolling(25).max()
@@ -139,7 +172,6 @@ class V6Backtester:
                 pos = self.positions[sym]
                 mode = SYMBOLS[sym]['mode']
                 
-                # --- A. 平倉邏輯 (動態 3R/6R + 保本) ---
                 if pos:
                     pnl = 0
                     is_closed = False
@@ -158,7 +190,7 @@ class V6Backtester:
                             self.update_balance(sym, realized_pnl)
                             pos['qty'] *= 0.5
                             pos['tp1_hit'] = True
-                            pos['sl'] = pos['be_target'] # 保本平移
+                            pos['sl'] = pos['be_target'] 
                     
                     elif pos['tp1_hit']:
                         if (pos['side'] == 'LONG' and bar['h'] >= pos['tp2']) or \
@@ -176,10 +208,9 @@ class V6Backtester:
                         self.positions[sym] = None
                         continue
 
-                # --- B. 進場邏輯 (POC 共振 & 箱體極值止損) ---
                 if not self.positions[sym]:
                     current_balance = self.get_balance(sym)
-                    if current_balance <= 50: continue # 破產保護
+                    if current_balance <= 50: continue 
                     
                     sig_side, entry, sl, be_tgt, tp1, tp2 = None, 0, 0, 0, 0, 0
                     
@@ -193,11 +224,9 @@ class V6Backtester:
                             sl = max(bar['dc_high'], bar['poc']) * 1.002
                             
                     elif mode == 'crypto_ict_fvg':
-                        # 簡化回測中的 Bias 判斷：以 200 EMA 作為大級別偏見
                         bias = 'LONG' if bar['c'] > bar['ema200'] else 'SHORT'
-                        
                         if bias == 'LONG':
-                            if bar['c'] >= bar['ema20'] and bar['l'] <= bar['ema50']: # 回踩判定
+                            if bar['c'] >= bar['ema20'] and bar['l'] <= bar['ema50']: 
                                 poc_dist = abs(bar['poc'] - bar['c']) / bar['c']
                                 if poc_dist < 0.008:
                                     defense_line = min(bar['acc_low'], bar['poc'])
@@ -226,7 +255,6 @@ class V6Backtester:
                                     sig_side, entry = 'SHORT', bar['c']
                                     sl = max(bar['ema50'], bar['poc']) * 1.005
 
-                    # 執行 3% 風控開倉
                     if sig_side:
                         risk_dist = abs(entry - sl)
                         if risk_dist > 0:
@@ -269,31 +297,39 @@ class V6Backtester:
 
 # ==================== 5. 主執行區塊 ====================
 if __name__ == '__main__':
-    print("🚀 開始準備歷史數據 (設定為 30 天測試)...")
-    BACKTEST_DAYS = 30
+    BACKTEST_DAYS = 365
+    print(f"🚀 開始準備歷史數據 (設定為 {BACKTEST_DAYS} 天測試)...")
     
     data_dict = {}
-    for sym, cfg in SYMBOLS.items():
-        df_raw = fetch_binance_data(sym, cfg['interval'], days=BACKTEST_DAYS)
+    for sym_key, cfg in SYMBOLS.items():
+        df_raw = fetch_binance_data(sym_key, cfg, days=BACKTEST_DAYS)
         if df_raw is not None and not df_raw.empty:
             df_processed = prepare_backtest_indicators(df_raw, cfg['mode'])
-            data_dict[sym] = df_processed
+            data_dict[sym_key] = df_processed
 
     if not data_dict:
         print("❌ 無法獲取任何資料，程式結束。")
     else:
         print("\n📈 數據準備完成，開始執行回測引擎...")
         
-        # 執行情境 A: 1000u 個別獨立運作 (19檔 = 總本金 19000u)
+        # 執行情境 A: 1000u 個別獨立運作
         print("\n>>> 啟動 Isolated (個別資金池) 回測...")
         bt_isolated = V6Backtester(data_dict, initial_capital=1000, pool_mode='isolated')
         bt_isolated.run_simulation()
-        print(bt_isolated.generate_report())
+        report_isolated = bt_isolated.generate_report()
+        print(report_isolated)
 
-        # 執行情境 B: 1000u 全部共享資金池 (19檔 共用 1000u)
+        # 執行情境 B: 1000u 全部共享資金池
         print("\n>>> 啟動 Shared (共享資金池) 回測...")
         bt_shared = V6Backtester(data_dict, initial_capital=1000, pool_mode='shared')
         bt_shared.run_simulation()
-        print(bt_shared.generate_report())
+        report_shared = bt_shared.generate_report()
+        print(report_shared)
         
-        print("\n✅ 所有回測任務執行完畢！")
+        print("\n✅ 所有回測任務執行完畢！正在推播至 Discord...")
+        
+        # 組合 Discord 推播內容
+        discord_msg = f"```text\n🏆 【V6 POC 共振量化回測完成】 (回測期間: {BACKTEST_DAYS} 天)\n\n"
+        discord_msg += report_isolated + "\n" + report_shared
+        discord_msg += "```"
+        send_discord_safe(discord_msg)
