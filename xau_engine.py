@@ -19,10 +19,7 @@ import yfinance as yf
 from datetime import datetime
 
 # ==================== 1. Webhook 與交易配置 ====================
-DISCORD_WEBHOOK_URL = os.getenv(
-    "DISCORD_WEBHOOK_URL",
-    "https://discord.com/api/webhooks/1543232326446616587/jD-7MeG_ODq-jUjqqHHOi90g0NaiDWzl-ykTZQxlQA_DdWqaQHk1fS4dOdem8Rp5XDJB"
-)
+DISCORD_WEBHOOK_URL = os.getenv( "DISCORD_WEBHOOK_URL")
 
 INITIAL_WALLET = 100.0
 RISK_PCT = 0.01  # 第一套使用 1% 風險
