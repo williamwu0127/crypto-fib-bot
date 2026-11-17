@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas numpy yfinance
 
-      - name: 執行全球市場監控
+      - name: 執行全球市場監控 
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
