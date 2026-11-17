@@ -20,7 +20,7 @@ GLOBAL_SYMBOLS = {
     "DX-Y.NYB": ("美元指數 (DXY)", "全球流動性風向"),
     "CL=F": ("WTI 原油期貨", "通膨與大宗商品"),
     "GC=F": ("黃金期貨 (Gold)", "避險與抗通膨資產"),
-    "BTC-USD": ("比特幣 (Bitcoin)", "高風險偏好資產")
+    "BTC-USD": ("比特幣 (Bitcoin)", "賭徒偏好資產")
 }
 
 def send_msg(payload):
